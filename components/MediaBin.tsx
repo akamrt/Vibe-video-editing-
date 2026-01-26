@@ -1,0 +1,63 @@
+import React from 'react';
+import { MediaItem } from '../types';
+
+interface MediaBinProps {
+  items: MediaItem[];
+  onUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onAddToTimeline: (item: MediaItem) => void;
+  onSelect: (item: MediaItem) => void;
+}
+
+const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, onSelect }) => {
+  return (
+    <div className="flex flex-col h-full bg-[#1e1e1e] border-r border-[#333]">
+      <div className="p-3 border-b border-[#333] flex justify-between items-center bg-[#252525]">
+        <h2 className="text-xs font-bold uppercase tracking-widest text-gray-400">Project Media</h2>
+        <label className="p-1 hover:bg-[#3d3d3d] rounded cursor-pointer transition-colors" title="Import Media">
+          <svg className="w-4 h-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
+          <input type="file" accept="video/*" multiple className="hidden" onChange={onUpload} />
+        </label>
+      </div>
+      
+      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+        {items.length === 0 && (
+          <div className="h-full flex flex-col items-center justify-center text-gray-600 text-[10px] text-center p-4">
+            <svg className="w-8 h-8 mb-2 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" /></svg>
+            Import clips to start
+          </div>
+        )}
+        {items.map(item => (
+          <div 
+            key={item.id} 
+            className="group relative bg-[#2a2a2a] border border-[#333] rounded p-2 hover:border-blue-500 transition-all cursor-pointer"
+            onClick={() => onSelect(item)}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-8 bg-black rounded flex items-center justify-center overflow-hidden">
+                <video src={item.url} className="w-full h-full object-cover opacity-60" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] font-medium truncate text-gray-200">{item.name}</div>
+                <div className="text-[9px] text-gray-500 font-mono">{item.duration.toFixed(1)}s</div>
+              </div>
+              <button 
+                onClick={(e) => { e.stopPropagation(); onAddToTimeline(item); }}
+                className="opacity-0 group-hover:opacity-100 p-1 bg-blue-600 rounded hover:bg-blue-500 transition-all"
+                title="Add to sequence"
+              >
+                <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
+              </button>
+            </div>
+            {item.analysis && (
+              <div className="absolute top-1 right-1">
+                <div className="w-1.5 h-1.5 bg-green-500 rounded-full" title="Analyzed" />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default MediaBin;

@@ -1,0 +1,7 @@
+{
+  "name": "VibeCut AI",
+  "description": "A professional-style video editor (NLE) powered by Gemini. Upload footage, use text prompts to automatically edit based on vibes, content, or audio, and chat with your media assistant.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
