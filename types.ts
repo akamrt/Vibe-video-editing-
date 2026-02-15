@@ -1,4 +1,46 @@
 
+// ============ EXPORT SETTINGS ============
+export type AspectRatioPreset = '16:9' | '9:16' | '1:1' | '4:5' | 'custom';
+
+export interface ExportSettings {
+  aspectRatio: AspectRatioPreset;
+  customAspectRatio?: { width: number; height: number };
+  resolution: '720p' | '1080p' | '4K' | 'custom';
+  customResolution?: { width: number; height: number };
+  format: 'webm';
+  bitrateMbps: number;
+  fps: number;
+}
+
+// ============ VIEWPORT SETTINGS ============
+export interface ViewportSettings {
+  previewAspectRatio: AspectRatioPreset;
+  showOverlay: boolean;
+  overlayOpacity: number;
+}
+
+// ============ KEYFRAME ANIMATION ============
+export interface KeyTangent {
+  x: number; // Frame offset (relative)
+  y: number; // Value offset (relative)
+}
+
+export interface KeyframeConfig {
+  inTangent?: KeyTangent;
+  outTangent?: KeyTangent;
+  broken?: boolean; // If true, tangents move independently
+}
+
+export interface ClipKeyframe {
+  time: number; // Time within clip (relative to clip start, in seconds)
+  translateX: number; // Percentage offset (-100 to 100)
+  translateY: number; // Percentage offset (-100 to 100)
+  scale: number; // 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
+  rotation: number; // Degrees
+  keyframeConfig?: Record<string, KeyframeConfig>; // Per-property tangents
+}
+
+// ============ MEDIA & SEGMENTS ============
 export interface MediaItem {
   id: string;
   file: File;
@@ -29,6 +71,7 @@ export interface Segment {
   color: string;
   transitionIn?: Transition;
   transitionOut?: Transition;
+  keyframes?: ClipKeyframe[]; // Animation keyframes for pan/zoom/rotate within clip
 }
 
 export interface ChatMessage {
@@ -54,6 +97,34 @@ export interface SubtitleStyle {
   italic: boolean;
 }
 
+// ============ TITLE LAYER ============
+export interface TitleStyle {
+  fontFamily: string;
+  fontSize: number; // px
+  color: string;
+  backgroundColor: string;
+  backgroundOpacity: number; // 0-1
+  backgroundType: 'none' | 'box' | 'rounded' | 'stripe' | 'outline';
+  boxBorderColor: string;
+  boxBorderWidth: number; // px
+  boxBorderRadius: number; // px
+  topOffset: number; // % from top (titles typically appear at top or center)
+  textAlign: 'left' | 'center' | 'right';
+  bold: boolean;
+  italic: boolean;
+}
+
+export interface TitleLayer {
+  id: string;
+  text: string; // The hook title text
+  startTime: number; // When the title starts appearing on timeline
+  endTime: number; // When the title fully disappears
+  fadeInDuration: number; // Duration of fade-in effect (seconds)
+  fadeOutDuration: number; // Duration of fade-out effect (seconds)
+  style?: TitleStyle; // Optional style override
+  keyframes?: ClipKeyframe[]; // Animation keyframes for the title
+}
+
 export interface AnalysisEvent {
   startTime: number;
   endTime: number;
@@ -77,6 +148,8 @@ export interface ProjectState {
   activeSegmentIndex: number;
   loopMode: boolean;
   subtitleStyle: SubtitleStyle;
+  titleStyle: TitleStyle;
+  titleLayer: TitleLayer | null; // The title layer for the current project
 }
 
 export enum ProcessingStatus {

@@ -6,19 +6,29 @@ interface MediaBinProps {
   onUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onAddToTimeline: (item: MediaItem) => void;
   onSelect: (item: MediaItem) => void;
+  onYoutubeClick: () => void;
 }
 
-const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, onSelect }) => {
+const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, onSelect, onYoutubeClick }) => {
   return (
-    <div className="flex flex-col h-full bg-[#1e1e1e] border-r border-[#333]">
-      <div className="p-3 border-b border-[#333] flex justify-between items-center bg-[#252525]">
-        <h2 className="text-xs font-bold uppercase tracking-widest text-gray-400">Project Media</h2>
-        <label className="p-1 hover:bg-[#3d3d3d] rounded cursor-pointer transition-colors" title="Import Media">
-          <svg className="w-4 h-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
-          <input type="file" accept="video/*" multiple className="hidden" onChange={onUpload} />
-        </label>
+    <div className="h-full flex flex-col bg-[#1e1e1e] border-r border-[#333]">
+      <div className="p-4 border-b border-[#333] flex justify-between items-center bg-[#252525]">
+        <h2 className="font-bold text-gray-200">Media Bin</h2>
+        <div className="flex gap-2">
+          <button
+            onClick={onYoutubeClick}
+            className="p-1.5 hover:bg-[#333] rounded text-gray-400 hover:text-white"
+            title="Import from YouTube"
+          >
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z" /></svg>
+          </button>
+          <label className="cursor-pointer p-1.5 hover:bg-[#333] rounded text-gray-400 hover:text-white">
+            <input type="file" multiple accept="video/*,audio/*" className="hidden" onChange={onUpload} />
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+          </label>
+        </div>
       </div>
-      
+
       <div className="flex-1 overflow-y-auto p-2 space-y-2">
         {items.length === 0 && (
           <div className="h-full flex flex-col items-center justify-center text-gray-600 text-[10px] text-center p-4">
@@ -27,8 +37,8 @@ const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, o
           </div>
         )}
         {items.map(item => (
-          <div 
-            key={item.id} 
+          <div
+            key={item.id}
             className="group relative bg-[#2a2a2a] border border-[#333] rounded p-2 hover:border-blue-500 transition-all cursor-pointer"
             onClick={() => onSelect(item)}
           >
@@ -40,7 +50,7 @@ const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, o
                 <div className="text-[11px] font-medium truncate text-gray-200">{item.name}</div>
                 <div className="text-[9px] text-gray-500 font-mono">{item.duration.toFixed(1)}s</div>
               </div>
-              <button 
+              <button
                 onClick={(e) => { e.stopPropagation(); onAddToTimeline(item); }}
                 className="opacity-0 group-hover:opacity-100 p-1 bg-blue-600 rounded hover:bg-blue-500 transition-all"
                 title="Add to sequence"

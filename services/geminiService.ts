@@ -14,33 +14,33 @@ const getFileCacheKey = (file: File) => `${file.name}-${file.size}-${file.lastMo
  * @param arrayKey The expected key for the main array (e.g., 'd' or 'events')
  */
 const tryParseChunkedJson = (text: string, arrayKey: string): any => {
-    // 1. Strip Markdown
-    let cleanText = text.replace(/```json|```/g, '').trim();
+  // 1. Strip Markdown
+  let cleanText = text.replace(/```json|```/g, '').trim();
 
-    // 2. Try standard parse
-    try {
-        return JSON.parse(cleanText);
-    } catch (e) {
-        console.warn(`[GeminiService] JSON parse failed, attempting repair for key: ${arrayKey}...`);
-        
-        // 3. Attempt Repair for truncated JSON
-        // We look for the last valid closing object "}," inside the array structure
-        const lastObjectEnd = cleanText.lastIndexOf('},');
-        
-        if (lastObjectEnd !== -1) {
-            // Cut off everything after the last successful object
-            // and forcefully close the array and root object
-            const repaired = cleanText.substring(0, lastObjectEnd + 1) + `]}`;
-            try {
-                const result = JSON.parse(repaired);
-                console.log(`[GeminiService] JSON repaired successfully. Recovered items.`);
-                return result;
-            } catch (e2) {
-                console.error("[GeminiService] JSON repair failed:", e2);
-            }
-        }
-        return {};
+  // 2. Try standard parse
+  try {
+    return JSON.parse(cleanText);
+  } catch (e) {
+    console.warn(`[GeminiService] JSON parse failed, attempting repair for key: ${arrayKey}...`);
+
+    // 3. Attempt Repair for truncated JSON
+    // We look for the last valid closing object "}," inside the array structure
+    const lastObjectEnd = cleanText.lastIndexOf('},');
+
+    if (lastObjectEnd !== -1) {
+      // Cut off everything after the last successful object
+      // and forcefully close the array and root object
+      const repaired = cleanText.substring(0, lastObjectEnd + 1) + `]}`;
+      try {
+        const result = JSON.parse(repaired);
+        console.log(`[GeminiService] JSON repaired successfully. Recovered items.`);
+        return result;
+      } catch (e2) {
+        console.error("[GeminiService] JSON repair failed:", e2);
+      }
     }
+    return {};
+  }
 };
 
 /**
@@ -48,69 +48,69 @@ const tryParseChunkedJson = (text: string, arrayKey: string): any => {
  * This prevents browser crashes by offloading storage and processing to Google's cloud.
  */
 const uploadAndPollFile = async (file: File): Promise<{ mimeType: string; fileUri: string }> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    
-    console.log(`[GeminiService] Starting upload: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-    try {
-        // 1. Upload the file
-        const uploadResponse = await ai.files.upload({
-            file: file,
-            config: { displayName: file.name }
-        });
+  console.log(`[GeminiService] Starting upload: ${file.name} (${(file.size / (1024 * 1024)).toFixed(2)} MB)`);
 
-        // API Response Robustness: Handle if 'file' is nested or the root object
-        // This fixes "Cannot read properties of undefined (reading 'uri')"
-        // @ts-ignore
-        const uploadedFile = uploadResponse.file ?? uploadResponse;
+  try {
+    // 1. Upload the file
+    const uploadResponse = await ai.files.upload({
+      file: file,
+      config: { displayName: file.name }
+    });
 
-        if (!uploadedFile || !uploadedFile.uri) {
-             console.error("Unexpected upload response structure:", uploadResponse);
-             throw new Error("Upload succeeded but file URI was missing from response.");
-        }
+    // API Response Robustness: Handle if 'file' is nested or the root object
+    // This fixes "Cannot read properties of undefined (reading 'uri')"
+    // @ts-ignore
+    const uploadedFile = uploadResponse.file ?? uploadResponse;
 
-        console.log(`[GeminiService] Upload complete. URI: ${uploadedFile.uri}. Status: ${uploadedFile.state}`);
-
-        // 2. Poll until the file is ACTIVE
-        let fileState = uploadedFile.state;
-        let fileName = uploadedFile.name;
-        
-        let attempts = 0;
-        const maxAttempts = 120; // 20 minutes timeout for very large files
-
-        while (fileState === 'PROCESSING') {
-            if (attempts >= maxAttempts) {
-                throw new Error("Video processing timed out on Google servers.");
-            }
-            
-            // Wait 10 seconds
-            await new Promise(resolve => setTimeout(resolve, 10000));
-            
-            // Check status
-            const freshFileResponse = await ai.files.get({ name: fileName });
-            // @ts-ignore
-            const freshFile = freshFileResponse.file ?? freshFileResponse;
-
-            fileState = freshFile.state;
-            attempts++;
-            console.log(`[GeminiService] Processing... (${attempts * 10}s) State: ${fileState}`);
-        }
-
-        if (fileState === 'FAILED') {
-            throw new Error("Video processing failed on Google servers.");
-        }
-
-        console.log(`[GeminiService] File is ACTIVE and ready for analysis.`);
-
-        return {
-            mimeType: uploadedFile.mimeType,
-            fileUri: uploadedFile.uri
-        };
-
-    } catch (error) {
-        console.error("Upload/Processing Error:", error);
-        throw new Error(`Failed to process video: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    if (!uploadedFile || !uploadedFile.uri) {
+      console.error("Unexpected upload response structure:", uploadResponse);
+      throw new Error("Upload succeeded but file URI was missing from response.");
     }
+
+    console.log(`[GeminiService] Upload complete. URI: ${uploadedFile.uri}. Status: ${uploadedFile.state}`);
+
+    // 2. Poll until the file is ACTIVE
+    let fileState = uploadedFile.state;
+    let fileName = uploadedFile.name;
+
+    let attempts = 0;
+    const maxAttempts = 120; // 20 minutes timeout for very large files
+
+    while (fileState === 'PROCESSING') {
+      if (attempts >= maxAttempts) {
+        throw new Error("Video processing timed out on Google servers.");
+      }
+
+      // Wait 10 seconds
+      await new Promise(resolve => setTimeout(resolve, 10000));
+
+      // Check status
+      const freshFileResponse = await ai.files.get({ name: fileName });
+      // @ts-ignore
+      const freshFile = freshFileResponse.file ?? freshFileResponse;
+
+      fileState = freshFile.state;
+      attempts++;
+      console.log(`[GeminiService] Processing... (${attempts * 10}s) State: ${fileState}`);
+    }
+
+    if (fileState === 'FAILED') {
+      throw new Error("Video processing failed on Google servers.");
+    }
+
+    console.log(`[GeminiService] File is ACTIVE and ready for analysis.`);
+
+    return {
+      mimeType: uploadedFile.mimeType,
+      fileUri: uploadedFile.uri
+    };
+
+  } catch (error) {
+    console.error("Upload/Processing Error:", error);
+    throw new Error(`Failed to process video: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 };
 
 /**
@@ -119,49 +119,49 @@ const uploadAndPollFile = async (file: File): Promise<{ mimeType: string; fileUr
  * Checks session cache to avoid re-uploading the same file.
  */
 const prepareMediaPart = async (file: File): Promise<any> => {
-    // Check if it's a video file (by type or extension)
-    const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|mov|avi|mkv|webm)$/i);
+  // Check if it's a video file (by type or extension)
+  const isVideo = file.type.startsWith('video/') || file.name.match(/\.(mp4|mov|avi|mkv|webm)$/i);
 
-    if (isVideo) {
-        const cacheKey = getFileCacheKey(file);
-        
-        // 1. Check Cache
-        if (sessionFileCache.has(cacheKey)) {
-            const cached = sessionFileCache.get(cacheKey)!;
-            console.log(`[GeminiService] Cache Hit: Using existing URI ${cached.uri}`);
-            return {
-                fileData: {
-                    mimeType: cached.mimeType,
-                    fileUri: cached.uri
-                }
-            };
+  if (isVideo) {
+    const cacheKey = getFileCacheKey(file);
+
+    // 1. Check Cache
+    if (sessionFileCache.has(cacheKey)) {
+      const cached = sessionFileCache.get(cacheKey)!;
+      console.log(`[GeminiService] Cache Hit: Using existing URI ${cached.uri}`);
+      return {
+        fileData: {
+          mimeType: cached.mimeType,
+          fileUri: cached.uri
         }
-
-        // 2. Upload if not cached
-        const fileData = await uploadAndPollFile(file);
-        
-        // 3. Store in Cache
-        sessionFileCache.set(cacheKey, { uri: fileData.fileUri, mimeType: fileData.mimeType });
-        
-        return { fileData };
+      };
     }
 
-    // AUDIO/IMAGE: Use Inline (Base64) - usually small enough
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-            const base64String = reader.result as string;
-            const base64 = base64String.split(",")[1];
-            resolve({
-                inlineData: {
-                    mimeType: file.type || 'audio/wav', // Fallback for raw audio blobs
-                    data: base64
-                }
-            });
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-    });
+    // 2. Upload if not cached
+    const fileData = await uploadAndPollFile(file);
+
+    // 3. Store in Cache
+    sessionFileCache.set(cacheKey, { uri: fileData.fileUri, mimeType: fileData.mimeType });
+
+    return { fileData };
+  }
+
+  // AUDIO/IMAGE: Use Inline (Base64) - usually small enough
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64String = reader.result as string;
+      const base64 = base64String.split(",")[1];
+      resolve({
+        inlineData: {
+          mimeType: file.type || 'audio/wav', // Fallback for raw audio blobs
+          data: base64
+        }
+      });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 };
 
 export const analyzeVideoContent = async (
@@ -194,41 +194,41 @@ export const analyzeVideoContent = async (
  * Format: [StartSeconds - EndSeconds] Content
  */
 const parseSubtitleText = (text: string): AnalysisEvent[] => {
-    const lines = text.split('\n');
-    const events: AnalysisEvent[] = [];
-    // Regex matches: [0.00 - 1.20] Text OR [0:00 - 0:02] Text
-    const timeRegex = /\[(\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?)\s*-\s*(\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?)\]\s*(.*)/;
-    
-    const parseTime = (t: string) => {
-        // Handle MM:SS format if model outputs it
-        if (t.includes(':')) {
-            const parts = t.split(':');
-            if (parts.length === 2) return parseFloat(parts[0]) * 60 + parseFloat(parts[1]);
-            if (parts.length === 3) return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
-        }
-        // Handle raw seconds
-        return parseFloat(t);
-    };
+  const lines = text.split('\n');
+  const events: AnalysisEvent[] = [];
+  // Regex matches: [0.00 - 1.20] Text OR [0:00 - 0:02] Text
+  const timeRegex = /\[(\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?)\s*-\s*(\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?)\]\s*(.*)/;
 
-    for (const line of lines) {
-        const match = line.match(timeRegex);
-        if (match) {
-            const start = parseTime(match[1]);
-            const end = parseTime(match[2]);
-            const content = match[3].trim();
-            
-            if (!isNaN(start) && !isNaN(end) && content) {
-                events.push({
-                    startTime: start,
-                    endTime: end,
-                    type: 'dialogue',
-                    label: 'Speaker',
-                    details: content
-                });
-            }
-        }
+  const parseTime = (t: string) => {
+    // Handle MM:SS format if model outputs it
+    if (t.includes(':')) {
+      const parts = t.split(':');
+      if (parts.length === 2) return parseFloat(parts[0]) * 60 + parseFloat(parts[1]);
+      if (parts.length === 3) return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
     }
-    return events;
+    // Handle raw seconds
+    return parseFloat(t);
+  };
+
+  for (const line of lines) {
+    const match = line.match(timeRegex);
+    if (match) {
+      const start = parseTime(match[1]);
+      const end = parseTime(match[2]);
+      const content = match[3].trim();
+
+      if (!isNaN(start) && !isNaN(end) && content) {
+        events.push({
+          startTime: start,
+          endTime: end,
+          type: 'dialogue',
+          label: 'Speaker',
+          details: content
+        });
+      }
+    }
+  }
+  return events;
 };
 
 /**
@@ -239,10 +239,10 @@ const parseSubtitleText = (text: string): AnalysisEvent[] => {
  * 2. Enforces line-by-line format for synchronization accuracy.
  */
 const generateGranularSubtitles = async (mediaPart: any): Promise<AnalysisEvent[]> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    console.log("[GeminiService] Starting granular subtitle generation (Text Mode)...");
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  console.log("[GeminiService] Starting granular subtitle generation (Text Mode)...");
 
-    const prompt = `
+  const prompt = `
       Task: Create accurate subtitles for the ENTIRE duration of the video.
       
       INSTRUCTIONS:
@@ -265,38 +265,38 @@ const generateGranularSubtitles = async (mediaPart: any): Promise<AnalysisEvent[
       - Ensure synchronization.
     `;
 
-    try {
-        const response = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
-            contents: {
-                parts: [mediaPart, { text: prompt }]
-            },
-            config: {
-                // High token limit to allow full video transcription
-                maxOutputTokens: 8192,
-            }
-        });
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: {
+        parts: [mediaPart, { text: prompt }]
+      },
+      config: {
+        // High token limit to allow full video transcription
+        maxOutputTokens: 8192,
+      }
+    });
 
-        const text = response.text || "";
-        const events = parseSubtitleText(text);
-        
-        console.log(`[GeminiService] Parsed ${events.length} subtitle lines.`);
-        return events;
+    const text = response.text || "";
+    const events = parseSubtitleText(text);
 
-    } catch (e) {
-        console.warn("Subtitle generation failed", e);
-        return [];
-    }
+    console.log(`[GeminiService] Parsed ${events.length} subtitle lines.`);
+    return events;
+
+  } catch (e) {
+    console.warn("Subtitle generation failed", e);
+    return [];
+  }
 };
 
 /**
  * Specialized function for Visual Event Analysis using Pro.
  */
 const generateVisualEvents = async (mediaPart: any, customFocus: string): Promise<AnalysisEvent[]> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    console.log("[GeminiService] Starting visual analysis...");
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  console.log("[GeminiService] Starting visual analysis...");
 
-    const prompt = `
+  const prompt = `
       Task: Analyze visual events in this video.
       Focus: ${customFocus || "General key actions and people"}
       
@@ -313,60 +313,82 @@ const generateVisualEvents = async (mediaPart: any, customFocus: string): Promis
       }
     `;
 
-    try {
-        const response = await ai.models.generateContent({
-            model: "gemini-3-pro-preview",
-            contents: {
-                parts: [mediaPart, { text: prompt }]
-            },
-            config: {
-                responseMimeType: "application/json",
-            }
-        });
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-pro-preview",
+      contents: {
+        parts: [mediaPart, { text: prompt }]
+      },
+      config: {
+        responseMimeType: "application/json",
+      }
+    });
 
-        const text = response.text || "{}";
-        const json = tryParseChunkedJson(text, 'events');
-        return Array.isArray(json.events) ? json.events : [];
-    } catch (e) {
-        console.warn("Visual analysis failed", e);
-        return [];
-    }
+    const text = response.text || "{}";
+    const json = tryParseChunkedJson(text, 'events');
+    return Array.isArray(json.events) ? json.events : [];
+  } catch (e) {
+    console.warn("Visual analysis failed", e);
+    return [];
+  }
 };
 
 export const performDeepAnalysis = async (
   videoFile: File,
   duration: number,
   customFocus: string = "",
-  existingAnalysis: VideoAnalysis | null = null
+  existingAnalysis: VideoAnalysis | null = null,
+  options: { skipAudio?: boolean, skipVisual?: boolean } = {}
 ): Promise<VideoAnalysis> => {
-    
-    // Upload & Process Video (or retrieve from cache)
-    const mediaPart = await prepareMediaPart(videoFile);
 
-    // Run Transcription (Flash) and Visual Analysis (Pro) in parallel
-    // This ensures we get high quality subtitles AND deep visual understanding without timeouts
-    try {
-        const [subtitles, visualEvents] = await Promise.all([
-            generateGranularSubtitles(mediaPart),
-            generateVisualEvents(mediaPart, customFocus)
-        ]);
+  // Upload & Process Video (or retrieve from cache)
+  const mediaPart = await prepareMediaPart(videoFile);
 
-        // Merge logic:
-        let finalEvents = [...subtitles, ...visualEvents];
-        
-        // Sort by start time
-        finalEvents.sort((a, b) => a.startTime - b.startTime);
+  // Run Transcription (Flash) and Visual Analysis (Pro) in parallel
+  // This ensures we get high quality subtitles AND deep visual understanding without timeouts
+  try {
+    const promises: Promise<AnalysisEvent[]>[] = [];
 
-        return {
-            summary: "Deep analysis complete (Audio + Visual)",
-            events: finalEvents,
-            generatedAt: new Date()
-        };
-
-    } catch (e) {
-        console.error("Deep analysis failed", e);
-        throw new Error("Failed to perform deep analysis.");
+    if (!options.skipAudio) {
+      promises.push(generateGranularSubtitles(mediaPart));
+    } else {
+      console.log("[GeminiService] Skipping audio analysis (using existing transcript).");
+      promises.push(Promise.resolve([]));
     }
+
+    if (!options.skipVisual) {
+      promises.push(generateVisualEvents(mediaPart, customFocus));
+    } else {
+      promises.push(Promise.resolve([]));
+    }
+
+    const [subtitles, visualEvents] = await Promise.all(promises);
+
+    // Merge logic:
+    let finalEvents = [...subtitles, ...visualEvents];
+
+    // If we are appending to existing analysis (e.g. adding visuals to trusted transcript)
+    if (existingAnalysis && existingAnalysis.events) {
+      // If we skipped audio, we likely want to keep the old dialogue
+      if (options.skipAudio) {
+        const oldDialogue = existingAnalysis.events.filter(e => e.type === 'dialogue');
+        finalEvents = [...finalEvents, ...oldDialogue];
+      }
+    }
+
+    // Sort by start time
+    finalEvents.sort((a, b) => a.startTime - b.startTime);
+
+    return {
+      summary: "Deep analysis complete (Audio + Visual)",
+      events: finalEvents,
+      generatedAt: new Date()
+    };
+
+  } catch (e) {
+    console.error("Deep analysis failed", e);
+    throw new Error("Failed to perform deep analysis.");
+  }
 };
 
 export const chatWithVideoContext = async (
@@ -382,14 +404,14 @@ export const chatWithVideoContext = async (
     let parts: any[] = [{ text: message }];
 
     if (videoFile) {
-        try {
-            // Upload the video context (or retrieve from cache)
-            const mediaPart = await prepareMediaPart(videoFile);
-            parts.unshift(mediaPart);
-        } catch (e) {
-            console.warn("Could not attach video to chat context:", e);
-            parts[0].text += "\n[System Note: Video context unavailable due to upload failure.]";
-        }
+      try {
+        // Upload the video context (or retrieve from cache)
+        const mediaPart = await prepareMediaPart(videoFile);
+        parts.unshift(mediaPart);
+      } catch (e) {
+        console.warn("Could not attach video to chat context:", e);
+        parts[0].text += "\n[System Note: Video context unavailable due to upload failure.]";
+      }
     }
 
     const chat = ai.chats.create({
@@ -397,7 +419,7 @@ export const chatWithVideoContext = async (
       history: history as any,
     });
 
-    const result = await chat.sendMessage(parts.length > 1 ? parts : message);
+    const result = await chat.sendMessage(parts.length > 1 ? parts : [{ text: message }]);
     return result.text || "I couldn't generate a response.";
   } catch (error) {
     console.error("Chat error:", error);
@@ -412,15 +434,15 @@ export const generateVibeEdit = async (
   existingAnalysis: VideoAnalysis | null
 ): Promise<Segment[]> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
+
   // Upload Video (or retrieve from cache)
   const mediaPart = await prepareMediaPart(videoFile);
 
   // Construct the prompt. If analysis exists, we inject it.
   let analysisContext = "";
   if (existingAnalysis) {
-      // Use a limited slice of events to avoid token overflow in edit prompt
-      analysisContext = `
+    // Use a limited slice of events to avoid token overflow in edit prompt
+    analysisContext = `
       PRE-COMPUTED VIDEO ANALYSIS (Use this to locate specific content/people):
       ${JSON.stringify(existingAnalysis.events.slice(0, 150))} 
       (Note: list may be truncated if very long, but contains key events)
@@ -467,18 +489,18 @@ export const generateVibeEdit = async (
       responseSchema: {
         type: Type.OBJECT,
         properties: {
-            segments: {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        startTime: { type: Type.NUMBER },
-                        endTime: { type: Type.NUMBER },
-                        description: { type: Type.STRING },
-                        color: { type: Type.STRING }
-                    }
-                }
+          segments: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                startTime: { type: Type.NUMBER },
+                endTime: { type: Type.NUMBER },
+                description: { type: Type.STRING },
+                color: { type: Type.STRING }
+              }
             }
+          }
         }
       }
     },
@@ -487,12 +509,12 @@ export const generateVibeEdit = async (
   const parseSegments = (json: any) => {
     if (json.segments && Array.isArray(json.segments)) {
       return json.segments.map((s: any, index: number) => ({
-          description: s.description || "Untitled Segment",
-          color: s.color || "#3b82f6",
-          // Robust parsing to handle potential AI quirks or strings
-          startTime: typeof s.startTime === 'number' ? s.startTime : parseFloat(s.startTime || '0'),
-          endTime: typeof s.endTime === 'number' ? s.endTime : parseFloat(s.endTime || '0'),
-          id: `auto-seg-${index}-${Date.now()}`
+        description: s.description || "Untitled Segment",
+        color: s.color || "#3b82f6",
+        // Robust parsing to handle potential AI quirks or strings
+        startTime: typeof s.startTime === 'number' ? s.startTime : parseFloat(s.startTime || '0'),
+        endTime: typeof s.endTime === 'number' ? s.endTime : parseFloat(s.endTime || '0'),
+        id: `auto-seg-${index}-${Date.now()}`
       }));
     }
     return [];
@@ -510,7 +532,7 @@ export const generateVibeEdit = async (
 
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  
+
   // Audio is usually small enough for Base64 inline
   const reader = new FileReader();
   const base64Promise = new Promise<string>((resolve, reject) => {
@@ -531,7 +553,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
       parts: [
         {
           inlineData: {
-            mimeType: "audio/wav", 
+            mimeType: "audio/wav",
             data: base64Audio,
           },
         },

@@ -6,12 +6,19 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node server/server.cjs"
   },
   "dependencies": {
-    "react": "^19.2.3",
+    "@distube/ytdl-core": "^4.16.12",
     "@google/genai": "^1.37.0",
-    "react-dom": "^19.2.3"
+    "@remotion/player": "^4.0.419",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "remotion": "^4.0.419",
+    "youtube-transcript": "^1.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
