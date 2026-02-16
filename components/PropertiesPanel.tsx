@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Segment, Transition, TransitionType, VideoAnalysis, SubtitleStyle, TitleLayer, TitleStyle } from '../types';
+import { Segment, Transition, TransitionType, VideoAnalysis, SubtitleStyle, TitleLayer, TitleStyle, SubtitleTemplate, TextAnimation } from '../types';
+import AnimationControls from './AnimationControls';
 
 interface PropertiesPanelProps {
   selectedSegment: Segment | null;
@@ -11,12 +12,16 @@ interface PropertiesPanelProps {
   mediaAnalysis?: VideoAnalysis | null;
   isTitleSelected?: boolean;
   titleLayer?: TitleLayer | null;
+  activeSubtitleTemplate?: SubtitleTemplate | null;
   onUpdateSegment: (seg: Segment) => void;
   onUpdateTransition: (segId: string, side: 'in' | 'out', transition: Transition | undefined) => void;
   onUpdateDialogueText?: (text: string) => void;
   onUpdateSubtitleStyle?: (style: Partial<SubtitleStyle>) => void;
   onToggleSubtitleUnlink?: () => void;
   onUpdateTitleLayer?: (updates: Partial<TitleLayer>) => void;
+  onUpdateSubtitleTemplate?: (template: SubtitleTemplate) => void;
+  isTemplateUnlinked?: boolean;
+  onToggleTemplateUnlink?: () => void;
   onAnalyze?: (mediaId: string, prompt: string) => void;
   isProcessing?: boolean;
 }
@@ -38,12 +43,16 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   mediaAnalysis,
   isTitleSelected,
   titleLayer,
+  activeSubtitleTemplate,
   onUpdateSegment,
   onUpdateTransition,
   onUpdateDialogueText,
   onUpdateSubtitleStyle,
   onToggleSubtitleUnlink,
   onUpdateTitleLayer,
+  onUpdateSubtitleTemplate,
+  isTemplateUnlinked,
+  onToggleTemplateUnlink,
   onAnalyze,
   isProcessing
 }) => {
@@ -297,6 +306,37 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 </div>
               </div>
 
+              {/* Subtitle Animation Controls */}
+              {activeSubtitleTemplate && onUpdateSubtitleTemplate && (
+                <div className="space-y-4 pt-4 border-t border-[#333]">
+                  <div className="flex justify-between items-center">
+                    <div className="text-[10px] font-bold text-gray-500 uppercase">Animation</div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[9px] text-purple-400">{activeSubtitleTemplate.name}</span>
+                      {onToggleTemplateUnlink && (
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input type="checkbox" checked={!!isTemplateUnlinked} onChange={onToggleTemplateUnlink} className="rounded bg-[#333] border-[#555] text-purple-600 focus:ring-0" />
+                          <span className={`text-[10px] ${isTemplateUnlinked ? 'text-purple-400 font-bold' : 'text-gray-500'}`}>Unlink</span>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                  {isTemplateUnlinked && <div className="text-[9px] text-purple-500/80 -mt-2">Animation affects only this subtitle.</div>}
+                  {!isTemplateUnlinked && <div className="text-[9px] text-gray-600 -mt-2">Animation affects all subtitles.</div>}
+                  <AnimationControls
+                    animation={activeSubtitleTemplate.animation}
+                    onChange={(newAnim: TextAnimation) => onUpdateSubtitleTemplate({ ...activeSubtitleTemplate, animation: newAnim })}
+                  />
+                </div>
+              )}
+              {!activeSubtitleTemplate && (
+                <div className="pt-4 border-t border-[#333]">
+                  <div className="text-[10px] text-gray-600 text-center py-2">
+                    Select a template in the TEMPLATES tab to add animation effects.
+                  </div>
+                </div>
+              )}
+
             </div>
           </div>
         ) : isTitleSelected && titleLayer && onUpdateTitleLayer && titleLayer.style ? (
@@ -311,17 +351,24 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               />
             </div>
 
-            <div className="space-y-3 pt-2 border-t border-[#333]">
-              <div className="text-[10px] font-bold text-gray-500 uppercase">Timing</div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1">
-                  <label className="text-[10px] text-gray-400">Fade In (s)</label>
-                  <input type="number" step="0.1" value={titleLayer.fadeInDuration} onChange={e => onUpdateTitleLayer({ fadeInDuration: parseFloat(e.target.value) })} className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] text-gray-400">Fade Out (s)</label>
-                  <input type="number" step="0.1" value={titleLayer.fadeOutDuration} onChange={e => onUpdateTitleLayer({ fadeOutDuration: parseFloat(e.target.value) })} className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1" />
-                </div>
+            {/* NEW ANIMATION CONTROLS */}
+            <div className="space-y-4 pt-4 border-t border-[#333]">
+              <div className="text-[10px] font-bold text-gray-500 uppercase">Animation</div>
+
+              <AnimationControls
+                animation={titleLayer.animation || {
+                  id: 'custom',
+                  name: 'Custom',
+                  duration: (titleLayer.endTime - titleLayer.startTime),
+                  scope: 'element',
+                  stagger: 0.05,
+                  effects: []
+                }}
+                onChange={(newAnim) => onUpdateTitleLayer!({ animation: newAnim })}
+              />
+
+              {/* Basic Timing (Start/End only, duration derived from animation or explicit) */}
+              <div className="grid grid-cols-2 gap-2 pt-2">
                 <div className="space-y-1">
                   <label className="text-[10px] text-gray-400">Start (s)</label>
                   <input type="number" step="0.1" value={titleLayer.startTime} onChange={e => onUpdateTitleLayer({ startTime: parseFloat(e.target.value) })} className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1" />
@@ -587,6 +634,7 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                   Use custom focus to ask AI to identify specific people, objects, or context in this clip.
                 </p>
               </div>
+
             </>
           )
         )}
