@@ -264,9 +264,312 @@ try {
 }
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyB1srFICGtx-6D1J6giVDnjz6kcf8AbZoc';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const KIMI_API_KEY = process.env.KIMI_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
+
 console.log(`Using Gemini Model: ${GEMINI_MODEL}`);
 console.log(`Using Gemini API Key: ${GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : 'Not Set'}`);
+console.log(`Using Kimi API Key: ${KIMI_API_KEY ? '******' + KIMI_API_KEY.slice(-4) : 'Not Set'}`);
+console.log(`Using OpenAI API Key: ${OPENAI_API_KEY ? '******' + OPENAI_API_KEY.slice(-4) : 'Not Set'}`);
+console.log(`Using MiniMax API Key: ${MINIMAX_API_KEY ? '******' + MINIMAX_API_KEY.slice(-4) : 'Not Set'}`);
+
+// Helper to call Kimi (Moonshot) API
+async function callKimi(prompt, model = 'moonshot-v1-8k', retries = 3) {
+    if (!KIMI_API_KEY) throw new Error("KIMI_API_KEY not set in .env.local");
+
+    const url = 'https://api.moonshot.ai/v1/chat/completions';
+    let attempt = 0;
+
+    while (attempt <= retries) {
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${KIMI_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: [
+                        { role: "system", content: "You are a helpful assistant that outputs only valid JSON." },
+                        { role: "user", content: prompt }
+                    ],
+                    temperature: 0.3
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                if (response.status === 429) {
+                    if (attempt < retries) {
+                        const delay = Math.pow(2, attempt) * 2000;
+                        console.log(`[Kimi] Rate limited (429). Retrying in ${delay / 1000}s...`);
+                        await new Promise(res => setTimeout(res, delay));
+                        attempt++;
+                        continue;
+                    }
+                }
+                throw new Error(`Kimi API Error ${response.status}: ${errorText}`);
+            }
+
+            const data = await response.json();
+            const text = data.choices?.[0]?.message?.content || '{}';
+
+            try {
+                return JSON.parse(text.replace(/```json|```/g, '').trim());
+            } catch (parseError) {
+                console.error('[Kimi] JSON Parse Error:', parseError.message);
+                console.error('Raw Output:', text);
+                throw new Error('Failed to parse Kimi AI response');
+            }
+
+        } catch (error) {
+            if (attempt >= retries) throw error;
+            console.log(`[Kimi] Error: ${error.message}. Retrying...`);
+            attempt++;
+            await new Promise(res => setTimeout(res, 1000));
+        }
+    }
+}
+
+// Helper to call MiniMax API (OpenAI-compatible)
+async function callMiniMax(prompt, model = 'MiniMax-M2', retries = 3) {
+    if (!MINIMAX_API_KEY) throw new Error("MINIMAX_API_KEY not set in .env.local");
+
+    // Official MiniMax OpenAI-compatible endpoint
+    const url = 'https://api.minimax.io/v1/chat/completions';
+    let attempt = 0;
+
+    while (attempt <= retries) {
+        try {
+            console.log(`[MiniMax] Calling model: ${model}, attempt: ${attempt + 1}`);
+            console.log(`[MiniMax] Prompt length: ${prompt.length} chars`);
+            console.log(`[MiniMax] Prompt preview:`, prompt.substring(0, 300));
+
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${MINIMAX_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: [
+                        { role: "system", content: "You are a helpful assistant that outputs only valid JSON. Do not include any thinking, explanation, or markdown formatting — ONLY output the raw JSON object." },
+                        { role: "user", content: prompt }
+                    ],
+                    temperature: 0.1,
+                    max_tokens: 8192,
+                    stream: false
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`[MiniMax] API Error ${response.status}: ${errorText}`);
+
+                if (response.status === 429) {
+                    if (attempt < retries) {
+                        const delay = Math.pow(2, attempt) * 2000;
+                        console.log(`[MiniMax] Rate limited (429). Retrying in ${delay / 1000}s...`);
+                        await new Promise(res => setTimeout(res, delay));
+                        attempt++;
+                        continue;
+                    }
+                }
+                throw new Error(`MiniMax API Error ${response.status}: ${errorText}`);
+            }
+
+            const data = await response.json();
+            console.log('[MiniMax] Raw response keys:', Object.keys(data));
+
+            // MiniMax V2 sometimes returns 200 OK even for errors
+            if (data.base_resp && data.base_resp.status_code && data.base_resp.status_code !== 0) {
+                throw new Error(`MiniMax API Error ${data.base_resp.status_code}: ${data.base_resp.status_msg}`);
+            }
+
+            let text = data.choices?.[0]?.message?.content || '{}';
+            console.log(`[MiniMax] Response text length: ${text.length}`);
+            console.log('[MiniMax] Response preview:', text.substring(0, 300));
+
+            // MiniMax M2/M2.5 are reasoning models that include <think>...</think> tags
+            // in the content field. Strip these before parsing JSON.
+            text = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+            // Strip markdown code blocks if present
+            text = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+
+            console.log('[MiniMax] Cleaned text preview:', text.substring(0, 300));
+
+            try {
+                return JSON.parse(text);
+            } catch (parseError) {
+                console.error('[MiniMax] JSON Parse Error:', parseError.message);
+                console.error('[MiniMax] Cleaned text:', text.substring(0, 500));
+
+                // Try the repair function as fallback
+                const repaired = repairTruncatedJson(text);
+                if (repaired) {
+                    console.log('[MiniMax] Recovered via JSON repair');
+                    return repaired;
+                }
+
+                throw new Error('Failed to parse (MiniMax) AI response');
+            }
+
+        } catch (error) {
+            if (attempt >= retries) throw error;
+            console.log(`[MiniMax] Error: ${error.message}. Retrying...`);
+            attempt++;
+            await new Promise(res => setTimeout(res, 1000));
+        }
+    }
+}
+
+// Helper to call OpenAI API
+async function callOpenAI(prompt, model = 'gpt-4o', retries = 3) {
+    if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY not set in .env.local");
+
+    const url = 'https://api.openai.com/v1/chat/completions';
+    let attempt = 0;
+
+    while (attempt <= retries) {
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${OPENAI_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: [
+                        { role: "system", content: "You are a professional video editor. Output only valid JSON, no markdown." },
+                        { role: "user", content: prompt }
+                    ],
+                    temperature: 0.4,
+                    response_format: { type: "json_object" }
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                if (response.status === 429) {
+                    if (attempt < retries) {
+                        const delay = Math.pow(2, attempt) * 2000;
+                        console.log(`[OpenAI] Rate limited (429). Retrying in ${delay / 1000}s...`);
+                        await new Promise(res => setTimeout(res, delay));
+                        attempt++;
+                        continue;
+                    }
+                }
+                throw new Error(`OpenAI API Error ${response.status}: ${errorText}`);
+            }
+
+            const data = await response.json();
+            const text = data.choices?.[0]?.message?.content || '{}';
+
+            try {
+                return JSON.parse(text.replace(/```json|```/g, '').trim());
+            } catch (parseError) {
+                console.error('[OpenAI] JSON Parse Error:', parseError.message);
+                console.error('[OpenAI] Raw Output:', text);
+                throw new Error('Failed to parse OpenAI response');
+            }
+
+        } catch (error) {
+            if (attempt >= retries) throw error;
+            console.log(`[OpenAI] Error: ${error.message}. Retrying...`);
+            attempt++;
+            await new Promise(res => setTimeout(res, 1000));
+        }
+    }
+}
+
+// Parse transcript lines from "[start - end] text" format
+function parseTranscriptLines(transcript) {
+    const lines = transcript.split('\n');
+    const parsed = [];
+    const regex = /\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.*)/;
+    for (const line of lines) {
+        const match = line.match(regex);
+        if (match) {
+            parsed.push({
+                start: parseFloat(match[1]),
+                end: parseFloat(match[2]),
+                text: match[3].trim()
+            });
+        }
+    }
+    return parsed;
+}
+
+// Look up transcript text for a given time range
+function getTextForTimeRange(transcriptLines, startTime, endTime) {
+    const overlapping = transcriptLines.filter(line =>
+        line.end > startTime && line.start < endTime
+    );
+    return overlapping.map(l => l.text).join(' ').trim() || '';
+}
+
+// Group granular transcript lines into ~30-second passages for better AI comprehension
+function groupIntoPassages(transcriptLines, targetSeconds = 30) {
+    const passages = [];
+    let current = { start: 0, end: 0, texts: [] };
+
+    for (const line of transcriptLines) {
+        if (current.texts.length === 0) {
+            current.start = line.start;
+        }
+        current.end = line.end;
+        current.texts.push(line.text);
+
+        if (current.end - current.start >= targetSeconds) {
+            passages.push(`[${Math.round(current.start)}s - ${Math.round(current.end)}s]\n${current.texts.join(' ')}`);
+            current = { start: 0, end: 0, texts: [] };
+        }
+    }
+    // Flush remaining
+    if (current.texts.length > 0) {
+        passages.push(`[${Math.round(current.start)}s - ${Math.round(current.end)}s]\n${current.texts.join(' ')}`);
+    }
+    return passages.join('\n\n');
+}
+
+// Repair truncated JSON from AI responses
+function repairTruncatedJson(text) {
+    let clean = text.replace(/```json|```/g, '').trim();
+
+    // Try standard parse first
+    try {
+        return JSON.parse(clean);
+    } catch (e) { /* continue to repair */ }
+
+    // Find the last complete object in the clips array
+    const lastCompleteObj = clean.lastIndexOf('},');
+    if (lastCompleteObj !== -1) {
+        // Close the clips array and root object
+        const repaired = clean.substring(0, lastCompleteObj + 1) + '], "totalDuration": 0, "reasoning": "truncated"}';
+        try {
+            const result = JSON.parse(repaired);
+            console.log(`[Gemini] Repaired truncated JSON. Recovered ${result.clips?.length || 0} clips.`);
+            return result;
+        } catch (e2) { /* continue */ }
+    }
+
+    // Try closing just the last object and array
+    const lastBrace = clean.lastIndexOf('}');
+    if (lastBrace !== -1) {
+        const repaired = clean.substring(0, lastBrace + 1) + '], "totalDuration": 0, "reasoning": "truncated"}';
+        try {
+            return JSON.parse(repaired);
+        } catch (e3) { /* give up */ }
+    }
+
+    return null;
+}
 
 // Helper to call Gemini API with retry logic
 async function callGemini(prompt, model = GEMINI_MODEL, retries = 3) {
@@ -324,18 +627,21 @@ async function callGemini(prompt, model = GEMINI_MODEL, retries = 3) {
 
             const data = await response.json();
             const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+            const usageMetadata = data.usageMetadata || null;
 
-            try {
-                return JSON.parse(text.replace(/```json|```/g, '').trim());
-            } catch (parseError) {
-                console.error('[Gemini] JSON Parse Error:', parseError.message);
-                console.error('[Gemini] Raw Text:', text);
-                throw new Error(`Failed to parse AI response: ${parseError.message}. See server logs for raw output.`);
+            // Try clean parse, then repair truncated JSON
+            const parsed = repairTruncatedJson(text);
+            if (parsed) {
+                // Attach usage metadata to result for cost tracking
+                if (usageMetadata) parsed._usageMetadata = usageMetadata;
+                return parsed;
             }
 
+            console.error('[Gemini] JSON Parse Error (unrecoverable)');
+            console.error('[Gemini] Raw Text:', text);
+            throw new Error('Failed to parse AI response: JSON was truncated beyond repair.');
+
         } catch (error) {
-            // If it's the last attempt or not a retryable error that we caught above (unless it's a fetch error which lands here)
-            // Actually, fetch network errors land here. We should retry them too.
             if (attempt >= retries) throw error;
 
             console.log(`[Gemini] Network/Other Error: ${error.message}. Retrying...`);
@@ -349,88 +655,199 @@ async function callGemini(prompt, model = GEMINI_MODEL, retries = 3) {
 // Generate Short endpoint
 app.post('/api/ai/generate-short', async (req, res) => {
     try {
+        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts, model } = req.body;
+
+        if (!transcript || !videoTitle) {
+            return res.status(400).json({ error: 'Missing transcript or videoTitle' });
+        }
+
+        // Parse transcript and group into readable passages
+        const transcriptLines = parseTranscriptLines(transcript);
+        const groupedTranscript = groupIntoPassages(transcriptLines, 30);
+
+        const duration = targetDuration || 60;
+
+        const userPromptSection = prompt?.trim()
+            ? `USER'S CREATIVE DIRECTION: "${prompt}"`
+            : `USER'S CREATIVE DIRECTION: None given — auto-detect the single most powerful, viral-worthy moment.`;
+
+        const refinementSection = refinementInstruction?.trim()
+            ? `\nREFINEMENT (this overrides the original direction): "${refinementInstruction}"`
+            : '';
+
+        const existingShortsSection = (existingShorts && existingShorts.length > 0 && !refinementInstruction)
+            ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
+            : '';
+
+        const aiPrompt = `You are an expert short-form video editor creating a ${duration}-second clip from a sermon.
+
+${userPromptSection}${refinementSection}${existingShortsSection}
+
+SERMON: "${videoTitle}"
+
+TRANSCRIPT (grouped into ~30-second passages):
+${groupedTranscript.substring(0, 15000)}
+
+EDITING RULES:
+1. NARRATIVE ARC — Every short must follow this structure:
+   - HOOK (0-5s): An attention-grabbing opening that makes viewers stop scrolling. Pick the most provocative, emotional, or surprising statement.
+   - BUILD (middle): Context and rising tension. Let the speaker develop the idea.
+   - PAYOFF (end): A satisfying conclusion, "mic drop" moment, or call to action.
+2. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
+3. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds. Never select clips shorter than 10s.
+4. CHRONOLOGICAL — Clips must appear in the order they occur in the sermon.
+5. TOTAL DURATION — All clips combined should be approximately ${duration} seconds.
+6. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
+7. KEYWORDS — For each clip, identify 2-4 words that are PIVOTAL to the narrative arc of this short.
+   These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
+   NOT generic spiritual words (avoid "God", "love", "hope" unless they ARE the narrative crux).
+   Pick words the viewer needs to FEEL — the word that makes the hook provocative, the build tense,
+   or the payoff land. Return them in lowercase.
+
+Return JSON only:
+{
+  "title": "engaging title, max 60 chars",
+  "hookTitle": "MAX 5 WORDS, dramatic and attention-grabbing",
+  "hook": "the opening hook line that grabs attention",
+  "resolution": "the closing payoff line",
+  "clips": [
+    { "startTime": number, "endTime": number, "keywords": ["word1", "word2"] }
+  ],
+  "totalDuration": number
+}`;
+
+        // Use a stronger model for creative editorial decisions
+        const effectiveModel = model || GEMINI_MODEL;
+        console.log('[AI] Generating short for:', videoTitle, '| Model:', effectiveModel);
+
+        let result;
+        if (effectiveModel.startsWith('moonshot')) {
+            result = await callKimi(aiPrompt, effectiveModel);
+        } else if (effectiveModel.startsWith('MiniMax') || effectiveModel.startsWith('abab')) {
+            // Force MiniMax-M2 if not specified correctly for coding plan
+            const modelToUse = effectiveModel.includes('M2') ? effectiveModel : 'MiniMax-M2';
+            result = await callMiniMax(aiPrompt, modelToUse);
+        } else if (effectiveModel.startsWith('gpt-') || effectiveModel.startsWith('o')) {
+            result = await callOpenAI(aiPrompt, effectiveModel);
+        } else {
+            result = await callGemini(aiPrompt, effectiveModel);
+        }
+
+        // Fill in clip text from transcript (AI only returns time ranges)
+        if (result.clips && Array.isArray(result.clips)) {
+            for (const clip of result.clips) {
+                clip.text = getTextForTimeRange(transcriptLines, clip.startTime, clip.endTime);
+                if (clip.keywords && Array.isArray(clip.keywords) && clip.text) {
+                    const words = clip.text.split(/\s+/);
+                    const usedIndices = new Set();
+                    clip.keywords = clip.keywords
+                        .map(kw => {
+                            const kwLower = (typeof kw === 'string' ? kw : '').toLowerCase().replace(/[.,!?;:'"()]/g, '');
+                            if (!kwLower) return null;
+                            const idx = words.findIndex((w, i) =>
+                                !usedIndices.has(i) && w.toLowerCase().replace(/[.,!?;:'"()]/g, '') === kwLower
+                            );
+                            if (idx >= 0) {
+                                usedIndices.add(idx);
+                                return { word: typeof kw === 'string' ? kw : '', wordIndex: idx, enabled: true };
+                            }
+                            return null;
+                        })
+                        .filter(Boolean);
+                } else {
+                    clip.keywords = [];
+                }
+            }
+            // Recalculate totalDuration from actual clips
+            result.totalDuration = result.clips.reduce((sum, c) => sum + (c.endTime - c.startTime), 0);
+        }
+
+        res.json(result);
+
+    } catch (error) {
+        console.error('[AI] Generate short error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Build Short Prompt endpoint (for external AI usage)
+app.post('/api/ai/build-short-prompt', async (req, res) => {
+    try {
         const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts } = req.body;
 
         if (!transcript || !videoTitle) {
             return res.status(400).json({ error: 'Missing transcript or videoTitle' });
         }
 
+        // Parse transcript and group into readable passages
+        const transcriptLines = parseTranscriptLines(transcript);
+        const groupedTranscript = groupIntoPassages(transcriptLines, 30);
+
+        const duration = targetDuration || 60;
+
         const userPromptSection = prompt?.trim()
-            ? `USER REQUEST: "${prompt}"`
-            : `USER REQUEST: None specified. AUTO-DETECT the most viral-worthy content.`;
+            ? `USER'S CREATIVE DIRECTION: "${prompt}"`
+            : `USER'S CREATIVE DIRECTION: None given — auto-detect the single most powerful, viral-worthy moment.`;
 
         const refinementSection = refinementInstruction?.trim()
-            ? `\n\nREFINEMENT INSTRUCTION (Prioritize this over original request): "${refinementInstruction}"\nCONTEXT: The user is refining a previous generation. specific changes requested: ${refinementInstruction}`
+            ? `\nREFINEMENT (this overrides the original direction): "${refinementInstruction}"`
             : '';
 
         const existingShortsSection = (existingShorts && existingShorts.length > 0 && !refinementInstruction)
-            ? `\n\nCONTEXT - PREVIOUSLY GENERATED SHORTS (DO NOT DUPLICATE THESE MOMENTS):
-${existingShorts.map((s, i) => `${i + 1}. "${s.title}" (Time: ${s.startTime}-${s.endTime}s)`).join('\n')}
-INSTRUCTION: Find a DIFFERENT compelling moment from the sermon that hasn't been used yet.`
+            ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
             : '';
 
-        const autoDetectInstructions = !prompt?.trim() ? `
-Since no specific request was given, find the MOST VIRAL content:
-- Powerful emotional stories or testimonies
-- Surprising/countercultural teachings
-- Quotable "mic drop" statements
-- Moments of tension and resolution
-- Universal truths that resonate with wide audiences
-` : '';
+        const aiPrompt = `You are an expert short-form video editor creating a ${duration}-second clip from a sermon.
 
-        const aiPrompt = `
-You are a viral short-form content editor specializing in sermon clips.
-
-TASK: Create a compelling ${targetDuration || 60}-second short from this sermon transcript.
-
-${userPromptSection}
-${refinementSection}
-${existingShortsSection}
-${autoDetectInstructions}
+${userPromptSection}${refinementSection}${existingShortsSection}
 
 SERMON: "${videoTitle}"
 
-TRANSCRIPT (with timestamps):
-${transcript.substring(0, 8000)}
+TRANSCRIPT (grouped into ~30-second passages):
+${groupedTranscript.substring(0, 15000)}
 
-INSTRUCTIONS:
-1. Find the most engaging moments that match the user's request.
-2. Create a HOOK - an attention-grabbing opening (first 3-5 seconds).
-3. Create a HOOK TITLE - a SHORT, PUNCHY title (MAX 5 WORDS) that grabs attention immediately.
-   - Examples: "This Changed Everything", "The Truth About...", "Nobody Talks About This", "What If...", "You Won't Believe This"
-   - Must be dramatic, intriguing, or provocative
-   - Should make viewers want to keep watching
-4. Select clips that tell a complete story with a RESOLUTION at the end.
-5. The total duration should be approximately ${targetDuration || 60} seconds.
-6. Clips must be in chronological order (you cannot rearrange the sermon).
-7. Each clip should be at least 3 seconds long.
+EDITING RULES:
+1. NARRATIVE ARC — Every short must follow this structure:
+   - HOOK (0-5s): An attention-grabbing opening that makes viewers stop scrolling. Pick the most provocative, emotional, or surprising statement.
+   - BUILD (middle): Context and rising tension. Let the speaker develop the idea.
+   - PAYOFF (end): A satisfying conclusion, "mic drop" moment, or call to action.
+2. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
+3. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds. Never select clips shorter than 10s.
+4. CHRONOLOGICAL — Clips must appear in the order they occur in the sermon.
+5. TOTAL DURATION — All clips combined should be approximately ${duration} seconds.
+6. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
+7. KEYWORDS — For each clip, identify 2-4 words that are PIVOTAL to the narrative arc of this short.
+   These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
+   NOT generic spiritual words (avoid "God", "love", "hope" unless they ARE the narrative crux).
+   Pick words the viewer needs to FEEL — the word that makes the hook provocative, the build tense,
+   or the payoff land. Return them in lowercase.
 
-Return valid, parseable JSON with this exact structure (no markdown formatting, no \`\`\`json wrappers):
+return JSON only:
 {
-  "title": "string (catchy title, max 60 chars - ESCAPE QUOTES)",
-  "hookTitle": "string (SHORT PUNCHY TITLE, MAX 5 WORDS - ESCAPE QUOTES)",
-  "hook": "string (hook text - ESCAPE QUOTES)",
-  "resolution": "string (conclusion text - ESCAPE QUOTES)",
-  "clips": [
+  "shorts": [
     {
-      "startTime": number,
-      "endTime": number,
-      "text": "string (transcript text - MUST ESCAPE INNER QUOTES)"
+      "title": "engaging title, max 60 chars",
+      "hookTitle": "MAX 5 WORDS, dramatic and attention-grabbing",
+      "hook": "the opening hook line that grabs attention",
+      "resolution": "the closing payoff line",
+      "clips": [
+        { "startTime": number, "endTime": number, "keywords": ["word1", "word2"] }
+      ],
+      "totalDuration": number
     }
-  ],
-  "totalDuration": number,
-  "reasoning": "string"
+  ]
 }
 
-IMPORTANT: Ensure the response is valid JSON. Escape all double quotes within strings (e.g. "text": "He said \"Hello\""). Do not cut off the JSON.
-`;
+CRITICAL JSON RULES:
+1. Return ONLY the raw JSON object. Do not wrap it in \`\`\`json markdown blocks.
+2. Ensure ALL double quotes inside string values are properly escaped (e.g., \\"word\\").
+3. Do not include any trailing commas.
+4. Start immediately with { and end with }`;
 
-        console.log('[AI] Generating short for:', videoTitle);
-        const result = await callGemini(aiPrompt);
-        res.json(result);
+        res.json({ prompt: aiPrompt });
 
     } catch (error) {
-        console.error('[AI] Generate short error:', error.message);
+        console.error('[AI] Build short prompt error:', error.message);
         res.status(500).json({ error: error.message });
     }
 });

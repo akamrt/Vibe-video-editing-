@@ -31,6 +31,107 @@ const CHANNEL_LABELS = {
 };
 
 type ChannelType = keyof typeof CHANNEL_COLORS;
+const ALL_CHANNELS: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation'];
+const CHANNEL_DEFAULTS: Record<ChannelType, number> = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+
+// ===== Ramer-Douglas-Peucker Simplification =====
+function rdpSimplify(kfs: ClipKeyframe[], tolerance: number, channels: Set<ChannelType>): ClipKeyframe[] {
+    if (kfs.length <= 2) return kfs;
+    const start = kfs[0], end = kfs[kfs.length - 1];
+    const dt = end.time - start.time;
+    if (dt <= 0) return [start, end];
+
+    let maxDist = 0, maxIdx = 0;
+    for (let i = 1; i < kfs.length - 1; i++) {
+        const t = (kfs[i].time - start.time) / dt;
+        let err = 0;
+        for (const ch of channels) {
+            const interp = (start[ch] as number) + t * ((end[ch] as number) - (start[ch] as number));
+            err = Math.max(err, Math.abs((kfs[i][ch] as number) - interp));
+        }
+        if (err > maxDist) { maxDist = err; maxIdx = i; }
+    }
+    if (maxDist > tolerance) {
+        const left = rdpSimplify(kfs.slice(0, maxIdx + 1), tolerance, channels);
+        const right = rdpSimplify(kfs.slice(maxIdx), tolerance, channels);
+        return [...left.slice(0, -1), ...right];
+    }
+    return [start, end];
+}
+
+// ===== Gaussian Keyframe Smoothing =====
+function smoothKeyframeValues(
+    keyframes: ClipKeyframe[],
+    selectedTimes: Set<string>, // empty = smooth ALL keyframes
+    amount: number,             // 0–100
+    channels: Set<ChannelType>
+): ClipKeyframe[] {
+    const sorted = [...keyframes].sort((a, b) => a.time - b.time);
+    const n = sorted.length;
+    if (n < 3 || amount === 0) return sorted;
+
+    // amount 0–100 → radius 1 to n/3 frames
+    const maxRadius = Math.max(2, Math.floor(n / 3));
+    const radius = Math.max(1, Math.round((amount / 100) * maxRadius));
+    const sigma = radius / 2.0;
+
+    return sorted.map((kf, i) => {
+        const key = kf.time.toFixed(3);
+        // If specific keys are targeted, skip non-selected ones
+        if (selectedTimes.size > 0 && !selectedTimes.has(key)) return kf;
+
+        const newKf = { ...kf };
+        for (const ch of channels) {
+            let wSum = 0, wTotal = 0;
+            for (let j = Math.max(0, i - radius); j <= Math.min(n - 1, i + radius); j++) {
+                const dist = Math.abs(i - j);
+                const w = Math.exp(-(dist * dist) / (2 * sigma * sigma));
+                wSum += (sorted[j][ch] as number) * w;
+                wTotal += w;
+            }
+            if (wTotal > 0) (newKf as any)[ch] = wSum / wTotal;
+        }
+        return newKf;
+    });
+}
+
+// ===== Value Clamping (snap similar values together) =====
+function clampKeyframeValues(
+    originals: ClipKeyframe[],
+    selectedTimes: Set<string>,
+    threshold: number,
+    channels: Set<ChannelType>
+): ClipKeyframe[] {
+    const result = originals.map(kf => ({ ...kf }));
+    const selectedIndices: number[] = [];
+    result.forEach((kf, i) => { if (selectedTimes.has(kf.time.toFixed(3))) selectedIndices.push(i); });
+    if (selectedIndices.length <= 1 || threshold <= 0) return result;
+
+    for (const ch of channels) {
+        const indexed = selectedIndices.map(i => ({ idx: i, value: result[i][ch] as number }));
+        indexed.sort((a, b) => a.value - b.value);
+
+        // Group with complete-linkage: compare to group min
+        const groups: (typeof indexed)[] = [];
+        let group = [indexed[0]];
+        for (let i = 1; i < indexed.length; i++) {
+            if (indexed[i].value - group[0].value <= threshold) {
+                group.push(indexed[i]);
+            } else {
+                groups.push(group);
+                group = [indexed[i]];
+            }
+        }
+        groups.push(group);
+
+        for (const g of groups) {
+            if (g.length <= 1) continue;
+            const avg = g.reduce((s, v) => s + v.value, 0) / g.length;
+            for (const v of g) (result[v.idx] as any)[ch] = avg;
+        }
+    }
+    return result;
+}
 
 interface GraphPoint {
     time: number;
@@ -56,6 +157,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const wrapperRef = useRef<HTMLDivElement>(null);
     const [offset, setOffset] = useState({ x: 60, y: 20 });
     const [scale, setScale] = useState({ x: 100, y: 2 }); // Pixels per second, pixels per unit
     const [isDragging, setIsDragging] = useState(false);
@@ -70,6 +172,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         new Set(['translateX', 'translateY', 'scale', 'rotation'])
     );
     const dragAccumulator = useRef(0);
+
+    // Simplify mode state
+    const [simplifyActive, setSimplifyActive] = useState(false);
+    const [simplifyAmount, setSimplifyAmount] = useState(30);
+    const preSimplifyRef = useRef<ClipKeyframe[] | null>(null);
+
+    // Clamp mode state
+    const [clampActive, setClampActive] = useState(false);
+    const [clampAmount, setClampAmount] = useState(0);
+    const preClampRef = useRef<ClipKeyframe[] | null>(null);
+    const clampSelectedRef = useRef<Set<string>>(new Set());
+
+    // Smooth mode state
+    const [smoothActive, setSmoothActive] = useState(false);
+    const [smoothAmount, setSmoothAmount] = useState(50);
+    const preSmoothRef = useRef<ClipKeyframe[] | null>(null);
+    const smoothSelectedRef = useRef<Set<string>>(new Set());
 
     // Use external keyframes if provided, otherwise fall back to segment keyframes
     const keyframes = externalKeyframes ?? segment?.keyframes ?? [];
@@ -200,7 +319,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             if (!activeChannels.has(channel)) return;
 
             const color = CHANNEL_COLORS[channel];
+            const defaultVal = CHANNEL_DEFAULTS[channel];
             const points = keyframes
+                .filter(kf => kf[channel] !== defaultVal) // Hide dots for channels at default value
                 .map(kf => ({ time: kf.time, value: kf[channel] }))
                 .sort((a, b) => a.time - b.time);
 
@@ -374,6 +495,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     const handlePointerDown = (e: React.PointerEvent) => {
+        // Ensure the graph editor container has focus for keyboard events (Delete, Escape, etc.)
+        wrapperRef.current?.focus();
+
         const rect = canvasRef.current?.getBoundingClientRect();
         if (!rect) return;
 
@@ -549,8 +673,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             let foundHandle: { time: number; channel: ChannelType; type: 'in' | 'out' } | null = null;
             let foundKey: GraphPoint | null = null;
 
-            // First check for handle hover (only on selected keyframes)
+            // First check for handle hover (only on selected keyframes, skip default values)
             for (const channel of activeChannels) {
+                const chDefault = CHANNEL_DEFAULTS[channel as ChannelType];
                 for (const [selKey] of selectedKeys) {
                     const kf = keyframes.find(k => {
                         const key = getSelectionKey(k.time, channel);
@@ -559,6 +684,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                     if (kf) {
                         const value = kf[channel as keyof ClipKeyframe] as number;
+                        if (value === chDefault) continue; // Skip handles for default-value channels
                         const config = kf.keyframeConfig?.[channel];
                         const inTangent = config?.inTangent || { x: -0.3, y: 0 };
                         const outTangent = config?.outTangent || { x: 0.3, y: 0 };
@@ -579,10 +705,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (foundHandle) break;
             }
 
-            // Then check for keyframe hover
+            // Then check for keyframe hover (skip channels at default value)
             if (!foundHandle) {
                 for (const channel of activeChannels) {
+                    const chDefault = CHANNEL_DEFAULTS[channel as ChannelType];
                     for (const kf of keyframes) {
+                        if (kf[channel as keyof ClipKeyframe] === chDefault) continue; // Skip default-value dots
                         const screen = worldToScreen(kf.time, kf[channel as keyof ClipKeyframe] as number);
                         if (Math.abs(x - screen.x) < threshold && Math.abs(y - screen.y) < threshold) {
                             foundKey = { time: kf.time, value: kf[channel as keyof ClipKeyframe] as number, channel: channel as ChannelType };
@@ -608,9 +736,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
             const newSelection = new Set<string>();
 
-            // Find all keyframes within the marquee
+            // Find all keyframes within the marquee (skip channels at default value)
             for (const channel of activeChannels) {
+                const chDefault = CHANNEL_DEFAULTS[channel as ChannelType];
                 for (const kf of keyframes) {
+                    if (kf[channel as keyof ClipKeyframe] === chDefault) continue;
                     const screen = worldToScreen(kf.time, kf[channel as keyof ClipKeyframe] as number);
                     if (screen.x >= minX && screen.x <= maxX && screen.y >= minY && screen.y <= maxY) {
                         newSelection.add(getSelectionKey(kf.time, channel as ChannelType));
@@ -632,12 +762,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (!selectedKeys.size && !segment && !isGlobalMode) return;
 
         let newKeyframes = [...keyframes].sort((a, b) => a.time - b.time);
-        const channels = Array.from(activeChannels);
+        const channels: ChannelType[] = Array.from(activeChannels);
 
-        const timesToUpdate = new Set<number>();
+        const timesToUpdate = new Set<string>();
         selectedKeys.forEach(key => {
             const [timeStr] = key.split(':');
-            timesToUpdate.add(parseFloat(timeStr));
+            timesToUpdate.add(timeStr);
         });
 
         if (timesToUpdate.size === 0) return;
@@ -645,7 +775,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         channels.forEach(channel => {
             for (let i = 0; i < newKeyframes.length; i++) {
                 const kf = newKeyframes[i];
-                if (!timesToUpdate.has(kf.time)) continue;
+                if (!timesToUpdate.has(kf.time.toFixed(3))) continue;
 
                 // Find neighbors to determine appropriate handle length
                 const prev = i > 0 ? newKeyframes[i - 1] : null;
@@ -685,16 +815,16 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         // Or actually, if we want to "fix" the curve, we might want to fix specific parts.
 
         let newKeyframes = [...keyframes].sort((a, b) => a.time - b.time);
-        const channels = Array.from(activeChannels);
+        const channels: ChannelType[] = Array.from(activeChannels);
 
         // Group selected keys by time to update them
-        const timesToUpdate = new Set<number>();
+        const timesToUpdate = new Set<string>();
         selectedKeys.forEach(key => {
             const [timeStr] = key.split(':');
-            timesToUpdate.add(parseFloat(timeStr));
+            timesToUpdate.add(timeStr);
         });
 
-        // If nothing selected, maybe apply to all keys in visible range? 
+        // If nothing selected, maybe apply to all keys in visible range?
         // Let's stick to selected keys for precise control.
         if (timesToUpdate.size === 0) return;
 
@@ -702,7 +832,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             // We need to look at all keyframes for context
             for (let i = 0; i < newKeyframes.length; i++) {
                 const kf = newKeyframes[i];
-                if (!timesToUpdate.has(kf.time)) continue;
+                if (!timesToUpdate.has(kf.time.toFixed(3))) continue;
 
                 // Find neighbors
                 const prev = i > 0 ? newKeyframes[i - 1] : null;
@@ -841,19 +971,178 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         onUpdateKeyframes(updatedKeyframes);
     };
 
-    const handleDeleteSelected = () => {
+    // ===== SIMPLIFY =====
+    const applySimplify = useCallback((amount: number, source: ClipKeyframe[]) => {
+        if (source.length <= 2) return;
+        let valueRange = 0;
+        for (const ch of activeChannels) {
+            const vals = source.map(kf => kf[ch] as number);
+            const range = Math.max(...vals) - Math.min(...vals);
+            if (range > valueRange) valueRange = range;
+        }
+        if (valueRange === 0) valueRange = 1;
+        const tolerance = (amount / 100) * valueRange * 0.5;
+        const sorted = [...source].sort((a, b) => a.time - b.time);
+        const simplified = rdpSimplify(sorted, tolerance, activeChannels);
+        onUpdateKeyframes(simplified);
+    }, [activeChannels, onUpdateKeyframes]);
+
+    const handleSimplifyToggle = useCallback(() => {
+        if (simplifyActive) {
+            setSimplifyActive(false);
+            preSimplifyRef.current = null;
+        } else {
+            preSimplifyRef.current = [...keyframes];
+            setSimplifyActive(true);
+            setClampActive(false);
+            preClampRef.current = null;
+            setSimplifyAmount(30);
+            applySimplify(30, keyframes);
+        }
+    }, [simplifyActive, keyframes, applySimplify]);
+
+    const handleSimplifySlider = useCallback((val: number) => {
+        setSimplifyAmount(val);
+        if (preSimplifyRef.current) applySimplify(val, preSimplifyRef.current);
+    }, [applySimplify]);
+
+    // ===== CLAMP =====
+    const applyClamp = useCallback((amount: number, source: ClipKeyframe[], selected: Set<string>) => {
+        if (source.length === 0 || selected.size === 0) return;
+        let valueRange = 0;
+        for (const ch of activeChannels) {
+            const vals = source.filter(kf => selected.has(kf.time.toFixed(3))).map(kf => kf[ch] as number);
+            if (vals.length === 0) continue;
+            const range = Math.max(...vals) - Math.min(...vals);
+            if (range > valueRange) valueRange = range;
+        }
+        if (valueRange === 0) valueRange = 1;
+        // Full range at 100% — guarantees all selected values merge into one group
+        const threshold = (amount / 100) * valueRange;
+        const clamped = clampKeyframeValues(source, selected, threshold, activeChannels);
+        onUpdateKeyframes(clamped);
+    }, [activeChannels, onUpdateKeyframes]);
+
+    const handleClampToggle = useCallback(() => {
+        if (clampActive) {
+            // Exiting clamp mode — auto-refresh tangents for affected keys
+            setClampActive(false);
+            preClampRef.current = null;
+            // Trigger auto tangents on the clamped keys
+            if (selectedKeys.size > 0) {
+                // Use the existing auto tangent logic inline
+                let newKfs = [...keyframes].sort((a, b) => a.time - b.time);
+                const times = new Set<string>();
+                clampSelectedRef.current.forEach(key => { times.add(key.split(':')[0]); });
+                for (const channel of activeChannels) {
+                    for (let i = 0; i < newKfs.length; i++) {
+                        if (!times.has(newKfs[i].time.toFixed(3))) continue;
+                        const prev = i > 0 ? newKfs[i - 1] : null;
+                        const next = i < newKfs.length - 1 ? newKfs[i + 1] : null;
+                        const val = newKfs[i][channel] as number;
+                        let inT = { x: -0.3, y: 0 }, outT = { x: 0.3, y: 0 };
+                        if (prev && next) {
+                            const pv = prev[channel] as number, nv = next[channel] as number;
+                            const dtP = newKfs[i].time - prev.time, dtN = next.time - newKfs[i].time;
+                            if ((val - pv) * (nv - val) < 0) {
+                                inT = { x: -dtP * 0.33, y: 0 };
+                                outT = { x: dtN * 0.33, y: 0 };
+                            } else {
+                                const slope = (nv - pv) / (next.time - prev.time);
+                                inT = { x: -dtP * 0.33, y: -dtP * 0.33 * slope };
+                                outT = { x: dtN * 0.33, y: dtN * 0.33 * slope };
+                            }
+                        }
+                        const cfg = newKfs[i].keyframeConfig || {};
+                        newKfs[i] = { ...newKfs[i], keyframeConfig: { ...cfg, [channel]: { ...(cfg[channel] || {}), inTangent: inT, outTangent: outT } } };
+                    }
+                }
+                onUpdateKeyframes(newKfs);
+            }
+            clampSelectedRef.current = new Set();
+        } else {
+            if (selectedKeys.size === 0) return;
+            preClampRef.current = [...keyframes];
+            clampSelectedRef.current = new Set<string>();
+            selectedKeys.forEach(key => { clampSelectedRef.current.add(key.split(':')[0]); });
+            setClampActive(true);
+            setSimplifyActive(false);
+            preSimplifyRef.current = null;
+            setClampAmount(0);
+        }
+    }, [clampActive, selectedKeys, keyframes, activeChannels, onUpdateKeyframes]);
+
+    const handleClampSlider = useCallback((val: number) => {
+        setClampAmount(val);
+        if (preClampRef.current) applyClamp(val, preClampRef.current, clampSelectedRef.current);
+    }, [applyClamp]);
+
+    // ===== SMOOTH =====
+    const applySmooth = useCallback((amount: number, source: ClipKeyframe[], selected: Set<string>) => {
+        if (source.length < 3) return;
+        const smoothed = smoothKeyframeValues(source, selected, amount, activeChannels);
+        onUpdateKeyframes(smoothed);
+    }, [activeChannels, onUpdateKeyframes]);
+
+    const handleSmoothToggle = useCallback(() => {
+        if (smoothActive) {
+            setSmoothActive(false);
+            preSmoothRef.current = null;
+            smoothSelectedRef.current = new Set();
+        } else {
+            preSmoothRef.current = [...keyframes];
+            // No selection → smooth ALL keys; selection → smooth only those
+            smoothSelectedRef.current = selectedKeys.size > 0
+                ? new Set([...selectedKeys].map(k => k.split(':')[0]))
+                : new Set<string>(); // empty = smooth all in smoothKeyframeValues
+            setSmoothActive(true);
+            setSimplifyActive(false);
+            preSimplifyRef.current = null;
+            setClampActive(false);
+            preClampRef.current = null;
+            setSmoothAmount(50);
+            applySmooth(50, keyframes, smoothSelectedRef.current);
+        }
+    }, [smoothActive, selectedKeys, keyframes, applySmooth]);
+
+    const handleSmoothSlider = useCallback((val: number) => {
+        setSmoothAmount(val);
+        if (preSmoothRef.current) applySmooth(val, preSmoothRef.current, smoothSelectedRef.current);
+    }, [applySmooth]);
+
+    const handleDeleteSelected = useCallback(() => {
         if (selectedKeys.size === 0) return;
 
-        const timesToDelete = new Set<number>();
+        // Parse selected keys into time → set of channels
+        const channelsByTime = new Map<string, Set<string>>();
         selectedKeys.forEach(key => {
-            const [timeStr] = key.split(':');
-            timesToDelete.add(parseFloat(timeStr));
+            const [timeStr, channel] = key.split(':');
+            if (!channelsByTime.has(timeStr)) channelsByTime.set(timeStr, new Set());
+            channelsByTime.get(timeStr)!.add(channel);
         });
 
-        const newKeyframes = keyframes.filter(kf => !timesToDelete.has(kf.time));
+        // Per-channel independent delete: only reset the SELECTED channels to defaults.
+        // Never remove the entire keyframe just because some channels were deleted.
+        // Only remove if ALL 4 channels end up at their default values.
+        const newKeyframes = keyframes.map(kf => {
+            const timeStr = kf.time.toFixed(3);
+            const channels = channelsByTime.get(timeStr);
+            if (!channels) return kf;
+
+            // Reset only the selected channels to their defaults — other channels are untouched
+            const modified = { ...kf };
+            channels.forEach(ch => {
+                if (ch in CHANNEL_DEFAULTS) (modified as any)[ch] = CHANNEL_DEFAULTS[ch];
+            });
+            return modified;
+        }).filter(kf => {
+            // Only remove keyframes where every channel is at its default (truly empty)
+            return kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0;
+        });
+
         onUpdateKeyframes(newKeyframes);
         setSelectedKeys(new Set());
-    };
+    }, [selectedKeys, keyframes, onUpdateKeyframes]);
 
     const toggleChannel = (channel: ChannelType) => {
         const newSet = new Set(activeChannels);
@@ -875,16 +1164,37 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         setOffset({ x: padding, y: 0 });
     };
 
+    const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+        if (e.key === 'Escape') {
+            if (simplifyActive) { setSimplifyActive(false); preSimplifyRef.current = null; return; }
+            if (clampActive) { handleClampToggle(); return; }
+            if (smoothActive) { handleSmoothToggle(); return; }
+        }
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+            if (selectedKeys.size > 0) {
+                e.preventDefault();
+                e.stopPropagation();
+                handleDeleteSelected();
+            }
+        }
+    }, [selectedKeys, handleDeleteSelected, simplifyActive, clampActive, handleClampToggle, smoothActive, handleSmoothToggle]);
+
     if (!visible) return null;
 
     return (
-        <div style={{
-            height: 250,
-            backgroundColor: '#1a1a1a',
-            borderTop: '1px solid #333',
-            display: 'flex',
-            flexDirection: 'column'
-        }}>
+        <div
+            ref={wrapperRef}
+            tabIndex={0}
+            data-graph-editor
+            onKeyDown={handleKeyDown}
+            style={{
+                height: 250,
+                backgroundColor: '#1a1a1a',
+                borderTop: '1px solid #333',
+                display: 'flex',
+                flexDirection: 'column',
+                outline: 'none',
+            }}>
             {/* Toolbar */}
             <div style={{
                 height: 40,
@@ -996,6 +1306,173 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     Delete
                 </button>
 
+                <div style={{ width: 1, height: 20, backgroundColor: '#444' }} />
+
+                <button
+                    onClick={handleSimplifyToggle}
+                    disabled={keyframes.length <= 2}
+                    style={{
+                        padding: '4px 12px',
+                        borderRadius: 4,
+                        border: simplifyActive ? '1px solid #22d3ee' : '1px solid #444',
+                        backgroundColor: simplifyActive ? '#22d3ee20' : '#333',
+                        color: simplifyActive ? '#22d3ee' : keyframes.length > 2 ? '#22d3ee' : '#666',
+                        fontSize: 12,
+                        cursor: keyframes.length > 2 ? 'pointer' : 'not-allowed'
+                    }}
+                    title="Simplify curve — reduce keyframes (RDP)"
+                >
+                    Simplify
+                </button>
+
+                <button
+                    onClick={handleClampToggle}
+                    disabled={!clampActive && selectedKeys.size === 0}
+                    style={{
+                        padding: '4px 12px',
+                        borderRadius: 4,
+                        border: clampActive ? '1px solid #a78bfa' : '1px solid #444',
+                        backgroundColor: clampActive ? '#a78bfa20' : '#333',
+                        color: clampActive ? '#a78bfa' : selectedKeys.size > 0 ? '#a78bfa' : '#666',
+                        fontSize: 12,
+                        cursor: (!clampActive && selectedKeys.size === 0) ? 'not-allowed' : 'pointer'
+                    }}
+                    title={clampActive ? "Turn off Clamp" : selectedKeys.size > 0 ? "Clamp selected values" : "Clamp (Select keys first)"}
+                >
+                    Clamp
+                </button>
+
+                <button
+                    onClick={handleSmoothToggle}
+                    disabled={keyframes.length < 3}
+                    style={{
+                        padding: '4px 12px',
+                        borderRadius: 4,
+                        border: smoothActive ? '1px solid #34d399' : '1px solid #444',
+                        backgroundColor: smoothActive ? '#34d39920' : '#333',
+                        color: smoothActive ? '#34d399' : keyframes.length >= 3 ? '#34d399' : '#666',
+                        fontSize: 12,
+                        cursor: keyframes.length < 3 ? 'not-allowed' : 'pointer'
+                    }}
+                    title={smoothActive
+                        ? 'Turn off Smooth'
+                        : selectedKeys.size > 0
+                            ? 'Smooth selected keyframes (Gaussian)'
+                            : 'Smooth all keyframes (Gaussian) — select keys to limit scope'}
+                >
+                    Smooth
+                </button>
+
+                <div style={{ width: 1, height: 20, backgroundColor: '#444' }} />
+
+                <button
+                    onClick={() => {
+                        // Clear Y: Reset translateY to 0 on ALL keyframes, unconditionally
+                        const newKeyframes = keyframes.map(kf => ({
+                            ...kf,
+                            translateY: 0,
+                        })).filter(kf => {
+                            // Remove keyframes that are now all-default
+                            return kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0;
+                        });
+                        onUpdateKeyframes(newKeyframes);
+                        setSelectedKeys(new Set());
+                    }}
+                    style={{
+                        padding: '4px 12px',
+                        borderRadius: 4,
+                        border: '1px solid #444',
+                        backgroundColor: '#333',
+                        color: '#ff4444',
+                        fontSize: 12,
+                        cursor: 'pointer'
+                    }}
+                    title="Clear all keyframes for active channels"
+                >
+                    Clear Y
+                </button>
+
+                <button
+                    onClick={() => {
+                        // Match Previous (<)
+                        if (selectedKeys.size === 0) return;
+
+                        // Sort keyframes by time
+                        const sorted = [...keyframes].sort((a, b) => a.time - b.time);
+                        const newKfs = [...keyframes];
+
+                        selectedKeys.forEach(key => {
+                            const [timeStr, ch] = key.split(':');
+                            const time = parseFloat(timeStr);
+                            const kfIndex = newKfs.findIndex(k => Math.abs(k.time - time) < 0.001);
+                            if (kfIndex <= 0) return; // No previous
+
+                            // Find previous keyframe index
+                            // Since we allow multiselect, we should look at original sorted list
+                            // But we act on newKfs. 
+                            // Simplest: Find index in sorted, take value from sorted[index-1]
+                            const sortedIdx = sorted.findIndex(k => Math.abs(k.time - time) < 0.001);
+                            if (sortedIdx > 0) {
+                                const prevVal = sorted[sortedIdx - 1][ch as ChannelType];
+                                if (kfIndex !== -1) (newKfs[kfIndex] as any)[ch] = prevVal;
+                            }
+                        });
+                        onUpdateKeyframes(newKfs);
+                    }}
+                    disabled={selectedKeys.size === 0}
+                    style={{
+                        padding: '4px 8px',
+                        borderRadius: 4,
+                        border: '1px solid #444',
+                        backgroundColor: '#333',
+                        color: selectedKeys.size > 0 ? '#fff' : '#666',
+                        fontSize: 12,
+                        cursor: selectedKeys.size > 0 ? 'pointer' : 'not-allowed'
+                    }}
+                    title="Match value of previous keyframe"
+                >
+                    &lt; Match
+                </button>
+
+                <button
+                    onClick={() => {
+                        // Match Next (>)
+                        if (selectedKeys.size === 0) return;
+
+                        const sorted = [...keyframes].sort((a, b) => a.time - b.time);
+                        const newKfs = [...keyframes];
+
+                        selectedKeys.forEach(key => {
+                            const [timeStr, ch] = key.split(':');
+                            const time = parseFloat(timeStr);
+                            const kfIndex = newKfs.findIndex(k => Math.abs(k.time - time) < 0.001);
+                            if (kfIndex === -1) return;
+
+                            const sortedIdx = sorted.findIndex(k => Math.abs(k.time - time) < 0.001);
+                            if (sortedIdx !== -1 && sortedIdx < sorted.length - 1) {
+                                const nextVal = sorted[sortedIdx + 1][ch as ChannelType];
+                                (newKfs[kfIndex] as any)[ch] = nextVal;
+                            }
+                        });
+                        onUpdateKeyframes(newKfs);
+                    }}
+                    disabled={selectedKeys.size === 0}
+                    style={{
+                        padding: '4px 8px',
+                        borderRadius: 4,
+                        border: '1px solid #444',
+                        backgroundColor: '#333',
+                        color: selectedKeys.size > 0 ? '#fff' : '#666',
+                        fontSize: 12,
+                        cursor: selectedKeys.size > 0 ? 'pointer' : 'not-allowed'
+                    }}
+                    title="Match value of next keyframe"
+                >
+                    Match &gt;
+                </button>
+
+                <div style={{ width: 1, height: 20, backgroundColor: '#444' }} />
+
                 <button
                     onClick={fitToView}
                     style={{
@@ -1026,6 +1503,49 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     ✕
                 </button>
             </div>
+
+            {/* Simplify / Clamp / Smooth slider bar */}
+            {(simplifyActive || clampActive || smoothActive) && (
+                <div style={{
+                    height: 32, padding: '0 12px', display: 'flex', alignItems: 'center', gap: 10,
+                    borderBottom: '1px solid #333', backgroundColor: '#1e1e1e', fontSize: 11
+                }}>
+                    <span style={{
+                        color: simplifyActive ? '#22d3ee' : clampActive ? '#a78bfa' : '#34d399',
+                        fontWeight: 600, minWidth: 60
+                    }}>
+                        {simplifyActive ? 'Tolerance' : clampActive ? 'Threshold' : 'Strength'}
+                    </span>
+                    <input
+                        type="range" min={0} max={100} step={1}
+                        value={simplifyActive ? simplifyAmount : clampActive ? clampAmount : smoothAmount}
+                        onChange={e => {
+                            const v = Number(e.target.value);
+                            if (simplifyActive) handleSimplifySlider(v);
+                            else if (clampActive) handleClampSlider(v);
+                            else handleSmoothSlider(v);
+                        }}
+                        style={{
+                            flex: 1,
+                            accentColor: simplifyActive ? '#22d3ee' : clampActive ? '#a78bfa' : '#34d399',
+                            height: 4
+                        }}
+                    />
+                    <span style={{ color: '#888', fontFamily: 'monospace', minWidth: 30, textAlign: 'right' }}>
+                        {simplifyActive ? simplifyAmount : clampActive ? clampAmount : smoothAmount}%
+                    </span>
+                    <span style={{ color: '#666', fontSize: 10 }}>
+                        {simplifyActive
+                            ? `${keyframes.length} keys`
+                            : clampActive
+                                ? `${clampSelectedRef.current.size} keys`
+                                : smoothSelectedRef.current.size > 0
+                                    ? `${smoothSelectedRef.current.size} keys`
+                                    : `${keyframes.length} keys (all)`
+                        }
+                    </span>
+                </div>
+            )}
 
             {/* Canvas */}
             <div ref={containerRef} style={{ flex: 1, position: 'relative' }}>

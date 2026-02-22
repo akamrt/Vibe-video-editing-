@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Generated files
+*player-script.js
+screenshots/
+temp_downloads/
+cookies.txt
+www.youtube.com_cookies.txt
+*.vtt
