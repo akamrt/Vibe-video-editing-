@@ -1,17 +1,17 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import Timeline from './components/Timeline';
-import ChatPanel from './components/ChatPanel';
+
 import TranscriptPanel from './components/TranscriptPanel';
 import PropertiesPanel from './components/PropertiesPanel';
 import MediaBin from './components/MediaBin';
 import ViewportOverlay from './components/ViewportOverlay';
 import ExportModal from './components/ExportModal';
 import GraphEditor from './components/GraphEditor';
-import { ProjectState, Segment, ChatMessage, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord } from './types';
+import { ProjectState, Segment, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord } from './types';
 import RemotionPreview from './components/remotion/RemotionPreview';
 import TemplateManager from './components/remotion/TemplateManager';
 import AnimatedText from './components/remotion/AnimatedText';
-import { analyzeVideoContent, generateVibeEdit, chatWithVideoContext, transcribeAudio, performDeepAnalysis, detectPersonPosition, detectFillerWords, detectFillersFromTranscript, redetectFillerWords, redetectFillersFromTranscript, FillerDetection } from './services/geminiService';
+import { analyzeVideoContent, transcribeAudio, performDeepAnalysis, detectPersonPosition, detectFillerWords, detectFillersFromTranscript, redetectFillerWords, redetectFillersFromTranscript, FillerDetection } from './services/geminiService';
 import FillerConfirmModal from './components/FillerConfirmModal';
 import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
 import { YoutubeImportModal } from './components/YoutubeImportModal';
@@ -164,9 +164,10 @@ function App() {
   }, []);
 
   // Persistence Loading (with migration for new fields)
+  const hasLoadedRef = useRef(false);
   useEffect(() => {
     clearAudioBufferCache(); // Clear stale audio caches from any prior session
-    contentDB.getProject().then(saved => {
+    contentDB.getProject().then(async (saved) => {
       if (saved) {
         setProject({
           ...INITIAL_STATE,
@@ -176,13 +177,53 @@ function App() {
           activeKeywordAnimation: saved.activeKeywordAnimation ?? null,
         });
         console.log('Project loaded from storage');
+      } else {
+        // No saved project — still restore user style/template preferences
+        const prefs = await contentDB.getPreferences();
+        if (prefs) {
+          setProject(prev => ({
+            ...prev,
+            subtitleStyle: prefs.subtitleStyle,
+            titleStyle: prefs.titleStyle,
+            activeSubtitleTemplate: prefs.activeSubtitleTemplate,
+            activeTitleTemplate: prefs.activeTitleTemplate,
+            activeKeywordAnimation: prefs.activeKeywordAnimation,
+          }));
+          console.log('User preferences restored');
+        }
       }
+      hasLoadedRef.current = true;
     });
   }, []);
 
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: '1', role: 'model', text: 'Welcome to VibeCut Pro. Upload clips to the Media Bin to begin editing.', timestamp: new Date() }
-  ]);
+  // Auto-save: debounce project state changes to IndexedDB
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!hasLoadedRef.current) return; // Don't save until initial load completes
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      contentDB.saveProject(project).catch(e => console.warn('Auto-save failed:', e));
+    }, 1500);
+    return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
+  }, [project]);
+
+  // Auto-save user preferences (styles/templates) - persists across New Project
+  const prefSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!hasLoadedRef.current) return;
+    if (prefSaveTimerRef.current) clearTimeout(prefSaveTimerRef.current);
+    prefSaveTimerRef.current = setTimeout(() => {
+      contentDB.savePreferences({
+        subtitleStyle: project.subtitleStyle,
+        titleStyle: project.titleStyle,
+        activeSubtitleTemplate: project.activeSubtitleTemplate,
+        activeTitleTemplate: project.activeTitleTemplate,
+        activeKeywordAnimation: project.activeKeywordAnimation,
+      }).catch(e => console.warn('Preferences save failed:', e));
+    }, 1500);
+    return () => { if (prefSaveTimerRef.current) clearTimeout(prefSaveTimerRef.current); };
+  }, [project.subtitleStyle, project.titleStyle, project.activeSubtitleTemplate, project.activeTitleTemplate, project.activeKeywordAnimation]);
+
   const [status, setStatus] = useState<ProcessingStatus>(ProcessingStatus.IDLE);
   const [centeringProgress, setCenteringProgress] = useState('');
   const [outOfZoneThreshold, setOutOfZoneThreshold] = useState(0); // % distance from center before centering (0=always follow)
@@ -204,13 +245,11 @@ function App() {
   const [autoCenterOnImport, setAutoCenterOnImport] = useState(false);
   const [trackingZoom, setTrackingZoom] = useState(1);
   const [trackingPan, setTrackingPan] = useState({ x: 0, y: 0 });
-  const [editPrompt, setEditPrompt] = useState('');
-
   // Left Panel State (Media Bin vs Properties)
   const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'properties'>('media');
 
   // Right Panel State
-  const [activeRightTab, setActiveRightTab] = useState<'chat' | 'transcript' | 'templates' | 'tracking'>('chat');
+  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking'>('transcript');
 
   // Reset zoom/pan when leaving tracking tab
   useEffect(() => {
@@ -237,7 +276,6 @@ function App() {
   const [isCaching, setIsCaching] = useState(false);
   const [rippleMode, setRippleMode] = useState(true);
   const [snappingEnabled, setSnappingEnabled] = useState(true);
-  const [isChatLoading, setIsChatLoading] = useState(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [isSaving, setIsSaving] = useState(false);
   const [showYoutubeModal, setShowYoutubeModal] = useState(false);
@@ -2765,22 +2803,6 @@ function App() {
     }
   };
 
-  const handleVibeEdit = async () => {
-    const activeMedia = project.library.find(m => m.id === selectedMediaId) || currentTopMedia;
-    if (!activeMedia || !editPrompt) return;
-    setStatus(ProcessingStatus.EDITING);
-    try {
-      const newSegs = await generateVibeEdit(activeMedia.file, editPrompt, activeMedia.duration, activeMedia.analysis);
-      let cursor = 0;
-      const mappedSegs = newSegs.map(s => {
-        const seg = { ...s, mediaId: activeMedia.id, timelineStart: cursor, track: 0 };
-        cursor += (s.endTime - s.startTime);
-        return seg;
-      });
-      setProject(prev => ({ ...prev, segments: mappedSegs, currentTime: 0 }));
-    } catch (e) { console.error(e); } finally { setStatus(ProcessingStatus.IDLE); }
-  };
-
   const autoCenterSegment = async (segmentId: string, startTime: number, endTime: number, timelineStart?: number) => {
     autoCenteringRef.current = true;
     setStatus(ProcessingStatus.CENTERING);
@@ -3650,48 +3672,6 @@ function App() {
     });
   };
 
-  const handleChat = async (text: string) => {
-    const userMsg: ChatMessage = {
-      id: Date.now().toString(),
-      role: 'user',
-      text,
-      timestamp: new Date()
-    };
-    setMessages(prev => [...prev, userMsg]);
-    setIsChatLoading(true);
-
-    try {
-      const historyForModel = messages.map(m => ({
-        role: m.role === 'model' ? 'model' : 'user',
-        parts: [{ text: m.text }]
-      }));
-
-      const activeMedia = project.library.find(m => m.id === selectedMediaId) || currentTopMedia;
-
-      const responseText = await chatWithVideoContext(historyForModel, text, activeMedia?.file || null);
-
-      const modelMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        text: responseText,
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, modelMsg]);
-
-    } catch (e) {
-      console.error("Chat error", e);
-      const errorMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        text: "Sorry, I encountered an error. Please try again.",
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, errorMsg]);
-    } finally {
-      setIsChatLoading(false);
-    }
-  };
-
   // Helper to build text-shadow CSS from style effects
   // Returns main effects for the text element plus separate blend-mode layers
   const buildTextEffects = (s: SubtitleStyle | TitleStyle) => {
@@ -4274,6 +4254,26 @@ function App() {
               >
                 {isSaving ? '💾 Saving...' : '💾 Save Project'}
               </button>
+              <button
+                onClick={async () => {
+                  if (!confirm('Start a new project? This will clear all clips, segments, and settings.')) return;
+                  // Revoke existing blob URLs to free memory
+                  project.library.forEach(item => { if (item.url) URL.revokeObjectURL(item.url); });
+                  await contentDB.clearProject();
+                  const prefs = await contentDB.getPreferences();
+                  setProject(prefs ? {
+                    ...INITIAL_STATE,
+                    subtitleStyle: prefs.subtitleStyle,
+                    titleStyle: prefs.titleStyle,
+                    activeSubtitleTemplate: prefs.activeSubtitleTemplate,
+                    activeTitleTemplate: prefs.activeTitleTemplate,
+                    activeKeywordAnimation: prefs.activeKeywordAnimation,
+                  } : INITIAL_STATE);
+                }}
+                className="px-3 py-1 text-xs rounded font-medium text-gray-400 hover:text-white hover:bg-red-600/30 border border-transparent hover:border-red-500/50"
+              >
+                New Project
+              </button>
               <div className="w-px h-6 bg-[#444] mx-1"></div>
               <button
                 onClick={() => setActivePage('editor')}
@@ -4833,13 +4833,11 @@ function App() {
           <div className="w-80 border-l border-[#333] flex flex-col bg-[#1e1e1e]">
             <div className="flex-1 flex flex-col min-h-0">
               <div className="flex border-b border-[#333] bg-[#252525]">
-                <button onClick={() => setActiveRightTab('chat')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'chat' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>CHAT</button>
                 <button onClick={() => setActiveRightTab('transcript')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'transcript' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>TRANSCRIPT</button>
                 <button onClick={() => setActiveRightTab('templates')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'templates' ? 'bg-[#333] text-purple-400 border-b-2 border-purple-400' : 'text-gray-400'}`}>TEMPLATES</button>
                 <button onClick={() => setActiveRightTab('tracking')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'tracking' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400'}`}>TRACKING</button>
               </div>
               <div className="flex-1 overflow-hidden">
-                {activeRightTab === 'chat' && <ChatPanel messages={messages} onSendMessage={handleChat} isLoading={isChatLoading} />}
                 {activeRightTab === 'templates' && (
                   <TemplateManager
                     currentSubtitleStyle={project.subtitleStyle}
@@ -4954,9 +4952,6 @@ function App() {
             </div>
             {activeBottomTab === 'timeline' && (
               <>
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">AI Vibe Editor</div>
-                <input value={editPrompt} onChange={e => setEditPrompt(e.target.value)} placeholder="E.g. 'Shorten the video to highlights'" className="flex-1 bg-[#121212] border border-[#333] rounded px-3 py-1 text-xs text-white focus:border-blue-500 outline-none" />
-                <button onClick={handleVibeEdit} disabled={status !== ProcessingStatus.IDLE} className="px-3 py-1 bg-blue-600 rounded text-xs font-bold hover:bg-blue-500 disabled:opacity-50">Generate Sequence</button>
                 {selectedDialogues.length >= 2 && (
                   <button onClick={handleMergeDialogues} className="px-2 py-1 text-xs font-bold bg-purple-600 text-white rounded hover:bg-purple-500">
                     Merge {selectedDialogues.length} Subtitles

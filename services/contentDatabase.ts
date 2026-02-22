@@ -5,7 +5,7 @@
  * Simple, free, and local - perfect for 100+ sermons with text and timestamps.
  */
 
-import { ProjectState, MediaItem, KeywordEmphasis } from '../types';
+import { ProjectState, MediaItem, KeywordEmphasis, SubtitleStyle, TitleStyle, SubtitleTemplate, TextAnimation } from '../types';
 
 // ==================== Types ====================
 
@@ -62,7 +62,7 @@ export interface ShortSegment {
 // ==================== Database Class ====================
 
 const DB_NAME = 'ContentLibraryDB';
-const DB_VERSION = 3; // Incremented to add 'costLog' store
+const DB_VERSION = 4; // Incremented to add 'userPreferences' store
 
 class ContentDatabase {
     private db: IDBDatabase | null = null;
@@ -126,6 +126,11 @@ class ContentDatabase {
                 if (!db.objectStoreNames.contains('costLog')) {
                     const costStore = db.createObjectStore('costLog', { keyPath: 'id', autoIncrement: true });
                     costStore.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+
+                // User preferences store (persists across projects)
+                if (!db.objectStoreNames.contains('userPreferences')) {
+                    db.createObjectStore('userPreferences', { keyPath: 'id' });
                 }
 
                 console.log('Database schema created/updated');
@@ -467,6 +472,55 @@ class ContentDatabase {
                 }
 
                 resolve(projectState as ProjectState);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async clearProject(): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('projects', 'readwrite');
+            const request = store.delete('current_project');
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    // ==================== User Preferences ====================
+
+    async savePreferences(prefs: {
+        subtitleStyle: SubtitleStyle;
+        titleStyle: TitleStyle;
+        activeSubtitleTemplate: SubtitleTemplate | null;
+        activeTitleTemplate: SubtitleTemplate | null;
+        activeKeywordAnimation: TextAnimation | null;
+    }): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('userPreferences', 'readwrite');
+            const request = store.put({ ...prefs, id: 'user_preferences' });
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async getPreferences(): Promise<{
+        subtitleStyle: SubtitleStyle;
+        titleStyle: TitleStyle;
+        activeSubtitleTemplate: SubtitleTemplate | null;
+        activeTitleTemplate: SubtitleTemplate | null;
+        activeKeywordAnimation: TextAnimation | null;
+    } | null> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('userPreferences');
+            const request = store.get('user_preferences');
+            request.onsuccess = () => {
+                const result = request.result;
+                if (!result) { resolve(null); return; }
+                const { id, ...prefs } = result;
+                resolve(prefs);
             };
             request.onerror = () => reject(request.error);
         });

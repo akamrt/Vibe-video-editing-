@@ -34,7 +34,7 @@ const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
     // Pre-parse words so we can render them individually
     const wordsByEvent = useMemo(() => {
         return dialogueEvents.map((event, globalIndex) => {
-            const rawWords = event.details.split(/\s+/).filter(w => w.trim().length > 0);
+            const rawWords = (event.details?.split(/\s+/) || []).filter(w => w.trim().length > 0);
             const totalChars = rawWords.join('').length;
             const duration = event.endTime - event.startTime;
 
@@ -46,7 +46,7 @@ const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
                 const wordEnd = event.startTime + (duration * (charsSoFar / totalChars));
 
                 return {
-                    id: `${mediaId}-${globalIndex}-${wordIndex}`,
+                    id: `${mediaId || 'none'}-${globalIndex}-${wordIndex}`,
                     text,
                     startTime: wordStart,
                     endTime: wordEnd,
