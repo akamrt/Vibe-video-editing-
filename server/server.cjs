@@ -304,7 +304,7 @@ try {
     const envPath = path.join(__dirname, '..', '.env.local');
     if (fs.existsSync(envPath)) {
         const envConfig = fs.readFileSync(envPath, 'utf8');
-        envConfig.split('\n').forEach(line => {
+        envConfig.split(/\r?\n/).forEach(line => {
             const match = line.match(/^([^=]+)=(.*)$/);
             if (match) {
                 const key = match[1].trim();
