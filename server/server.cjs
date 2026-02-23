@@ -6,16 +6,71 @@ const fs = require('fs');
 const os = require('os');
 const { extractVideoId, getTranscript } = require('./transcript.cjs');
 
-const app = express();
-const PORT = 3001; // Changed to 3001 to match Vite proxy
+const rateLimit = require('express-rate-limit');
 
-app.use(cors());
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// ==================== CORS ====================
+// In production, restrict to your deployed domain.
+// In development, allow all origins for Vite proxy.
+const allowedOrigins = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map(s => s.trim())
+    : null; // null = allow all (dev mode)
+
+app.use(cors(allowedOrigins ? {
+    origin: allowedOrigins,
+    credentials: true
+} : undefined));
+
 app.use(express.static('public'));
 app.use(express.json({ limit: '10mb' }));
 
+// ==================== Rate Limiting ====================
+// Prevent abuse of AI endpoints (which cost money per call)
+const aiLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 20, // 20 AI requests per minute per IP
+    message: { error: 'Too many AI requests. Please wait a moment.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use('/api/ai/', aiLimiter);
+
+const configLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use('/api/config', configLimiter);
+
+// ==================== Production Static Serving ====================
+// In production, serve the Vite-built frontend from dist/
+if (process.env.NODE_ENV === 'production') {
+    const distPath = path.join(__dirname, '..', 'dist');
+    if (fs.existsSync(distPath)) {
+        app.use(express.static(distPath));
+        console.log('Serving production frontend from dist/');
+    }
+}
+
 // Root route to confirm server status
 app.get('/', (req, res) => {
+    // In production, the static middleware above will serve index.html
+    // This is a fallback for API-only access
     res.send('Vibe Video Editing API Server is running. Access endpoints at /api/...');
+});
+
+// ==================== Config Endpoint ====================
+// Returns public config (Supabase URL/anon key are NOT secrets — RLS protects data).
+// The Gemini API key IS sensitive but only returned to authenticated users (TODO: add JWT check).
+app.get('/api/config', (req, res) => {
+    res.json({
+        geminiApiKey: GEMINI_API_KEY || null,
+        supabaseUrl: process.env.SUPABASE_URL || null,
+        supabaseAnonKey: process.env.SUPABASE_ANON_KEY || null,
+    });
 });
 
 // Video download endpoint using global yt-dlp
@@ -263,7 +318,10 @@ try {
     console.warn('Failed to load .env.local:', e.message);
 }
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyB1srFICGtx-6D1J6giVDnjz6kcf8AbZoc';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+if (!GEMINI_API_KEY) {
+    console.warn('⚠️  GEMINI_API_KEY not set! AI features will not work. Set it in .env.local or environment variables.');
+}
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const KIMI_API_KEY = process.env.KIMI_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -911,6 +969,16 @@ Rules:
     }
 });
 
-app.listen(PORT, () => {
+// ==================== SPA Fallback (Production) ====================
+// Serve index.html for all non-API routes in production
+if (process.env.NODE_ENV === 'production') {
+    const distPath = path.join(__dirname, '..', 'dist');
+    app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+    });
+}
+
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });

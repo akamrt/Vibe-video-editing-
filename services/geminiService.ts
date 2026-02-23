@@ -2,6 +2,26 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { Segment, VideoAnalysis, AnalysisEvent } from "../types";
 import { trackUsage } from "./costTracker";
 
+// ==================== Runtime API Key Management ====================
+// The API key is NOT baked into the bundle. It is fetched from the backend
+// at runtime, so it's only available to authenticated users.
+let _cachedApiKey: string | null = null;
+
+async function getApiKey(): Promise<string> {
+  if (_cachedApiKey) return _cachedApiKey;
+  const resp = await fetch('/api/config');
+  if (!resp.ok) throw new Error('Failed to fetch API config — are you logged in?');
+  const data = await resp.json();
+  if (!data.geminiApiKey) throw new Error('No Gemini API key configured on the server.');
+  _cachedApiKey = data.geminiApiKey;
+  return _cachedApiKey;
+}
+
+/** Call this on logout to clear the cached key from memory */
+export function clearCachedApiKey() {
+  _cachedApiKey = null;
+}
+
 // Session cache to store uploaded file URIs.
 // Key: file.name + file.size + file.lastModified
 // Value: { uri: string, mimeType: string }
@@ -49,7 +69,8 @@ const tryParseChunkedJson = (text: string, arrayKey: string): any => {
  * This prevents browser crashes by offloading storage and processing to Google's cloud.
  */
 const uploadAndPollFile = async (file: File): Promise<{ mimeType: string; fileUri: string }> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   // Determine MIME type — file.type can be empty after IndexedDB restore
   const mimeType = file.type
@@ -180,7 +201,8 @@ export const analyzeVideoContent = async (
   promptText: string
 ): Promise<string> => {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = await getApiKey();
+    const ai = new GoogleGenAI({ apiKey });
     const mediaPart = await prepareMediaPart(videoFile);
 
     const response = await ai.models.generateContent({
@@ -251,7 +273,8 @@ const parseSubtitleText = (text: string): AnalysisEvent[] => {
  * 2. Enforces line-by-line format for synchronization accuracy.
  */
 const generateGranularSubtitles = async (mediaPart: any): Promise<AnalysisEvent[]> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
   console.log("[GeminiService] Starting granular subtitle generation (Text Mode)...");
 
   const prompt = `
@@ -306,7 +329,8 @@ const generateGranularSubtitles = async (mediaPart: any): Promise<AnalysisEvent[
  * Specialized function for Visual Event Analysis using Pro.
  */
 const generateVisualEvents = async (mediaPart: any, customFocus: string): Promise<AnalysisEvent[]> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
   console.log("[GeminiService] Starting visual analysis...");
 
   const prompt = `
@@ -411,7 +435,8 @@ export const chatWithVideoContext = async (
   videoFile: File | null
 ): Promise<string> => {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = await getApiKey();
+    const ai = new GoogleGenAI({ apiKey });
     const model = "gemini-3-pro-preview";
 
     // Prepare message parts
@@ -448,7 +473,8 @@ export const generateVibeEdit = async (
   videoDuration: number,
   existingAnalysis: VideoAnalysis | null
 ): Promise<Segment[]> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   // Upload Video (or retrieve from cache)
   const mediaPart = await prepareMediaPart(videoFile);
@@ -547,7 +573,8 @@ export const generateVibeEdit = async (
 };
 
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   // Audio is usually small enough for Base64 inline
   const reader = new FileReader();
@@ -594,7 +621,8 @@ export interface PersonDetectionResult {
 export const detectPersonPosition = async (
   imageBlob: Blob
 ): Promise<PersonDetectionResult> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   const base64 = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -852,7 +880,8 @@ export const detectFillersFromTranscript = async (
 ): Promise<FillerDetection[]> => {
   if (transcript.length === 0) return [];
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   onProgress?.('Analyzing transcript for filler words...');
 
@@ -929,7 +958,8 @@ export const redetectFillersFromTranscript = async (
 ): Promise<FillerDetection[]> => {
   if (transcript.length === 0) return [];
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   onProgress?.('Re-analyzing transcript for missed fillers...');
 
@@ -1013,7 +1043,8 @@ export const detectFillerWords = async (
   duration: number,
   onProgress?: (msg: string) => void
 ): Promise<FillerDetection[]> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   onProgress?.('Uploading video to AI...');
   console.log("[GeminiService] Starting filler word detection...");
@@ -1064,7 +1095,8 @@ export const redetectFillerWords = async (
   existingDetections: FillerDetection[],
   onProgress?: (msg: string) => void
 ): Promise<FillerDetection[]> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await getApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   onProgress?.('Uploading video to AI...');
   const mediaPart = await prepareMediaPart(videoFile);

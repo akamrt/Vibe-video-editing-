@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import AuthGate from './components/AuthGate';
 
 class ErrorBoundary extends React.Component<{children: React.ReactNode}, {error: Error | null}> {
   state = { error: null as Error | null };
@@ -24,7 +25,9 @@ const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      <AuthGate>
+        <App />
+      </AuthGate>
     </ErrorBoundary>
   </React.StrictMode>
 );

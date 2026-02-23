@@ -23,6 +23,12 @@ dist-ssr
 *.sln
 *.sw?
 
+# Environment / secrets
+.env
+.env.local
+.env.production
+.env.*.local
+
 # Generated files
 *player-script.js
 screenshots/
