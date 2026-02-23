@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -45,6 +46,32 @@ const configLimiter = rateLimit({
 });
 app.use('/api/config', configLimiter);
 
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // 10 login attempts per 15 min per IP
+    message: { error: 'Too many login attempts. Please wait.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+app.use('/api/auth', authLimiter);
+
+// ==================== Simple Password Auth ====================
+// In-memory token store. Tokens persist until the server restarts.
+const validTokens = new Set();
+
+// Auth middleware — checks Authorization: Bearer <token> header
+function requireAuth(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Not authenticated' });
+    }
+    const token = authHeader.slice(7);
+    if (!validTokens.has(token)) {
+        return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+    next();
+}
+
 // ==================== Production Static Serving ====================
 // In production, serve the Vite-built frontend from dist/
 if (process.env.NODE_ENV === 'production') {
@@ -62,14 +89,52 @@ app.get('/', (req, res) => {
     res.send('Vibe Video Editing API Server is running. Access endpoints at /api/...');
 });
 
+// ==================== Auth Endpoints ====================
+// POST /api/auth — validate password, return token
+app.post('/api/auth', (req, res) => {
+    const { password } = req.body;
+    const APP_PASSWORD = process.env.APP_PASSWORD;
+
+    if (!APP_PASSWORD) {
+        // No password configured — open access (dev mode)
+        const token = crypto.randomUUID();
+        validTokens.add(token);
+        return res.json({ token, mode: 'open' });
+    }
+
+    if (!password || password !== APP_PASSWORD) {
+        return res.status(401).json({ error: 'Incorrect password' });
+    }
+
+    const token = crypto.randomUUID();
+    validTokens.add(token);
+    res.json({ token });
+});
+
+// GET /api/auth/check — validate an existing token
+app.get('/api/auth/check', (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.json({ valid: false });
+    }
+    const token = authHeader.slice(7);
+    res.json({ valid: validTokens.has(token) });
+});
+
+// POST /api/auth/logout — invalidate a token
+app.post('/api/auth/logout', (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        validTokens.delete(authHeader.slice(7));
+    }
+    res.json({ ok: true });
+});
+
 // ==================== Config Endpoint ====================
-// Returns public config (Supabase URL/anon key are NOT secrets — RLS protects data).
-// The Gemini API key IS sensitive but only returned to authenticated users (TODO: add JWT check).
-app.get('/api/config', (req, res) => {
+// Protected — only returns API key to authenticated users.
+app.get('/api/config', requireAuth, (req, res) => {
     res.json({
         geminiApiKey: GEMINI_API_KEY || null,
-        supabaseUrl: process.env.SUPABASE_URL || null,
-        supabaseAnonKey: process.env.SUPABASE_ANON_KEY || null,
     });
 });
 

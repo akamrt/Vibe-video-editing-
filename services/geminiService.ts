@@ -9,7 +9,10 @@ let _cachedApiKey: string | null = null;
 
 async function getApiKey(): Promise<string> {
   if (_cachedApiKey) return _cachedApiKey;
-  const resp = await fetch('/api/config');
+  const token = localStorage.getItem('auth_token');
+  const resp = await fetch('/api/config', {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
   if (!resp.ok) throw new Error('Failed to fetch API config — are you logged in?');
   const data = await resp.json();
   if (!data.geminiApiKey) throw new Error('No Gemini API key configured on the server.');

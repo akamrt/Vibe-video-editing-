@@ -1,32 +1,40 @@
 import React, { useState } from 'react';
-import { signInWithMagicLink } from '../services/supabaseClient';
 
 interface LoginScreenProps {
-  onSkipAuth?: () => void; // For development mode without Supabase
+  onAuthenticated: (token: string) => void;
 }
 
-const LoginScreen: React.FC<LoginScreenProps> = ({ onSkipAuth }) => {
-  const [email, setEmail] = useState('');
+const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => {
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim()) return;
+    if (!password.trim()) return;
 
     setLoading(true);
     setError(null);
 
     try {
-      const { error: authError } = await signInWithMagicLink(email.trim());
-      if (authError) {
-        setError(authError.message);
-      } else {
-        setSent(true);
+      const resp = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: password.trim() }),
+      });
+
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        setError(data.error || 'Incorrect password');
+        return;
       }
+
+      // Store token and notify parent
+      localStorage.setItem('auth_token', data.token);
+      onAuthenticated(data.token);
     } catch (err: any) {
-      setError(err.message || 'Failed to send magic link');
+      setError(err.message || 'Connection failed');
     } finally {
       setLoading(false);
     }
@@ -40,67 +48,39 @@ const LoginScreen: React.FC<LoginScreenProps> = ({ onSkipAuth }) => {
           <p className="text-gray-400 text-sm">AI-Powered Video Editor</p>
         </div>
 
-        {sent ? (
-          <div className="text-center">
-            <div className="text-4xl mb-4">📧</div>
-            <h2 className="text-xl font-semibold text-white mb-2">Check your email</h2>
-            <p className="text-gray-400 text-sm mb-4">
-              We sent a magic link to <span className="text-blue-400">{email}</span>.
-              Click the link in the email to sign in.
-            </p>
-            <button
-              onClick={() => { setSent(false); setEmail(''); }}
-              className="text-blue-400 hover:text-blue-300 text-sm underline"
-            >
-              Use a different email
-            </button>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label htmlFor="password" className="block text-sm font-medium text-gray-300 mb-1">
+              Access Password
+            </label>
+            <input
+              id="password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter password"
+              className="w-full bg-[#1a1a1a] border border-[#444] rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              required
+              autoFocus
+            />
           </div>
-        ) : (
-          <>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label htmlFor="email" className="block text-sm font-medium text-gray-300 mb-1">
-                  Email Address
-                </label>
-                <input
-                  id="email"
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="w-full bg-[#1a1a1a] border border-[#444] rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  required
-                  autoFocus
-                />
-              </div>
 
-              {error && (
-                <p className="text-red-400 text-sm">{error}</p>
-              )}
+          {error && (
+            <p className="text-red-400 text-sm">{error}</p>
+          )}
 
-              <button
-                type="submit"
-                disabled={loading || !email.trim()}
-                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-lg transition-colors"
-              >
-                {loading ? 'Sending...' : 'Sign in with Magic Link'}
-              </button>
-            </form>
+          <button
+            type="submit"
+            disabled={loading || !password.trim()}
+            className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-lg transition-colors"
+          >
+            {loading ? 'Checking...' : 'Enter'}
+          </button>
+        </form>
 
-            <p className="text-center text-gray-500 text-xs mt-6">
-              No password needed. We'll send you a sign-in link.
-            </p>
-
-            {onSkipAuth && (
-              <button
-                onClick={onSkipAuth}
-                className="w-full mt-4 text-gray-500 hover:text-gray-300 text-xs underline"
-              >
-                Skip login (development only)
-              </button>
-            )}
-          </>
-        )}
+        <p className="text-center text-gray-500 text-xs mt-6">
+          Contact the admin for access credentials.
+        </p>
       </div>
     </div>
   );

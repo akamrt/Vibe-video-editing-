@@ -1,13 +1,10 @@
 /**
  * AuthGate — wraps the app and shows login screen if not authenticated.
- * Handles magic link redirect detection and session management.
- *
- * In development (no Supabase configured), offers a "skip" option.
+ * Uses simple token-based auth (no external services).
  */
 
 import React, { useState, useEffect } from 'react';
 import LoginScreen from './LoginScreen';
-import { getSession, onAuthStateChange, signOut } from '../services/supabaseClient';
 import { clearCachedApiKey as clearGeminiKey } from '../services/geminiService';
 
 interface AuthGateProps {
@@ -17,71 +14,54 @@ interface AuthGateProps {
 const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [supabaseAvailable, setSupabaseAvailable] = useState(true);
 
   useEffect(() => {
-    let unsubscribe: (() => void) | null = null;
+    // Check for existing token on mount
+    const checkToken = async () => {
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        setLoading(false);
+        return;
+      }
 
-    const init = async () => {
       try {
-        // Check if Supabase is configured
-        const resp = await fetch('/api/config');
-        const config = await resp.json();
-
-        if (!config.supabaseUrl || !config.supabaseAnonKey) {
-          // Supabase not configured — development mode
-          console.log('[AuthGate] Supabase not configured, running in dev mode');
-          setSupabaseAvailable(false);
-          setLoading(false);
-          return;
-        }
-
-        // Check existing session
-        const session = await getSession();
-        if (session) {
-          setAuthenticated(true);
-          setUserEmail(session.user?.email || null);
-        }
-
-        // Listen for auth changes (magic link redirect, sign out, etc.)
-        const sub = await onAuthStateChange((event, session) => {
-          console.log('[AuthGate] Auth event:', event);
-          if (session) {
-            setAuthenticated(true);
-            setUserEmail(session.user?.email || null);
-          } else {
-            setAuthenticated(false);
-            setUserEmail(null);
-            clearGeminiKey(); // Clear cached API key on logout
-          }
+        const resp = await fetch('/api/auth/check', {
+          headers: { Authorization: `Bearer ${token}` },
         });
-        unsubscribe = sub.unsubscribe;
-
+        const data = await resp.json();
+        if (data.valid) {
+          setAuthenticated(true);
+        } else {
+          // Token expired or invalid — clear it
+          localStorage.removeItem('auth_token');
+        }
       } catch (err) {
-        console.warn('[AuthGate] Init error:', err);
-        setSupabaseAvailable(false);
+        console.warn('[AuthGate] Token check failed:', err);
+        localStorage.removeItem('auth_token');
       } finally {
         setLoading(false);
       }
     };
 
-    init();
-
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
+    checkToken();
   }, []);
 
+  const handleAuthenticated = (token: string) => {
+    setAuthenticated(true);
+  };
+
   const handleSignOut = async () => {
+    const token = localStorage.getItem('auth_token');
     try {
-      await signOut();
-      setAuthenticated(false);
-      setUserEmail(null);
-      clearGeminiKey();
-    } catch (err) {
-      console.error('Sign out error:', err);
-    }
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+    } catch (_) { /* ignore */ }
+
+    localStorage.removeItem('auth_token');
+    clearGeminiKey();
+    setAuthenticated(false);
   };
 
   if (loading) {
@@ -94,30 +74,22 @@ const AuthGate: React.FC<AuthGateProps> = ({ children }) => {
 
   // Not authenticated — show login screen
   if (!authenticated) {
-    return (
-      <LoginScreen
-        onSkipAuth={!supabaseAvailable ? () => setAuthenticated(true) : undefined}
-      />
-    );
+    return <LoginScreen onAuthenticated={handleAuthenticated} />;
   }
 
-  // Authenticated — render the app with a user bar
+  // Authenticated — render the app with a sign-out button
   return (
     <div className="flex flex-col h-screen">
       {/* User bar */}
-      {userEmail && (
-        <div className="bg-[#1a1a1a] border-b border-[#333] px-4 py-1 flex items-center justify-between text-xs">
-          <span className="text-gray-500">
-            Signed in as <span className="text-gray-300">{userEmail}</span>
-          </span>
-          <button
-            onClick={handleSignOut}
-            className="text-gray-500 hover:text-red-400 transition-colors"
-          >
-            Sign Out
-          </button>
-        </div>
-      )}
+      <div className="bg-[#1a1a1a] border-b border-[#333] px-4 py-1 flex items-center justify-between text-xs">
+        <span className="text-gray-500">VibeCut Pro — Testing</span>
+        <button
+          onClick={handleSignOut}
+          className="text-gray-500 hover:text-red-400 transition-colors"
+        >
+          Sign Out
+        </button>
+      </div>
       <div className="flex-1 min-h-0">
         {children}
       </div>

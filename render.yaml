@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: vibecut-pro
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: NODE_ENV=production node server/server.cjs
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: NODE_ENV
+        value: production
