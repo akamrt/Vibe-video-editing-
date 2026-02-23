@@ -1038,7 +1038,7 @@ Rules:
 // Serve index.html for all non-API routes in production
 if (process.env.NODE_ENV === 'production') {
     const distPath = path.join(__dirname, '..', 'dist');
-    app.get('*', (req, res) => {
+    app.get('{*path}', (req, res) => {
         res.sendFile(path.join(distPath, 'index.html'));
     });
 }
