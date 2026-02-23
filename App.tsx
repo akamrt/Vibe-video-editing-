@@ -4901,7 +4901,7 @@ function App() {
                         setProject(p => ({ ...p, currentTime: t }));
                       }}
                       onSelect={(idx) => transcriptMedia && handleDialogueSelect(transcriptMedia.id, idx)}
-                      selectedIndex={selectedDialogue?.mediaId === transcriptMedia?.id ? selectedDialogue.index : null}
+                      selectedIndex={selectedDialogue && transcriptMedia && selectedDialogue.mediaId === transcriptMedia.id ? selectedDialogue.index : null}
                       removedWords={project.removedWords}
                       onRemoveWords={(words) => handleRemoveTranscriptWords(words)}
                       onRestoreWord={handleRestoreTranscriptWord}
