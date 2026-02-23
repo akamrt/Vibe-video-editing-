@@ -5,7 +5,7 @@
  * Simple, free, and local - perfect for 100+ sermons with text and timestamps.
  */
 
-import { ProjectState, MediaItem } from '../types';
+import { ProjectState, MediaItem, KeywordEmphasis, SubtitleStyle, TitleStyle, SubtitleTemplate, TextAnimation } from '../types';
 
 // ==================== Types ====================
 
@@ -52,15 +52,17 @@ export interface GeneratedShort {
 
 export interface ShortSegment {
     // Note: All segments in a short MUST be from the same video (single sermon rule)
-    startTime: number;       // Start time in source video (seconds)
-    endTime: number;         // End time in source video (seconds)
-    text: string;            // Transcript text for this clip
+    startTime: number;
+    endTime: number;
+    text: string;
+    keywords?: KeywordEmphasis[];
+    removedWordIndices?: number[];
 }
 
 // ==================== Database Class ====================
 
 const DB_NAME = 'ContentLibraryDB';
-const DB_VERSION = 1;
+const DB_VERSION = 4; // Incremented to add 'userPreferences' store
 
 class ContentDatabase {
     private db: IDBDatabase | null = null;
@@ -118,6 +120,17 @@ class ContentDatabase {
                 // Projects store
                 if (!db.objectStoreNames.contains('projects')) {
                     db.createObjectStore('projects', { keyPath: 'id' });
+                }
+
+                // AI cost log store
+                if (!db.objectStoreNames.contains('costLog')) {
+                    const costStore = db.createObjectStore('costLog', { keyPath: 'id', autoIncrement: true });
+                    costStore.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+
+                // User preferences store (persists across projects)
+                if (!db.objectStoreNames.contains('userPreferences')) {
+                    db.createObjectStore('userPreferences', { keyPath: 'id' });
                 }
 
                 console.log('Database schema created/updated');
@@ -335,6 +348,16 @@ class ContentDatabase {
         });
     }
 
+    async updateShort(short: GeneratedShort): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('shorts', 'readwrite');
+            const request = store.put(short);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
     // ==================== Search Helpers ====================
 
     /**
@@ -454,6 +477,55 @@ class ContentDatabase {
         });
     }
 
+    async clearProject(): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('projects', 'readwrite');
+            const request = store.delete('current_project');
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    // ==================== User Preferences ====================
+
+    async savePreferences(prefs: {
+        subtitleStyle: SubtitleStyle;
+        titleStyle: TitleStyle;
+        activeSubtitleTemplate: SubtitleTemplate | null;
+        activeTitleTemplate: SubtitleTemplate | null;
+        activeKeywordAnimation: TextAnimation | null;
+    }): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('userPreferences', 'readwrite');
+            const request = store.put({ ...prefs, id: 'user_preferences' });
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async getPreferences(): Promise<{
+        subtitleStyle: SubtitleStyle;
+        titleStyle: TitleStyle;
+        activeSubtitleTemplate: SubtitleTemplate | null;
+        activeTitleTemplate: SubtitleTemplate | null;
+        activeKeywordAnimation: TextAnimation | null;
+    } | null> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('userPreferences');
+            const request = store.get('user_preferences');
+            request.onsuccess = () => {
+                const result = request.result;
+                if (!result) { resolve(null); return; }
+                const { id, ...prefs } = result;
+                resolve(prefs);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
     // ==================== Clear Database ====================
 
     async clearAll(): Promise<void> {
@@ -470,6 +542,38 @@ class ContentDatabase {
         }
 
         console.log('All database stores cleared');
+    }
+
+    // ==================== AI Cost Log ====================
+
+    async addCostEntry(entry: { timestamp: number; operation: string; model: string; inputTokens: number; outputTokens: number; estimatedCost: number }): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('costLog', 'readwrite');
+            const request = store.add(entry);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async getAllCostEntries(): Promise<Array<{ id: number; timestamp: number; operation: string; model: string; inputTokens: number; outputTokens: number; estimatedCost: number }>> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('costLog');
+            const request = store.getAll();
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async clearCostLog(): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('costLog', 'readwrite');
+            const request = store.clear();
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
     }
 }
 

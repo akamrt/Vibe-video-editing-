@@ -39,7 +39,8 @@ try {
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const KIMI_API_KEY = process.env.KIMI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash'; // Switch to 1.5-flash for better stability
+const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
 
 
@@ -182,6 +183,86 @@ async function callKimi(prompt, model = 'moonshot-v1-8k', retries = 3) {
     }
 }
 
+// Helper to call MiniMax API (OpenAI-compatible)
+async function callMiniMax(prompt, model = 'MiniMax-M2', retries = 3) {
+    if (!MINIMAX_API_KEY) throw new Error("MINIMAX_API_KEY not set");
+
+    // Official MiniMax OpenAI-compatible endpoint
+    const url = 'https://api.minimax.io/v1/chat/completions';
+    let attempt = 0;
+
+    while (attempt <= retries) {
+        try {
+            console.log(`[MiniMax] Calling model: ${model}, attempt: ${attempt + 1}`);
+            console.log(`[MiniMax] Prompt length: ${prompt.length} chars`);
+
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${MINIMAX_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: [
+                        { role: "system", content: "You are a helpful assistant that outputs only valid JSON. Do not include any thinking, explanation, or markdown formatting — ONLY output the raw JSON object." },
+                        { role: "user", content: prompt }
+                    ],
+                    temperature: 0.3,
+                    max_tokens: 8192
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`[MiniMax] API Error ${response.status}: ${errorText}`);
+
+                if (response.status === 429) {
+                    if (attempt < retries) {
+                        const delay = Math.pow(2, attempt) * 2000;
+                        console.log(`[MiniMax] Rate limited (429). Retrying in ${delay / 1000}s...`);
+                        await new Promise(res => setTimeout(res, delay));
+                        attempt++;
+                        continue;
+                    }
+                }
+                throw new Error(`MiniMax API Error ${response.status}: ${errorText}`);
+            }
+
+            const data = await response.json();
+            console.log('[MiniMax] Raw response keys:', Object.keys(data));
+
+            // MiniMax returns in OpenAI-compatible format
+            let text = data.choices?.[0]?.message?.content || '{}';
+            console.log(`[MiniMax] Response text length: ${text.length}`);
+            console.log('[MiniMax] Response preview:', text.substring(0, 300));
+
+            // MiniMax M2/M2.5 are reasoning models that include <think>...</think> tags
+            // in the content field. Strip these before parsing JSON.
+            text = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+            // Strip markdown code blocks if present
+            text = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+
+            console.log('[MiniMax] Cleaned text preview:', text.substring(0, 300));
+
+            try {
+                return JSON.parse(text);
+            } catch (parseError) {
+                console.error('[MiniMax] JSON Parse Error:', parseError.message);
+                console.error('[MiniMax] Cleaned text:', text.substring(0, 500));
+                throw new Error('Failed to parse MiniMax AI response');
+            }
+
+        } catch (error) {
+            if (attempt >= retries) throw error;
+            console.log(`[MiniMax] Error: ${error.message}. Retrying...`);
+            attempt++;
+            await new Promise(res => setTimeout(res, 1000));
+        }
+    }
+}
+
 
 // Generate Short endpoint
 app.post('/api/ai/generate-short', async (req, res) => {
@@ -252,6 +333,8 @@ Return valid, parseable JSON with this exact structure:
         let result;
         if (model && model.startsWith('moonshot')) {
             result = await callKimi(aiPrompt, model);
+        } else if (model && model.startsWith('MiniMax')) {
+            result = await callMiniMax(aiPrompt, model);
         } else {
             result = await callGemini(aiPrompt, model || GEMINI_MODEL);
         }
@@ -470,7 +553,7 @@ app.get('/api/download', async (req, res) => {
 
             const args = [
                 // Best mp4 video + best m4a audio, OR best mp4 pre-merged, OR just best
-                '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4] / bv*+ba/b',
+                '-f', 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b',
                 '--merge-output-format', 'mp4',
                 '-o', `${tempFileBase}.%(ext)s`,
                 url

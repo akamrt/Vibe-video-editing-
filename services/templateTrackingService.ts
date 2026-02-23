@@ -710,6 +710,235 @@ export async function analyzeAndGenerateKeyframes(
 }
 
 // =============================================================================
+// Threshold-based Auto-Center (scan mode) — 1 AI anchor + free template tracking
+// =============================================================================
+
+/**
+ * Scan a video element through a segment by tracking a SINGLE person-anchored point.
+ *
+ * Strategy:
+ *   - Caller provides the initial person position (pixel X/Y from one Gemini detection)
+ *   - We place ONE template tracker on that point at frame 0
+ *   - We track that one point through every frame using SAD template matching (0 tokens)
+ *   - We generate a keyframe only when the tracked position exits the 9:16 zone
+ *     by more than `outOfZoneThreshold` % of the zone half-width
+ *
+ * outOfZoneThreshold: 0 = center always, 100 = only when almost fully outside zone
+ */
+export async function scanAndGenerateThresholdKeyframes(
+    videoElement: HTMLVideoElement,
+    segment: TrackingSegment,
+    /** Initial person center in VIDEO pixel coords (from Gemini detection) */
+    initialPersonX: number,
+    initialPersonY: number,
+    outOfZoneThreshold: number = 15,
+    onProgress?: (progress: number, label: string) => void
+): Promise<{ keyframes: ClipKeyframe[]; triggerCount: number; frameCount: number }> {
+    const vw = videoElement.videoWidth;
+    const vh = videoElement.videoHeight;
+    if (vw === 0 || vh === 0) return { keyframes: [], triggerCount: 0, frameCount: 0 };
+
+    // Clamp initial position to valid range
+    const startX = Math.max(0, Math.min(vw, initialPersonX));
+    const startY = Math.max(0, Math.min(vh, initialPersonY));
+
+    onProgress?.(0.02, 'Setting up person trackers...');
+
+    const canvas = document.createElement('canvas');
+    canvas.width = vw;
+    canvas.height = vh;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return { keyframes: [], triggerCount: 0, frameCount: 0 };
+
+    // Seek to clip start and grab first frame
+    await seekAndDraw(videoElement, ctx, segment.startTime);
+
+    // --- Snap trackers to high-contrast features near the detected person ---
+    // The person's center (from Gemini) is often a low-contrast area (plain shirt, skin).
+    // SAD template matching needs texture. Find the best-contrast points NEAR the person.
+    const SEARCH_RADIUS = Math.min(vw, vh) * 0.25; // 25% of smaller dimension
+    const PATCH_SIZE = 32;
+    const SEARCH_WIN = 80;
+    const templates = new Map<string, ImageData>();
+    const trackers: InternalTracker[] = [];
+
+    const allFeatures = findGoodFeatures(ctx, vw, vh, []);
+    console.log(`[ScanCenter] Person detected at (${startX.toFixed(0)}, ${startY.toFixed(0)}) px = ${((startX/vw)*100).toFixed(1)}% x. Found ${allFeatures.length} features total.`);
+
+    // Sort features by distance from person center, take up to 4 closest
+    const nearbyFeatures = allFeatures
+        .map(f => ({ ...f, dist: Math.hypot(f.x - startX, f.y - startY) }))
+        .filter(f => f.dist < SEARCH_RADIUS)
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, 4);
+
+    console.log(`[ScanCenter] ${nearbyFeatures.length} high-contrast features within ${SEARCH_RADIUS.toFixed(0)}px of person`);
+
+    if (nearbyFeatures.length > 0) {
+        // Use nearby high-contrast features
+        nearbyFeatures.forEach((f, i) => {
+            const t: InternalTracker = { id: `person_${i}`, x: f.x, y: f.y, patchSize: PATCH_SIZE, searchWindow: SEARCH_WIN };
+            captureTemplate(t, ctx, templates);
+            if (templates.has(t.id)) trackers.push(t);
+        });
+    }
+
+    // Always add a fallback tracker directly on the Gemini-detected center
+    // (even if low contrast, it gives us the reference position)
+    const centerTracker: InternalTracker = {
+        id: 'person_center',
+        x: startX,
+        y: startY,
+        patchSize: 48, // larger patch catches more context
+        searchWindow: SEARCH_WIN,
+    };
+    captureTemplate(centerTracker, ctx, templates);
+    if (templates.has('person_center')) trackers.push(centerTracker);
+
+    if (trackers.length === 0) {
+        onProgress?.(1.0, 'Could not capture any person templates');
+        return { keyframes: [], triggerCount: 0, frameCount: 0 };
+    }
+
+    console.log(`[ScanCenter] Tracking with ${trackers.length} trackers (${nearbyFeatures.length} contrast + 1 center)`);
+
+    // --- Track person through every frame ---
+    const positions: { time: number; x: number }[] = [];
+    const duration = segment.endTime - segment.startTime;
+    const totalFrames = Math.ceil(duration / SAMPLE_INTERVAL) + 1;
+    let frameIdx = 0;
+    let lostFrames = 0;
+    let goodFrames = 0;
+
+    // Record initial position
+    positions.push({ time: segment.startTime, x: startX });
+
+    for (let t = segment.startTime + SAMPLE_INTERVAL; t <= segment.endTime + 0.001; t += SAMPLE_INTERVAL) {
+        const clampedT = Math.min(t, segment.endTime);
+        await seekAndDraw(videoElement, ctx, clampedT);
+
+        // Match all trackers, collect successful ones
+        const frameXs: number[] = [];
+        for (const tracker of trackers) {
+            const result = findBestMatch(ctx, tracker, tracker.x, tracker.y, templates);
+            if (result && result.point.matchScore !== undefined && result.point.matchScore >= DELETE_MATCH_THRESHOLD) {
+                tracker.x = result.point.x;
+                tracker.y = result.point.y;
+                tracker.matchScore = result.point.matchScore;
+                if (result.point.matchScore < ADAPTIVE_RECAPTURE_THRESHOLD) {
+                    captureTemplate(tracker, ctx, templates);
+                }
+                frameXs.push(tracker.x);
+            }
+        }
+
+        if (frameXs.length > 0) {
+            // Use median X of all successfully tracked points
+            frameXs.sort((a, b) => a - b);
+            const mid = Math.floor(frameXs.length / 2);
+            const medX = frameXs.length % 2 === 0
+                ? (frameXs[mid - 1] + frameXs[mid]) / 2
+                : frameXs[mid];
+            positions.push({ time: clampedT, x: medX });
+            lostFrames = 0;
+            goodFrames++;
+        } else {
+            // All trackers lost — hold last known position
+            lostFrames++;
+            positions.push({ time: clampedT, x: trackers[trackers.length - 1].x });
+            if (lostFrames >= 5) {
+                // Re-anchor all trackers at their current positions
+                for (const tracker of trackers) captureTemplate(tracker, ctx, templates);
+                lostFrames = 0;
+            }
+        }
+
+        frameIdx++;
+        onProgress?.(0.05 + (frameIdx / totalFrames) * 0.85, `Tracking... frame ${frameIdx}/${totalFrames} (${goodFrames} good)`);
+    }
+
+    if (positions.length === 0) {
+        onProgress?.(1.0, 'No positions tracked');
+        return { keyframes: [], triggerCount: 0, frameCount: frameIdx };
+    }
+
+    // --- EMA smoothing on tracked X positions (% of video width) ---
+    onProgress?.(0.92, 'Generating keyframes...');
+
+    // Build a lookup: time → smoothed personX%
+    const smoothed: { time: number; personX: number }[] = [];
+    let emaX = (positions[0].x / vw) * 100;
+    for (const { time, x } of positions) {
+        const pct = (x / vw) * 100;
+        emaX = emaX + 0.4 * (pct - emaX); // 0.4 alpha = moderate smoothing
+        smoothed.push({ time, personX: emaX });
+    }
+
+    // Helper: interpolate personX at any time t
+    const getPersonXAt = (t: number): number => {
+        if (smoothed.length === 0) return 50;
+        if (t <= smoothed[0].time) return smoothed[0].personX;
+        if (t >= smoothed[smoothed.length - 1].time) return smoothed[smoothed.length - 1].personX;
+        for (let i = 0; i < smoothed.length - 1; i++) {
+            if (t >= smoothed[i].time && t < smoothed[i + 1].time) {
+                const ratio = (t - smoothed[i].time) / (smoothed[i + 1].time - smoothed[i].time);
+                return smoothed[i].personX + ratio * (smoothed[i + 1].personX - smoothed[i].personX);
+            }
+        }
+        return smoothed[smoothed.length - 1].personX;
+    };
+
+    // --- Zone math (deadband from center) ---
+    // outOfZoneThreshold = % of frame width from center before centering kicks in
+    // 0% = always follow person,  15% = follow when >15% off-center,  28% ≈ only at zone boundary
+    const distFromCenter = (personX: number): number => Math.abs(personX - PORTRAIT_CENTER);
+
+    // --- Generate keyframes at every 0.2s — always write, threshold controls value ---
+    const KEYFRAME_INTERVAL = 0.2;
+    const keyframes: ClipKeyframe[] = [];
+    let triggerCount = 0;
+    let prevTx: number | null = null;
+
+    for (let t = segment.startTime; t <= segment.endTime + 0.001; t += KEYFRAME_INTERVAL) {
+        const clampedT = Math.min(t, segment.endTime);
+        const personX = getPersonXAt(clampedT);
+        const shouldCenter = distFromCenter(personX) > outOfZoneThreshold;
+        const translateX = shouldCenter ? centeringOffset(personX) : 0;
+
+        // Emit keyframe if first or changed by more than 0.1%
+        if (prevTx === null || Math.abs(translateX - prevTx) > 0.1) {
+            keyframes.push({
+                time: Math.max(0, clampedT - segment.startTime),
+                translateX,
+                translateY: 0,
+                scale: 1,
+                rotation: 0,
+            });
+            if (shouldCenter && (prevTx === null || Math.abs(prevTx) < 0.5)) triggerCount++;
+            prevTx = translateX;
+        }
+    }
+
+    // Always ensure keyframe at t=0
+    if (keyframes.length === 0 || keyframes[0].time > 0.01) {
+        const px = getPersonXAt(segment.startTime);
+        keyframes.unshift({
+            time: 0,
+            translateX: distFromCenter(px) > outOfZoneThreshold ? centeringOffset(px) : 0,
+            translateY: 0, scale: 1, rotation: 0,
+        });
+    }
+
+    const pctTracked = ((frameIdx - lostFrames) / Math.max(1, frameIdx) * 100).toFixed(0);
+    console.log(`[ScanCenter] Complete: ${keyframes.length} keyframes, ${triggerCount} triggers, ${frameIdx} frames, ${pctTracked}% tracked`);
+    console.log(`[ScanCenter] PersonX range: ${Math.min(...smoothed.map(s=>s.personX)).toFixed(1)}% – ${Math.max(...smoothed.map(s=>s.personX)).toFixed(1)}%`);
+    console.log(`[ScanCenter] TranslateX range: ${Math.min(...keyframes.map(k=>k.translateX)).toFixed(1)}% – ${Math.max(...keyframes.map(k=>k.translateX)).toFixed(1)}%`);
+
+    onProgress?.(1.0, `Done — ${keyframes.length} keyframes, ${triggerCount} centering event${triggerCount !== 1 ? 's' : ''}`);
+    return { keyframes, triggerCount, frameCount: frameIdx };
+}
+
+// =============================================================================
 // Manual Tracking API — used by the TrackingPanel for user-placed trackers
 // =============================================================================
 

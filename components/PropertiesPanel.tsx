@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { Segment, Transition, TransitionType, VideoAnalysis, SubtitleStyle, TitleLayer, TitleStyle, SubtitleTemplate, TextAnimation } from '../types';
+import { Segment, Transition, TransitionType, VideoAnalysis, SubtitleStyle, TitleLayer, TitleStyle, SubtitleTemplate, TextAnimation, KeywordEmphasis, GradientStop } from '../types';
+import { migrateGradientColors } from '../utils/gradientUtils';
 import AnimationControls from './AnimationControls';
+import GradientEditor from './GradientEditor';
 
 interface PropertiesPanelProps {
   selectedSegment: Segment | null;
@@ -24,6 +26,10 @@ interface PropertiesPanelProps {
   onToggleTemplateUnlink?: () => void;
   onAnalyze?: (mediaId: string, prompt: string) => void;
   isProcessing?: boolean;
+  wordEmphases?: KeywordEmphasis[];
+  onUpdateWordEmphases?: (emphases: KeywordEmphasis[]) => void;
+  activeKeywordAnimation?: TextAnimation | null;
+  onUpdateKeywordAnimation?: (animation: TextAnimation | null) => void;
 }
 
 const BLEND_MODES = [
@@ -31,7 +37,74 @@ const BLEND_MODES = [
   'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion'
 ];
 
-const FONTS = ['Arial', 'Verdana', 'Helvetica', 'Times New Roman', 'Courier New', 'Georgia', 'Impact', 'Inter', 'Roboto'];
+const LAYER_BLEND_MODES = [
+  'normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten',
+  'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion',
+  'hue', 'saturation', 'color', 'luminosity'
+];
+
+const FONTS = ['Arial', 'Verdana', 'Helvetica', 'Times New Roman', 'Courier New', 'Georgia', 'Impact', 'Inter', 'Roboto', 'Montserrat', 'Open Sans', 'Lato', 'Poppins', 'Oswald', 'Raleway', 'Nunito', 'Ubuntu', 'Playfair Display', 'Merriweather', 'Bebas Neue'];
+
+const Accordion: React.FC<{ title: string; defaultOpen?: boolean; children: React.ReactNode }> = ({ title, defaultOpen = true, children }) => {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  return (
+    <div className="border border-[#2a2a2a] rounded-lg shadow-sm bg-[#1a1a1a] overflow-hidden transition-all duration-300">
+      <button
+        className="w-full flex items-center justify-between p-3 bg-[#222] hover:bg-[#282828] transition-colors border-b border-transparent focus:outline-none"
+        onClick={() => setIsOpen(!isOpen)}
+        style={{ borderBottomColor: isOpen ? '#2a2a2a' : 'transparent' }}
+      >
+        <span className="text-[11px] font-bold text-gray-300 uppercase tracking-wider">{title}</span>
+        <svg
+          className={`w-4 h-4 text-gray-500 transition-transform duration-300 ${isOpen ? 'rotate-180' : ''}`}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {isOpen && (
+        <div className="p-4 space-y-4 animate-in fade-in slide-in-from-top-1 duration-200">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const Group: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
+  <div className="space-y-2">
+    <div className="text-[10px] font-bold text-indigo-400/80 uppercase tracking-widest">{title}</div>
+    <div className="space-y-3">{children}</div>
+  </div>
+);
+
+const Field: React.FC<{ label: string; rightLabel?: React.ReactNode; children: React.ReactNode; stack?: boolean }> = ({ label, rightLabel, children, stack = false }) => (
+  <div className={`flex ${stack ? 'flex-col gap-1.5' : 'items-center justify-between gap-3'}`}>
+    <div className="flex justify-between items-center w-full">
+      <label className="text-[11px] text-gray-400 font-medium">{label}</label>
+      {rightLabel && <div className="text-[10px] text-gray-500 font-mono">{rightLabel}</div>}
+    </div>
+    <div className={stack ? 'w-full' : 'flex-1 max-w-[65%]'}>{children}</div>
+  </div>
+);
+
+const ColorPicker: React.FC<{ value: string; onChange: (val: string) => void }> = ({ value, onChange }) => (
+  <div className="flex items-center gap-2 bg-[#121212] border border-[#333] rounded px-2 py-1 focus-within:border-indigo-500 focus-within:ring-1 focus-within:ring-indigo-500/50 transition-all">
+    <input
+      type="color"
+      value={value || '#ffffff'}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-5 h-5 bg-transparent border-none cursor-pointer rounded-sm color-picker-swatch"
+    />
+    <input
+      type="text"
+      value={value || '#ffffff'}
+      onChange={(e) => onChange(e.target.value)}
+      className="bg-transparent border-none text-[11px] text-gray-300 font-mono w-full focus:outline-none uppercase"
+    />
+  </div>
+);
+
 
 const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   selectedSegment,
@@ -54,19 +127,26 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   isTemplateUnlinked,
   onToggleTemplateUnlink,
   onAnalyze,
-  isProcessing
+  isProcessing,
+  wordEmphases,
+  onUpdateWordEmphases,
+  activeKeywordAnimation,
+  onUpdateKeywordAnimation,
 }) => {
   const [analysisFocus, setAnalysisFocus] = useState('');
 
   if (!selectedSegment && !selectedTransition && !selectedDialogue && !isTitleSelected) {
     return (
-      <div className="h-full bg-[#1e1e1e] border-l border-[#333] p-4 flex items-center justify-center text-gray-500 text-xs text-center">
-        Select a clip, transition, title, or dialogue bubble to view properties
+      <div className="h-full bg-[#151515] p-5 flex flex-col items-center justify-center text-center border-l border-[#222]">
+        <div className="w-12 h-12 mb-3 rounded-full bg-[#222] flex items-center justify-center border border-[#333]">
+          <svg className="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
+        </div>
+        <p className="text-sm font-medium text-gray-300">No Selection</p>
+        <p className="text-xs text-gray-500 mt-1">Select a clip, transition, title, or dialogue bubble to view properties.</p>
       </div>
     );
   }
 
-  // Helper to get current transition object if a transition is selected
   const currentTransition = selectedTransition && selectedSegment
     ? (selectedTransition.side === 'in' ? selectedSegment.transitionIn : selectedSegment.transitionOut)
     : null;
@@ -91,552 +171,705 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
 
   const handleTitleStyleUpdate = (updates: Partial<TitleStyle>) => {
     if (!onUpdateTitleLayer || !titleLayer) return;
-    onUpdateTitleLayer({
-      style: { ...titleLayer.style!, ...updates }
-    });
+    onUpdateTitleLayer({ style: { ...titleLayer.style!, ...updates } });
   };
 
+  const inputClass = "w-full bg-[#121212] border border-[#333] rounded text-[11px] text-white p-2 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/30 outline-none transition-all";
+  const rangeClass = "w-full accent-indigo-500 h-1.5 bg-[#333] rounded-lg appearance-none cursor-pointer";
+
   return (
-    <div className="h-full bg-[#1e1e1e] border-l border-[#333] flex flex-col font-sans">
-      <div className="p-3 border-b border-[#333] bg-[#252525]">
-        <h2 className="text-xs font-bold uppercase tracking-widest text-gray-300">
+    <div className="h-full bg-[#151515] flex flex-col font-sans border-l border-[#222]">
+      <div className="p-4 border-b border-[#222] bg-[#1a1a1a] flex items-center justify-between sticky top-0 z-10 shadow-sm">
+        <h2 className="text-xs font-bold uppercase tracking-widest text-gray-300 flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
           {selectedTransition ? 'Transition' : selectedDialogue ? 'Subtitle' : isTitleSelected ? 'Title' : 'Clip'} Properties
         </h2>
       </div>
 
-      <div className="p-4 space-y-6 overflow-y-auto flex-1">
+      <div className="p-4 space-y-4 overflow-y-auto flex-1 pb-20">
 
         {/* SUBTITLE MODE */}
-        {selectedDialogue && subtitleStyle && onUpdateDialogueText && onUpdateSubtitleStyle ? (
-          <div className="space-y-6">
-            {/* Content Editor */}
-            <div className="space-y-2">
-              <label className="text-xs text-gray-400">Content</label>
-              <textarea
-                value={selectedDialogueText || ''}
-                onChange={(e) => onUpdateDialogueText(e.target.value)}
-                className="w-full bg-[#121212] border border-[#333] rounded text-sm text-white p-2 focus:border-purple-500 outline-none min-h-[80px]"
-                placeholder="Edit subtitle text..."
-              />
-            </div>
-
-            {/* Appearance Controls */}
-            <div className="space-y-4 pt-4 border-t border-[#333]">
-              <div className="flex justify-between items-center">
-                <div className="text-[10px] font-bold text-gray-500 uppercase">Subtitle Appearance</div>
-                {onToggleSubtitleUnlink && (
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" checked={!!isSubtitleUnlinked} onChange={onToggleSubtitleUnlink} className="rounded bg-[#333] border-[#555] text-blue-600 focus:ring-0" />
-                    <span className={`text-[10px] ${isSubtitleUnlinked ? 'text-blue-400 font-bold' : 'text-gray-500'}`}>Unlink Style</span>
-                  </label>
-                )}
-              </div>
-              {isSubtitleUnlinked && <div className="text-[9px] text-blue-500/80 -mt-2">Changes affect only this subtitle.</div>}
-              {!isSubtitleUnlinked && <div className="text-[9px] text-gray-600 -mt-2">Changes affect all subtitles.</div>}
-
-              {/* Font & Size */}
-              <div className="flex gap-2">
-                <div className="flex-1 space-y-1">
-                  <label className="text-[10px] text-gray-400">Font</label>
-                  <select
-                    value={subtitleStyle.fontFamily}
-                    onChange={(e) => onUpdateSubtitleStyle({ fontFamily: e.target.value })}
-                    className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1"
-                  >
-                    {FONTS.map(f => <option key={f} value={f}>{f}</option>)}
-                  </select>
+        {selectedDialogue && subtitleStyle && onUpdateDialogueText && onUpdateSubtitleStyle && (
+          <div className="space-y-4">
+            <Accordion title="Content" defaultOpen={true}>
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-[11px] text-gray-400 font-medium">Text Content</label>
+                  {onToggleSubtitleUnlink && (
+                    <label className="flex items-center gap-1.5 cursor-pointer bg-[#222] px-2 py-1 rounded border border-[#333] hover:border-indigo-500 transition-colors">
+                      <input type="checkbox" checked={!!isSubtitleUnlinked} onChange={onToggleSubtitleUnlink} className="rounded bg-[#111] border-[#444] text-indigo-500 focus:ring-0 w-3 h-3" />
+                      <span className={`text-[9px] font-bold uppercase ${isSubtitleUnlinked ? 'text-indigo-400' : 'text-gray-500'}`}>Unlink Style</span>
+                    </label>
+                  )}
                 </div>
-                <div className="w-16 space-y-1">
-                  <label className="text-[10px] text-gray-400">Size</label>
-                  <input
-                    type="number"
-                    value={subtitleStyle.fontSize}
-                    onChange={(e) => onUpdateSubtitleStyle({ fontSize: parseInt(e.target.value) })}
-                    className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1"
-                  />
-                </div>
-              </div>
-
-              {/* Style Toggles & Alignment */}
-              <div className="flex gap-2">
-                <button
-                  onClick={() => onUpdateSubtitleStyle({ bold: !subtitleStyle.bold })}
-                  className={`flex-1 py-1 rounded text-xs border ${subtitleStyle.bold ? 'bg-blue-600 border-blue-600 text-white' : 'bg-[#2a2a2a] border-[#333] text-gray-400'}`}
-                >
-                  Bold
-                </button>
-                <button
-                  onClick={() => onUpdateSubtitleStyle({ italic: !subtitleStyle.italic })}
-                  className={`flex-1 py-1 rounded text-xs border ${subtitleStyle.italic ? 'bg-blue-600 border-blue-600 text-white' : 'bg-[#2a2a2a] border-[#333] text-gray-400'}`}
-                >
-                  Italic
-                </button>
-              </div>
-              <div className="flex gap-1 bg-[#2a2a2a] p-1 rounded border border-[#333]">
-                {['left', 'center', 'right'].map((align: any) => (
-                  <button
-                    key={align}
-                    onClick={() => onUpdateSubtitleStyle({ textAlign: align })}
-                    className={`flex-1 py-1 rounded text-xs uppercase ${subtitleStyle.textAlign === align ? 'bg-[#444] text-white' : 'text-gray-500 hover:text-gray-300'}`}
-                  >
-                    {align}
-                  </button>
-                ))}
-              </div>
-
-              {/* Colors */}
-              <div className="flex gap-4">
-                <div className="space-y-1">
-                  <label className="text-[10px] text-gray-400">Text Color</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="color"
-                      value={subtitleStyle.color}
-                      onChange={(e) => onUpdateSubtitleStyle({ color: e.target.value })}
-                      className="w-8 h-8 bg-transparent border-none cursor-pointer"
-                    />
-                    <span className="text-[10px] text-gray-500 font-mono">{subtitleStyle.color}</span>
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] text-gray-400">Bg Color</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="color"
-                      value={subtitleStyle.backgroundColor}
-                      onChange={(e) => onUpdateSubtitleStyle({ backgroundColor: e.target.value })}
-                      className="w-8 h-8 bg-transparent border-none cursor-pointer"
-                    />
-                    <span className="text-[10px] text-gray-500 font-mono">{subtitleStyle.backgroundColor}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Background Type */}
-              <div className="space-y-1">
-                <label className="text-[10px] text-gray-400">Background Style</label>
-                <select
-                  value={subtitleStyle.backgroundType}
-                  onChange={(e) => onUpdateSubtitleStyle({ backgroundType: e.target.value as any })}
-                  className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-2"
-                >
-                  <option value="none">None (Text Shadow)</option>
-                  <option value="outline">Outline</option>
-                  <option value="box">Box</option>
-                  <option value="rounded">Rounded Box</option>
-                  <option value="stripe">Stripe</option>
-                </select>
-              </div>
-
-              {/* Border & Shape (New) */}
-              {(subtitleStyle.backgroundType === 'box' || subtitleStyle.backgroundType === 'rounded' || subtitleStyle.backgroundType === 'stripe') && (
-                <div className="space-y-3 pt-2 border-t border-[#333]">
-                  <div className="text-[10px] font-bold text-gray-500 uppercase">Border & Shape</div>
-
-                  <div className="flex gap-4">
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-gray-400">Border Color</label>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="color"
-                          value={subtitleStyle.boxBorderColor || '#ffffff'}
-                          onChange={(e) => onUpdateSubtitleStyle({ boxBorderColor: e.target.value })}
-                          className="w-8 h-8 bg-transparent border-none cursor-pointer"
-                        />
-                        <span className="text-[10px] text-gray-500 font-mono">{subtitleStyle.boxBorderColor}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[10px] text-gray-400">
-                      <span>Border Width</span>
-                      <span>{subtitleStyle.boxBorderWidth || 0}px</span>
-                    </div>
-                    <input
-                      type="range" min="0" max="20" step="1"
-                      value={subtitleStyle.boxBorderWidth || 0}
-                      onChange={(e) => onUpdateSubtitleStyle({ boxBorderWidth: parseInt(e.target.value) })}
-                      className="w-full accent-blue-500 h-1 bg-[#333] rounded-lg cursor-pointer"
-                    />
-                  </div>
-
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[10px] text-gray-400">
-                      <span>Corner Radius</span>
-                      <span>{subtitleStyle.boxBorderRadius || 0}px</span>
-                    </div>
-                    <input
-                      type="range" min="0" max="50" step="1"
-                      value={subtitleStyle.boxBorderRadius || 0}
-                      onChange={(e) => onUpdateSubtitleStyle({ boxBorderRadius: parseInt(e.target.value) })}
-                      className="w-full accent-blue-500 h-1 bg-[#333] rounded-lg cursor-pointer"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Sliders */}
-              <div className="space-y-3 pt-2 border-t border-[#333]">
-                <div className="space-y-1">
-                  <div className="flex justify-between text-[10px] text-gray-400">
-                    <span>Background Opacity</span>
-                    <span>{Math.round(subtitleStyle.backgroundOpacity * 100)}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0" max="1" step="0.05"
-                    value={subtitleStyle.backgroundOpacity}
-                    onChange={(e) => onUpdateSubtitleStyle({ backgroundOpacity: parseFloat(e.target.value) })}
-                    className="w-full accent-blue-500 h-1 bg-[#333] rounded-lg cursor-pointer"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <div className="flex justify-between text-[10px] text-gray-400">
-                    <span>Vertical Position</span>
-                    <span>{subtitleStyle.bottomOffset}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0" max="90" step="1"
-                    value={subtitleStyle.bottomOffset}
-                    onChange={(e) => onUpdateSubtitleStyle({ bottomOffset: parseInt(e.target.value) })}
-                    className="w-full accent-blue-500 h-1 bg-[#333] rounded-lg cursor-pointer"
-                  />
-                </div>
-              </div>
-
-              {/* Subtitle Animation Controls */}
-              {activeSubtitleTemplate && onUpdateSubtitleTemplate && (
-                <div className="space-y-4 pt-4 border-t border-[#333]">
-                  <div className="flex justify-between items-center">
-                    <div className="text-[10px] font-bold text-gray-500 uppercase">Animation</div>
-                    <div className="flex items-center gap-3">
-                      <span className="text-[9px] text-purple-400">{activeSubtitleTemplate.name}</span>
-                      {onToggleTemplateUnlink && (
-                        <label className="flex items-center gap-2 cursor-pointer">
-                          <input type="checkbox" checked={!!isTemplateUnlinked} onChange={onToggleTemplateUnlink} className="rounded bg-[#333] border-[#555] text-purple-600 focus:ring-0" />
-                          <span className={`text-[10px] ${isTemplateUnlinked ? 'text-purple-400 font-bold' : 'text-gray-500'}`}>Unlink</span>
-                        </label>
-                      )}
-                    </div>
-                  </div>
-                  {isTemplateUnlinked && <div className="text-[9px] text-purple-500/80 -mt-2">Animation affects only this subtitle.</div>}
-                  {!isTemplateUnlinked && <div className="text-[9px] text-gray-600 -mt-2">Animation affects all subtitles.</div>}
-                  <AnimationControls
-                    animation={activeSubtitleTemplate.animation}
-                    onChange={(newAnim: TextAnimation) => onUpdateSubtitleTemplate({ ...activeSubtitleTemplate, animation: newAnim })}
-                  />
-                </div>
-              )}
-              {!activeSubtitleTemplate && (
-                <div className="pt-4 border-t border-[#333]">
-                  <div className="text-[10px] text-gray-600 text-center py-2">
-                    Select a template in the TEMPLATES tab to add animation effects.
-                  </div>
-                </div>
-              )}
-
-            </div>
-          </div>
-        ) : isTitleSelected && titleLayer && onUpdateTitleLayer && titleLayer.style ? (
-          /* TITLE MODE */
-          <div className="space-y-6">
-            <div className="space-y-2">
-              <label className="text-xs text-gray-400">Title Text</label>
-              <textarea
-                value={titleLayer.text}
-                onChange={(e) => onUpdateTitleLayer({ text: e.target.value })}
-                className="w-full bg-[#121212] border border-[#333] rounded text-sm text-white p-2 focus:border-indigo-500 outline-none min-h-[60px]"
-              />
-            </div>
-
-            {/* NEW ANIMATION CONTROLS */}
-            <div className="space-y-4 pt-4 border-t border-[#333]">
-              <div className="text-[10px] font-bold text-gray-500 uppercase">Animation</div>
-
-              <AnimationControls
-                animation={titleLayer.animation || {
-                  id: 'custom',
-                  name: 'Custom',
-                  duration: (titleLayer.endTime - titleLayer.startTime),
-                  scope: 'element',
-                  stagger: 0.05,
-                  effects: []
-                }}
-                onChange={(newAnim) => onUpdateTitleLayer!({ animation: newAnim })}
-              />
-
-              {/* Basic Timing (Start/End only, duration derived from animation or explicit) */}
-              <div className="grid grid-cols-2 gap-2 pt-2">
-                <div className="space-y-1">
-                  <label className="text-[10px] text-gray-400">Start (s)</label>
-                  <input type="number" step="0.1" value={titleLayer.startTime} onChange={e => onUpdateTitleLayer({ startTime: parseFloat(e.target.value) })} className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] text-gray-400">End (s)</label>
-                  <input type="number" step="0.1" value={titleLayer.endTime} onChange={e => onUpdateTitleLayer({ endTime: parseFloat(e.target.value) })} className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1" />
-                </div>
-              </div>
-            </div>
-
-            <div className="space-y-4 pt-4 border-t border-[#333]">
-              <div className="text-[10px] font-bold text-gray-500 uppercase">Appearance</div>
-              {/* Font & Size */}
-              <div className="flex gap-2">
-                <div className="flex-1 space-y-1">
-                  <label className="text-[10px] text-gray-400">Font</label>
-                  <select
-                    value={titleLayer.style.fontFamily}
-                    onChange={(e) => handleTitleStyleUpdate({ fontFamily: e.target.value })}
-                    className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1"
-                  >
-                    {FONTS.map(f => <option key={f} value={f}>{f}</option>)}
-                  </select>
-                </div>
-                <div className="w-16 space-y-1">
-                  <label className="text-[10px] text-gray-400">Size</label>
-                  <input
-                    type="number"
-                    value={titleLayer.style.fontSize}
-                    onChange={(e) => handleTitleStyleUpdate({ fontSize: parseInt(e.target.value) })}
-                    className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-1"
-                  />
-                </div>
-              </div>
-
-              <div className="flex gap-2">
-                <button onClick={() => handleTitleStyleUpdate({ bold: !titleLayer.style!.bold })} className={`flex-1 py-1 rounded text-xs border ${titleLayer.style!.bold ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-[#2a2a2a] border-[#333] text-gray-400'}`}>Bold</button>
-                <button onClick={() => handleTitleStyleUpdate({ italic: !titleLayer.style!.italic })} className={`flex-1 py-1 rounded text-xs border ${titleLayer.style!.italic ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-[#2a2a2a] border-[#333] text-gray-400'}`}>Italic</button>
-              </div>
-
-              <div className="flex gap-1 bg-[#2a2a2a] p-1 rounded border border-[#333]">
-                {['left', 'center', 'right'].map((align: any) => (
-                  <button
-                    key={align}
-                    onClick={() => handleTitleStyleUpdate({ textAlign: align })}
-                    className={`flex-1 py-1 rounded text-xs uppercase ${titleLayer.style!.textAlign === align ? 'bg-[#444] text-white' : 'text-gray-500 hover:text-gray-300'}`}
-                  >
-                    {align}
-                  </button>
-                ))}
-              </div>
-
-              {/* Colors */}
-              <div className="flex gap-4">
-                <div className="space-y-1">
-                  <label className="text-[10px] text-gray-400">Text Color</label>
-                  <div className="flex items-center gap-2">
-                    <input type="color" value={titleLayer.style.color} onChange={(e) => handleTitleStyleUpdate({ color: e.target.value })} className="w-8 h-8 bg-transparent border-none cursor-pointer" />
-                    <span className="text-[10px] text-gray-500 font-mono">{titleLayer.style.color}</span>
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] text-gray-400">Bg Color</label>
-                  <div className="flex items-center gap-2">
-                    <input type="color" value={titleLayer.style.backgroundColor} onChange={(e) => handleTitleStyleUpdate({ backgroundColor: e.target.value })} className="w-8 h-8 bg-transparent border-none cursor-pointer" />
-                    <span className="text-[10px] text-gray-500 font-mono">{titleLayer.style.backgroundColor}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Background Type */}
-              <div className="space-y-1">
-                <label className="text-[10px] text-gray-400">Background Style</label>
-                <select
-                  value={titleLayer.style.backgroundType}
-                  onChange={(e) => handleTitleStyleUpdate({ backgroundType: e.target.value as any })}
-                  className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-2"
-                >
-                  <option value="none">None (Text Shadow)</option>
-                  <option value="outline">Outline</option>
-                  <option value="box">Box</option>
-                  <option value="rounded">Rounded Box</option>
-                  <option value="stripe">Stripe</option>
-                </select>
-              </div>
-
-              {/* Borders */}
-              {(titleLayer.style.backgroundType === 'box' || titleLayer.style.backgroundType === 'rounded' || titleLayer.style.backgroundType === 'stripe') && (
-                <div className="space-y-3 pt-2 border-t border-[#333]">
-                  <div className="flex gap-4">
-                    <div className="space-y-1">
-                      <label className="text-[10px] text-gray-400">Border Color</label>
-                      <div className="flex items-center gap-2">
-                        <input type="color" value={titleLayer.style.boxBorderColor || '#ffffff'} onChange={(e) => handleTitleStyleUpdate({ boxBorderColor: e.target.value })} className="w-8 h-8 bg-transparent border-none cursor-pointer" />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[10px] text-gray-400"><span>Border Width</span><span>{titleLayer.style.boxBorderWidth || 0}px</span></div>
-                    <input type="range" min="0" max="20" step="1" value={titleLayer.style.boxBorderWidth || 0} onChange={(e) => handleTitleStyleUpdate({ boxBorderWidth: parseInt(e.target.value) })} className="w-full accent-indigo-500 h-1 bg-[#333] rounded-lg cursor-pointer" />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[10px] text-gray-400"><span>Corner Radius</span><span>{titleLayer.style.boxBorderRadius || 0}px</span></div>
-                    <input type="range" min="0" max="50" step="1" value={titleLayer.style.boxBorderRadius || 0} onChange={(e) => handleTitleStyleUpdate({ boxBorderRadius: parseInt(e.target.value) })} className="w-full accent-indigo-500 h-1 bg-[#333] rounded-lg cursor-pointer" />
-                  </div>
-                </div>
-              )}
-
-              <div className="space-y-3 pt-2 border-t border-[#333]">
-                <div className="space-y-1">
-                  <div className="flex justify-between text-[10px] text-gray-400"><span>Top Position</span><span>{titleLayer.style.topOffset}%</span></div>
-                  <input type="range" min="0" max="90" step="1" value={titleLayer.style.topOffset} onChange={(e) => handleTitleStyleUpdate({ topOffset: parseInt(e.target.value) })} className="w-full accent-indigo-500 h-1 bg-[#333] rounded-lg cursor-pointer" />
-                </div>
-              </div>
-
-            </div>
-          </div>
-        ) : selectedTransition && selectedSegment ? (
-          /* TRANSITION MODE */
-          <>
-            <div className="space-y-3">
-              <div className="flex justify-between items-center">
-                <label className="text-xs text-gray-400">Type</label>
-                <button onClick={removeTransition} className="text-[10px] text-red-400 hover:text-red-300">Remove</button>
-              </div>
-              <select
-                value={currentTransition?.type || 'FADE'}
-                onChange={(e) => handleTransitionChange({ type: e.target.value as TransitionType })}
-                className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-2 focus:border-blue-500 outline-none"
-              >
-                <option value="FADE">Opacity Fade</option>
-                <option value="CROSSFADE">Crossfade</option>
-                <option value="WASH_WHITE">Wash White</option>
-                <option value="WASH_BLACK">Wash Black</option>
-                <option value="WASH_COLOR">Wash Color</option>
-              </select>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-xs text-gray-400 flex justify-between">
-                <span>Duration</span>
-                <span className="text-gray-200">{currentTransition?.duration?.toFixed(2) || 0.5}s</span>
-              </label>
-              <input
-                type="range"
-                min="0.1"
-                max="3.0"
-                step="0.1"
-                value={currentTransition?.duration || 0.5}
-                onChange={(e) => handleTransitionChange({ duration: parseFloat(e.target.value) })}
-                className="w-full accent-blue-500 h-1 bg-[#333] rounded-lg appearance-none cursor-pointer"
-              />
-            </div>
-
-            {/* Blend Mode (Available for all transitions) */}
-            <div className="space-y-1">
-              <label className="text-xs text-gray-400">Blend Mode</label>
-              <select
-                value={currentTransition?.blendMode || 'normal'}
-                onChange={(e) => handleTransitionChange({ blendMode: e.target.value })}
-                className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-2 outline-none"
-              >
-                {BLEND_MODES.map(m => (
-                  <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</option>
-                ))}
-              </select>
-              <p className="text-[9px] text-gray-600">Apply standard CSS blend modes to the transition.</p>
-            </div>
-
-            {/* Overlay Options (Only for Wash types) */}
-            {currentTransition?.type?.startsWith('WASH') && (
-              <div className="p-3 bg-[#2a2a2a] rounded border border-[#333] space-y-3 mt-4">
-                <div className="text-[10px] font-bold text-gray-500 uppercase">Wash Color Settings</div>
-
-                {currentTransition.type === 'WASH_COLOR' && (
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs text-gray-400">Color</label>
-                    <input
-                      type="color"
-                      value={currentTransition.color || '#ff0000'}
-                      onChange={(e) => handleTransitionChange({ color: e.target.value })}
-                      className="bg-transparent border-none w-8 h-8 cursor-pointer"
-                    />
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="text-[10px] text-gray-500 mt-4">
-              Selected: {selectedTransition.side.toUpperCase()} of {selectedSegment.description}
-            </div>
-          </>
-        ) : (
-          /* CLIP MODE */
-          selectedSegment && (
-            <>
-              <div className="space-y-3">
-                <label className="text-xs text-gray-400">Name</label>
-                <input
-                  type="text"
-                  value={selectedSegment.description}
-                  onChange={(e) => onUpdateSegment({ ...selectedSegment, description: e.target.value })}
-                  className="w-full bg-[#121212] border border-[#333] rounded text-xs text-white p-2 focus:border-blue-500 outline-none"
+                <textarea
+                  value={selectedDialogueText || ''}
+                  onChange={(e) => onUpdateDialogueText(e.target.value)}
+                  className={`${inputClass} min-h-[80px] text-sm`}
+                  placeholder="Edit subtitle text..."
                 />
               </div>
+            </Accordion>
 
-              <div className="space-y-3">
-                <label className="text-xs text-gray-400">Clip Color</label>
-                <div className="flex gap-2 flex-wrap">
-                  {['#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#78716c'].map(c => (
-                    <button
-                      key={c}
-                      onClick={() => onUpdateSegment({ ...selectedSegment, color: c })}
-                      className={`w-5 h-5 rounded-full border border-white/10 ${selectedSegment.color === c ? 'ring-2 ring-white' : ''}`}
-                      style={{ backgroundColor: c }}
-                    />
+            <Accordion title="Typography" defaultOpen={true}>
+              <div className="space-y-4">
+                <div className="flex gap-3">
+                  <Field label="Font" stack={true}>
+                    <select value={subtitleStyle.fontFamily} onChange={(e) => onUpdateSubtitleStyle({ fontFamily: e.target.value })} className={inputClass}>
+                      {FONTS.map(f => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                  </Field>
+                  <div className="w-20">
+                    <Field label="Size" stack={true}>
+                      <input type="number" value={subtitleStyle.fontSize} onChange={(e) => onUpdateSubtitleStyle({ fontSize: parseInt(e.target.value) })} className={inputClass} />
+                    </Field>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <button onClick={() => onUpdateSubtitleStyle({ bold: !subtitleStyle.bold })} className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors border ${subtitleStyle.bold ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'}`}>Bold</button>
+                  <button onClick={() => onUpdateSubtitleStyle({ italic: !subtitleStyle.italic })} className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors border ${subtitleStyle.italic ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'}`}>Italic</button>
+                </div>
+
+                <div className="flex bg-[#222] p-1 rounded border border-[#333]">
+                  {['left', 'center', 'right'].map((align: any) => (
+                    <button key={align} onClick={() => onUpdateSubtitleStyle({ textAlign: align })} className={`flex-1 py-1.5 rounded text-[10px] font-bold uppercase transition-colors ${subtitleStyle.textAlign === align ? 'bg-[#333] text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}>
+                      {align}
+                    </button>
                   ))}
                 </div>
-              </div>
 
-              <div className="grid grid-cols-2 gap-3 pt-4 border-t border-[#333]">
-                <div>
-                  <label className="text-[10px] text-gray-500">In Point</label>
-                  <div className="text-sm font-mono text-gray-300">{selectedSegment.startTime.toFixed(2)}s</div>
+                <Field label="Text Color" stack={true}>
+                  <ColorPicker value={subtitleStyle.color || '#ffffff'} onChange={(v) => onUpdateSubtitleStyle({ color: v })} />
+                </Field>
+              </div>
+            </Accordion>
+
+            <Accordion title="Background" defaultOpen={false}>
+              <div className="space-y-5">
+                <Field label="Style" stack={true}>
+                  <select value={subtitleStyle.backgroundType} onChange={(e) => onUpdateSubtitleStyle({ backgroundType: e.target.value as any })} className={inputClass}>
+                    <option value="none">None / Transparent</option>
+                    <option value="outline">Text Outline</option>
+                    <option value="box">Solid Box</option>
+                    <option value="rounded">Rounded Box</option>
+                    <option value="stripe">Full Width Stripe</option>
+                  </select>
+                </Field>
+
+                {subtitleStyle.backgroundType !== 'none' && subtitleStyle.backgroundType !== 'outline' && (
+                  <>
+                    <Field label="Color" stack={true}>
+                      <ColorPicker value={subtitleStyle.backgroundColor || '#000000'} onChange={(v) => onUpdateSubtitleStyle({ backgroundColor: v })} />
+                    </Field>
+
+                    <Field label="Opacity" rightLabel={`${Math.round(subtitleStyle.backgroundOpacity * 100)}%`} stack={true}>
+                      <input type="range" min="0" max="1" step="0.05" value={subtitleStyle.backgroundOpacity} onChange={(e) => onUpdateSubtitleStyle({ backgroundOpacity: parseFloat(e.target.value) })} className={rangeClass} />
+                    </Field>
+                  </>
+                )}
+
+                {(subtitleStyle.backgroundType === 'box' || subtitleStyle.backgroundType === 'rounded' || subtitleStyle.backgroundType === 'stripe') && (
+                  <Group title="Borders">
+                    <Field label="Border Color" stack={true}>
+                      <ColorPicker value={subtitleStyle.boxBorderColor || '#ffffff'} onChange={(v) => onUpdateSubtitleStyle({ boxBorderColor: v })} />
+                    </Field>
+                    <Field label="Border Width" rightLabel={`${subtitleStyle.boxBorderWidth || 0}px`} stack={true}>
+                      <input type="range" min="0" max="20" step="1" value={subtitleStyle.boxBorderWidth || 0} onChange={(e) => onUpdateSubtitleStyle({ boxBorderWidth: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                    {subtitleStyle.backgroundType === 'rounded' && (
+                      <Field label="Corner Radius" rightLabel={`${subtitleStyle.boxBorderRadius || 0}px`} stack={true}>
+                        <input type="range" min="0" max="50" step="1" value={subtitleStyle.boxBorderRadius || 0} onChange={(e) => onUpdateSubtitleStyle({ boxBorderRadius: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                    )}
+                  </Group>
+                )}
+
+                {subtitleStyle.backgroundType === 'outline' && (
+                  <Group title="Stroke Settings">
+                    <Field label="Outline Color" stack={true}>
+                      <ColorPicker value={subtitleStyle.outlineColor || '#000000'} onChange={(v) => onUpdateSubtitleStyle({ outlineColor: v })} />
+                    </Field>
+                    <Field label="Stroke Width" rightLabel={`${subtitleStyle.outlineWidth || 2}px`} stack={true}>
+                      <input type="range" min="1" max="10" step="1" value={subtitleStyle.outlineWidth || 2} onChange={(e) => onUpdateSubtitleStyle({ outlineWidth: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                  </Group>
+                )}
+
+                {(subtitleStyle.backgroundType === 'box' || subtitleStyle.backgroundType === 'rounded' || subtitleStyle.backgroundType === 'stripe') && (
+                  <Group title="Backdrop Effects">
+                    <Field label="Backdrop Blend" stack={true}>
+                      <select value={subtitleStyle.backdropBlendMode || 'normal'} onChange={(e) => onUpdateSubtitleStyle({ backdropBlendMode: e.target.value })} className={inputClass}>
+                        {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                      </select>
+                    </Field>
+                    <div className="grid grid-cols-2 gap-4 pt-2">
+                      <Field label="Drop Shadow" stack={true}>
+                        <ColorPicker value={subtitleStyle.backdropShadowColor || '#000000'} onChange={(v) => onUpdateSubtitleStyle({ backdropShadowColor: v })} />
+                      </Field>
+                      <Field label="Outer Glow" stack={true}>
+                        <ColorPicker value={subtitleStyle.backdropGlowColor || '#00ff00'} onChange={(v) => onUpdateSubtitleStyle({ backdropGlowColor: v })} />
+                      </Field>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <Field label="Shadow Blend" stack={true}>
+                        <select value={subtitleStyle.backdropShadowBlendMode || 'normal'} onChange={(e) => onUpdateSubtitleStyle({ backdropShadowBlendMode: e.target.value })} className={inputClass}>
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                      <Field label="Glow Blend" stack={true}>
+                        <select value={subtitleStyle.backdropGlowBlendMode || 'normal'} onChange={(e) => onUpdateSubtitleStyle({ backdropGlowBlendMode: e.target.value })} className={inputClass}>
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                    </div>
+
+                    <div className="space-y-4 pt-2">
+                      <Field label="Shadow Blur" rightLabel={`${subtitleStyle.backdropShadowBlur || 0}px`} stack={true}>
+                        <input type="range" min="0" max="20" step="1" value={subtitleStyle.backdropShadowBlur || 0} onChange={(e) => onUpdateSubtitleStyle({ backdropShadowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Shadow X Offset" rightLabel={`${subtitleStyle.backdropShadowOffsetX || 0}px`} stack={true}>
+                        <input type="range" min="-20" max="20" step="1" value={subtitleStyle.backdropShadowOffsetX || 0} onChange={(e) => onUpdateSubtitleStyle({ backdropShadowOffsetX: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Shadow Y Offset" rightLabel={`${subtitleStyle.backdropShadowOffsetY || 0}px`} stack={true}>
+                        <input type="range" min="-20" max="20" step="1" value={subtitleStyle.backdropShadowOffsetY || 0} onChange={(e) => onUpdateSubtitleStyle({ backdropShadowOffsetY: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <div className="border-t border-[#2a2a2a] pt-3"></div>
+                      <Field label="Glow Amount" rightLabel={`${subtitleStyle.backdropGlowBlur || 0}px`} stack={true}>
+                        <input type="range" min="0" max="50" step="1" value={subtitleStyle.backdropGlowBlur || 0} onChange={(e) => onUpdateSubtitleStyle({ backdropGlowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <div className="border-t border-[#2a2a2a] pt-3"></div>
+                      <Field label="Inner Glow" stack={true}>
+                        <ColorPicker value={subtitleStyle.innerGlowColor || '#ffffff'} onChange={(v) => onUpdateSubtitleStyle({ innerGlowColor: v })} />
+                      </Field>
+                      <Field label="Inner Glow Blur" rightLabel={`${subtitleStyle.innerGlowBlur || 0}px`} stack={true}>
+                        <input type="range" min="0" max="30" step="1" value={subtitleStyle.innerGlowBlur || 0} onChange={(e) => onUpdateSubtitleStyle({ innerGlowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Inner Glow Blend" stack={true}>
+                        <select value={subtitleStyle.innerGlowBlendMode || 'normal'} onChange={(e) => onUpdateSubtitleStyle({ innerGlowBlendMode: e.target.value })} className={inputClass}>
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                    </div>
+                  </Group>
+                )}
+              </div>
+            </Accordion>
+
+            <Accordion title="Text Effects" defaultOpen={false}>
+              <div className="space-y-6">
+                <Group title="Gradients">
+                  <Field label="Type" stack={true}>
+                    <select value={subtitleStyle.gradientType || 'none'} onChange={(e) => {
+                      const type = e.target.value as any;
+                      if (type !== 'none' && !subtitleStyle.gradientStops && (!subtitleStyle.gradientColors || subtitleStyle.gradientColors.length === 0)) {
+                        onUpdateSubtitleStyle({ gradientType: type, gradientStops: [{ color: '#ff0000', position: 0 }, { color: '#0000ff', position: 100 }] });
+                      } else {
+                        onUpdateSubtitleStyle({ gradientType: type });
+                      }
+                    }} className={inputClass}>
+                      <option value="none">None</option>
+                      <option value="linear">Linear</option>
+                      <option value="radial">Radial</option>
+                    </select>
+                  </Field>
+                  {subtitleStyle.gradientType && subtitleStyle.gradientType !== 'none' && (
+                    <>
+                      <GradientEditor
+                        stops={subtitleStyle.gradientStops || (subtitleStyle.gradientColors ? migrateGradientColors(subtitleStyle.gradientColors) : [{ color: '#ff0000', position: 0 }, { color: '#0000ff', position: 100 }])}
+                        type={subtitleStyle.gradientType as 'linear' | 'radial'}
+                        angle={subtitleStyle.gradientAngle || 0}
+                        onChange={(stops) => onUpdateSubtitleStyle({ gradientStops: stops, gradientColors: [stops[0].color, stops[stops.length - 1].color] })}
+                        onTypeChange={(type) => onUpdateSubtitleStyle({ gradientType: type })}
+                        onAngleChange={(angle) => onUpdateSubtitleStyle({ gradientAngle: angle })}
+                      />
+                      <Field label="Gradient Blend" stack={true}>
+                        <select value={subtitleStyle.gradientBlendMode || 'normal'} onChange={(e) => onUpdateSubtitleStyle({ gradientBlendMode: e.target.value })} className={inputClass}>
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                    </>
+                  )}
+                </Group>
+
+                <Group title="Shadow & Glow">
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="Drop Shadow" stack={true}>
+                      <ColorPicker value={subtitleStyle.textShadowColor || '#000000'} onChange={(v) => onUpdateSubtitleStyle({ textShadowColor: v })} />
+                    </Field>
+                    <Field label="Outer Glow" stack={true}>
+                      <ColorPicker value={subtitleStyle.glowColor || '#00ff00'} onChange={(v) => onUpdateSubtitleStyle({ glowColor: v })} />
+                    </Field>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="Shadow Blend" stack={true}>
+                      <select value={subtitleStyle.shadowBlendMode || 'normal'} onChange={(e) => onUpdateSubtitleStyle({ shadowBlendMode: e.target.value })} className={inputClass}>
+                        {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Glow Blend" stack={true}>
+                      <select value={subtitleStyle.glowBlendMode || 'normal'} onChange={(e) => onUpdateSubtitleStyle({ glowBlendMode: e.target.value })} className={inputClass}>
+                        {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+
+                  <div className="space-y-4 pt-2">
+                    <Field label="Shadow Blur" rightLabel={`${subtitleStyle.textShadowBlur || 0}px`} stack={true}>
+                      <input type="range" min="0" max="20" step="1" value={subtitleStyle.textShadowBlur || 0} onChange={(e) => onUpdateSubtitleStyle({ textShadowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                    <Field label="Shadow X Offset" rightLabel={`${subtitleStyle.textShadowOffsetX || 0}px`} stack={true}>
+                      <input type="range" min="-20" max="20" step="1" value={subtitleStyle.textShadowOffsetX || 0} onChange={(e) => onUpdateSubtitleStyle({ textShadowOffsetX: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                    <Field label="Shadow Y Offset" rightLabel={`${subtitleStyle.textShadowOffsetY || 0}px`} stack={true}>
+                      <input type="range" min="-20" max="20" step="1" value={subtitleStyle.textShadowOffsetY || 0} onChange={(e) => onUpdateSubtitleStyle({ textShadowOffsetY: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                    <div className="border-t border-[#2a2a2a] pt-3"></div>
+                    <Field label="Glow Amount" rightLabel={`${subtitleStyle.glowBlur || 0}px`} stack={true}>
+                      <input type="range" min="0" max="50" step="1" value={subtitleStyle.glowBlur || 0} onChange={(e) => onUpdateSubtitleStyle({ glowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                  </div>
+                </Group>
+              </div>
+            </Accordion>
+
+            <Accordion title="Layout & Rules" defaultOpen={false}>
+              <div className="space-y-4">
+                <Field label="Vertical Position" rightLabel={`${subtitleStyle.bottomOffset}%`} stack={true}>
+                  <input type="range" min="0" max="90" step="1" value={subtitleStyle.bottomOffset} onChange={(e) => onUpdateSubtitleStyle({ bottomOffset: parseInt(e.target.value) })} className={rangeClass} />
+                </Field>
+              </div>
+            </Accordion>
+
+            <Accordion title="Animation & Dynamics" defaultOpen={true}>
+              {/* Subtitle Template Link */}
+              {activeSubtitleTemplate && onUpdateSubtitleTemplate ? (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center mb-1">
+                    <div className="flex flex-col">
+                      <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Base Effect</span>
+                      <span className="text-[11px] text-indigo-400 font-medium">{activeSubtitleTemplate.name}</span>
+                    </div>
+                    {onToggleTemplateUnlink && (
+                      <label className="flex items-center gap-1.5 cursor-pointer bg-[#222] px-2 py-1 rounded border border-[#333] hover:border-indigo-500 transition-colors">
+                        <input type="checkbox" checked={!!isTemplateUnlinked} onChange={onToggleTemplateUnlink} className="rounded bg-[#111] border-[#444] text-indigo-500 focus:ring-0 w-3 h-3" />
+                        <span className={`text-[9px] font-bold uppercase ${isTemplateUnlinked ? 'text-indigo-400' : 'text-gray-500'}`}>Unlink Effect</span>
+                      </label>
+                    )}
+                  </div>
+                  <div className="p-3 bg-[#111] border border-[#222] rounded-md">
+                    <AnimationControls animation={activeSubtitleTemplate.animation} onChange={(newAnim: TextAnimation) => onUpdateSubtitleTemplate({ ...activeSubtitleTemplate, animation: newAnim })} />
+                  </div>
                 </div>
-                <div>
-                  <label className="text-[10px] text-gray-500">Out Point</label>
-                  <div className="text-sm font-mono text-gray-300">{selectedSegment.endTime.toFixed(2)}s</div>
+              ) : (
+                <div className="text-[11px] text-gray-400 bg-[#222] border border-[#333] rounded p-3 text-center">
+                  Select a template from the Templates tab.
                 </div>
-                <div>
-                  <label className="text-[10px] text-gray-500">Duration</label>
-                  <div className="text-sm font-mono text-gray-300">{(selectedSegment.endTime - selectedSegment.startTime).toFixed(2)}s</div>
+              )}
+
+              {/* Keyword Emphases */}
+              {onUpdateWordEmphases && selectedDialogueText && (
+                <div className="pt-4 mt-4 border-t border-[#2a2a2a] space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-amber-500/80 font-bold uppercase tracking-widest">Keywords Highlights</span>
+                  </div>
+                  <p className="text-[10px] text-gray-500 leading-tight">Click words in the video viewport to highlight them, then assign colors below.</p>
+
+                  {wordEmphases && wordEmphases.length > 0 ? (
+                    <div className="space-y-2">
+                      {wordEmphases.map((kw, i) => (
+                        <div key={`${kw.wordIndex}-${kw.word}`} className="flex items-center gap-2 bg-[#222] border border-[#333] rounded-md px-2 py-1.5">
+                          <input type="checkbox" checked={kw.enabled} onChange={() => { const updated = wordEmphases.map((k, j) => j === i ? { ...k, enabled: !k.enabled } : k); onUpdateWordEmphases(updated); }} className="rounded bg-[#111] border-[#444] text-amber-500 focus:ring-0 w-3 h-3" />
+                          <span className={`text-[11px] flex-1 truncate ${kw.enabled ? 'text-white font-medium' : 'text-gray-500 line-through'}`}>{kw.word} <span className="opacity-40 ml-1">#{kw.wordIndex}</span></span>
+                          <div className="w-16">
+                            <ColorPicker value={kw.color || '#FFD700'} onChange={(v) => { const updated = wordEmphases.map((k, j) => j === i ? { ...k, color: v } : k); onUpdateWordEmphases(updated); }} />
+                          </div>
+                          <button onClick={() => onUpdateWordEmphases(wordEmphases.filter((_, j) => j !== i))} className="text-gray-500 hover:text-red-400 p-1"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-gray-500 italic bg-[#151515] p-2 rounded text-center border border-[#222]">No assigned keywords.</div>
+                  )}
+
+                  {onUpdateKeywordAnimation && wordEmphases && wordEmphases.length > 0 && (
+                    <div className="mt-4 pt-3 border-t border-amber-900/30">
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="text-[10px] text-amber-500/80 font-bold uppercase tracking-widest">Keyword Entrance Popup</span>
+                        {activeKeywordAnimation && <button onClick={() => onUpdateKeywordAnimation(null)} className="text-[9px] text-red-400 hover:text-red-300">Clear</button>}
+                      </div>
+                      {activeKeywordAnimation ? (
+                        <div className="p-3 bg-[#111] border border-amber-900/40 rounded-md">
+                          <div className="text-[10px] text-amber-400 mb-2 font-medium">{activeKeywordAnimation.name || 'Custom'}</div>
+                          <AnimationControls animation={activeKeywordAnimation} onUpdate={(updated) => onUpdateKeywordAnimation(updated)} />
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-gray-500 italic bg-[#151515] p-2 rounded text-center border border-[#222]">No keyword animation chosen. Use the Templates tab to set one.</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </Accordion>
+          </div>
+        )}
+
+        {/* TITLE MODE */}
+        {isTitleSelected && titleLayer && onUpdateTitleLayer && titleLayer.style && (
+          <div className="space-y-4">
+            <Accordion title="Content & Timing" defaultOpen={true}>
+              <div className="space-y-4">
+                <Field label="Text Content" stack={true}>
+                  <textarea value={titleLayer.text} onChange={(e) => onUpdateTitleLayer({ text: e.target.value })} className={`${inputClass} min-h-[60px] text-sm`} />
+                </Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Start (s)" stack={true}>
+                    <input type="number" step="0.1" value={titleLayer.startTime} onChange={e => onUpdateTitleLayer({ startTime: parseFloat(e.target.value) })} className={inputClass} />
+                  </Field>
+                  <Field label="End (s)" stack={true}>
+                    <input type="number" step="0.1" value={titleLayer.endTime} onChange={e => onUpdateTitleLayer({ endTime: parseFloat(e.target.value) })} className={inputClass} />
+                  </Field>
                 </div>
               </div>
+            </Accordion>
+
+            <Accordion title="Typography" defaultOpen={true}>
+              <div className="space-y-4">
+                <div className="flex gap-3">
+                  <Field label="Font" stack={true}>
+                    <select value={titleLayer.style.fontFamily} onChange={(e) => handleTitleStyleUpdate({ fontFamily: e.target.value })} className={inputClass}>
+                      {FONTS.map(f => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                  </Field>
+                  <div className="w-20">
+                    <Field label="Size" stack={true}>
+                      <input type="number" value={titleLayer.style.fontSize} onChange={(e) => handleTitleStyleUpdate({ fontSize: parseInt(e.target.value) })} className={inputClass} />
+                    </Field>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <button onClick={() => handleTitleStyleUpdate({ bold: !titleLayer.style!.bold })} className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors border ${titleLayer.style!.bold ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'}`}>Bold</button>
+                  <button onClick={() => handleTitleStyleUpdate({ italic: !titleLayer.style!.italic })} className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors border ${titleLayer.style!.italic ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'}`}>Italic</button>
+                </div>
+
+                <div className="flex bg-[#222] p-1 rounded border border-[#333]">
+                  {['left', 'center', 'right'].map((align: any) => (
+                    <button key={align} onClick={() => handleTitleStyleUpdate({ textAlign: align })} className={`flex-1 py-1.5 rounded text-[10px] font-bold uppercase transition-colors ${titleLayer.style!.textAlign === align ? 'bg-[#333] text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}>{align}</button>
+                  ))}
+                </div>
+
+                <Field label="Text Color" stack={true}>
+                  <ColorPicker value={titleLayer.style.color || '#ffffff'} onChange={(v) => handleTitleStyleUpdate({ color: v })} />
+                </Field>
+              </div>
+            </Accordion>
+
+            <Accordion title="Background" defaultOpen={false}>
+              <div className="space-y-5">
+                <Field label="Style" stack={true}>
+                  <select value={titleLayer.style.backgroundType} onChange={(e) => handleTitleStyleUpdate({ backgroundType: e.target.value as any })} className={inputClass}>
+                    <option value="none">None / Transparent</option>
+                    <option value="outline">Text Outline</option>
+                    <option value="box">Solid Box</option>
+                    <option value="rounded">Rounded Box</option>
+                    <option value="stripe">Full Width Stripe</option>
+                  </select>
+                </Field>
+
+                {titleLayer.style.backgroundType !== 'none' && titleLayer.style.backgroundType !== 'outline' && (
+                  <>
+                    <Field label="Color" stack={true}>
+                      <ColorPicker value={titleLayer.style.backgroundColor || '#000000'} onChange={(v) => handleTitleStyleUpdate({ backgroundColor: v })} />
+                    </Field>
+                  </>
+                )}
+
+                {(titleLayer.style.backgroundType === 'box' || titleLayer.style.backgroundType === 'rounded' || titleLayer.style.backgroundType === 'stripe') && (
+                  <Group title="Borders">
+                    <Field label="Border Color" stack={true}>
+                      <ColorPicker value={titleLayer.style.boxBorderColor || '#ffffff'} onChange={(v) => handleTitleStyleUpdate({ boxBorderColor: v })} />
+                    </Field>
+                    <Field label="Border Width" rightLabel={`${titleLayer.style.boxBorderWidth || 0}px`} stack={true}>
+                      <input type="range" min="0" max="20" step="1" value={titleLayer.style.boxBorderWidth || 0} onChange={(e) => handleTitleStyleUpdate({ boxBorderWidth: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                    {titleLayer.style.backgroundType === 'rounded' && (
+                      <Field label="Corner Radius" rightLabel={`${titleLayer.style.boxBorderRadius || 0}px`} stack={true}>
+                        <input type="range" min="0" max="50" step="1" value={titleLayer.style.boxBorderRadius || 0} onChange={(e) => handleTitleStyleUpdate({ boxBorderRadius: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                    )}
+                  </Group>
+                )}
+
+                {titleLayer.style.backgroundType === 'outline' && (
+                  <Group title="Stroke Settings">
+                    <Field label="Outline Color" stack={true}>
+                      <ColorPicker value={titleLayer.style.outlineColor || '#000000'} onChange={(v) => handleTitleStyleUpdate({ outlineColor: v })} />
+                    </Field>
+                    <Field label="Stroke Width" rightLabel={`${titleLayer.style.outlineWidth || 2}px`} stack={true}>
+                      <input type="range" min="1" max="10" step="1" value={titleLayer.style.outlineWidth || 2} onChange={(e) => handleTitleStyleUpdate({ outlineWidth: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                  </Group>
+                )}
+
+                {(titleLayer.style.backgroundType === 'box' || titleLayer.style.backgroundType === 'rounded' || titleLayer.style.backgroundType === 'stripe') && (
+                  <Group title="Backdrop Effects">
+                    <Field label="Backdrop Blend" stack={true}>
+                      <select value={titleLayer.style.backdropBlendMode || 'normal'} onChange={(e) => handleTitleStyleUpdate({ backdropBlendMode: e.target.value })} className={inputClass}>
+                        {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                      </select>
+                    </Field>
+                    <div className="grid grid-cols-2 gap-4 pt-2">
+                      <Field label="Drop Shadow" stack={true}>
+                        <ColorPicker value={titleLayer.style.backdropShadowColor || '#000000'} onChange={(v) => handleTitleStyleUpdate({ backdropShadowColor: v })} />
+                      </Field>
+                      <Field label="Outer Glow" stack={true}>
+                        <ColorPicker value={titleLayer.style.backdropGlowColor || '#00ff00'} onChange={(v) => handleTitleStyleUpdate({ backdropGlowColor: v })} />
+                      </Field>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <Field label="Shadow Blend" stack={true}>
+                        <select value={titleLayer.style.backdropShadowBlendMode || 'normal'} onChange={(e) => handleTitleStyleUpdate({ backdropShadowBlendMode: e.target.value })} className={inputClass}>
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                      <Field label="Glow Blend" stack={true}>
+                        <select value={titleLayer.style.backdropGlowBlendMode || 'normal'} onChange={(e) => handleTitleStyleUpdate({ backdropGlowBlendMode: e.target.value })} className={inputClass}>
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                    </div>
+
+                    <div className="space-y-4 pt-2">
+                      <Field label="Shadow Blur" rightLabel={`${titleLayer.style.backdropShadowBlur || 0}px`} stack={true}>
+                        <input type="range" min="0" max="20" step="1" value={titleLayer.style.backdropShadowBlur || 0} onChange={(e) => handleTitleStyleUpdate({ backdropShadowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Shadow X Offset" rightLabel={`${titleLayer.style.backdropShadowOffsetX || 0}px`} stack={true}>
+                        <input type="range" min="-20" max="20" step="1" value={titleLayer.style.backdropShadowOffsetX || 0} onChange={(e) => handleTitleStyleUpdate({ backdropShadowOffsetX: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Shadow Y Offset" rightLabel={`${titleLayer.style.backdropShadowOffsetY || 0}px`} stack={true}>
+                        <input type="range" min="-20" max="20" step="1" value={titleLayer.style.backdropShadowOffsetY || 0} onChange={(e) => handleTitleStyleUpdate({ backdropShadowOffsetY: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <div className="border-t border-[#2a2a2a] pt-3"></div>
+                      <Field label="Glow Amount" rightLabel={`${titleLayer.style.backdropGlowBlur || 0}px`} stack={true}>
+                        <input type="range" min="0" max="50" step="1" value={titleLayer.style.backdropGlowBlur || 0} onChange={(e) => handleTitleStyleUpdate({ backdropGlowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <div className="border-t border-[#2a2a2a] pt-3"></div>
+                      <Field label="Inner Glow" stack={true}>
+                        <ColorPicker value={titleLayer.style.innerGlowColor || '#ffffff'} onChange={(v) => handleTitleStyleUpdate({ innerGlowColor: v })} />
+                      </Field>
+                      <Field label="Inner Glow Blur" rightLabel={`${titleLayer.style.innerGlowBlur || 0}px`} stack={true}>
+                        <input type="range" min="0" max="30" step="1" value={titleLayer.style.innerGlowBlur || 0} onChange={(e) => handleTitleStyleUpdate({ innerGlowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Inner Glow Blend" stack={true}>
+                        <select value={titleLayer.style.innerGlowBlendMode || 'normal'} onChange={(e) => handleTitleStyleUpdate({ innerGlowBlendMode: e.target.value })} className={inputClass}>
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                    </div>
+                  </Group>
+                )}
+              </div>
+            </Accordion>
+
+            <Accordion title="Text Effects" defaultOpen={false}>
+              <div className="space-y-6">
+                <Group title="Gradients">
+                  <Field label="Type" stack={true}>
+                    <select value={titleLayer.style.gradientType || 'none'} onChange={(e) => {
+                      const type = e.target.value as any;
+                      if (type !== 'none' && !titleLayer.style.gradientStops && (!titleLayer.style.gradientColors || titleLayer.style.gradientColors.length === 0)) {
+                        handleTitleStyleUpdate({ gradientType: type, gradientStops: [{ color: '#ff0000', position: 0 }, { color: '#0000ff', position: 100 }] });
+                      } else {
+                        handleTitleStyleUpdate({ gradientType: type });
+                      }
+                    }} className={inputClass}>
+                      <option value="none">None</option>
+                      <option value="linear">Linear</option>
+                      <option value="radial">Radial</option>
+                    </select>
+                  </Field>
+                  {titleLayer.style.gradientType && titleLayer.style.gradientType !== 'none' && (
+                    <>
+                      <GradientEditor
+                        stops={titleLayer.style.gradientStops || (titleLayer.style.gradientColors ? migrateGradientColors(titleLayer.style.gradientColors) : [{ color: '#ff0000', position: 0 }, { color: '#0000ff', position: 100 }])}
+                        type={titleLayer.style.gradientType as 'linear' | 'radial'}
+                        angle={titleLayer.style.gradientAngle || 0}
+                        onChange={(stops) => handleTitleStyleUpdate({ gradientStops: stops, gradientColors: [stops[0].color, stops[stops.length - 1].color] })}
+                        onTypeChange={(type) => handleTitleStyleUpdate({ gradientType: type })}
+                        onAngleChange={(angle) => handleTitleStyleUpdate({ gradientAngle: angle })}
+                      />
+                      <Field label="Gradient Blend" stack={true}>
+                        <select value={titleLayer.style.gradientBlendMode || 'normal'} onChange={(e) => handleTitleStyleUpdate({ gradientBlendMode: e.target.value })} className={inputClass}>
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                    </>
+                  )}
+                </Group>
+
+                <Group title="Shadow & Glow">
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="Drop Shadow" stack={true}>
+                      <ColorPicker value={titleLayer.style.textShadowColor || '#000000'} onChange={(v) => handleTitleStyleUpdate({ textShadowColor: v })} />
+                    </Field>
+                    <Field label="Outer Glow" stack={true}>
+                      <ColorPicker value={titleLayer.style.glowColor || '#00ff00'} onChange={(v) => handleTitleStyleUpdate({ glowColor: v })} />
+                    </Field>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <Field label="Shadow Blend" stack={true}>
+                      <select value={titleLayer.style.shadowBlendMode || 'normal'} onChange={(e) => handleTitleStyleUpdate({ shadowBlendMode: e.target.value })} className={inputClass}>
+                        {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Glow Blend" stack={true}>
+                      <select value={titleLayer.style.glowBlendMode || 'normal'} onChange={(e) => handleTitleStyleUpdate({ glowBlendMode: e.target.value })} className={inputClass}>
+                        {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+
+                  <div className="space-y-4 pt-2">
+                    <Field label="Shadow Blur" rightLabel={`${titleLayer.style.textShadowBlur || 0}px`} stack={true}>
+                      <input type="range" min="0" max="20" step="1" value={titleLayer.style.textShadowBlur || 0} onChange={(e) => handleTitleStyleUpdate({ textShadowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                    <Field label="Shadow X Offset" rightLabel={`${titleLayer.style.textShadowOffsetX || 0}px`} stack={true}>
+                      <input type="range" min="-20" max="20" step="1" value={titleLayer.style.textShadowOffsetX || 0} onChange={(e) => handleTitleStyleUpdate({ textShadowOffsetX: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                    <Field label="Shadow Y Offset" rightLabel={`${titleLayer.style.textShadowOffsetY || 0}px`} stack={true}>
+                      <input type="range" min="-20" max="20" step="1" value={titleLayer.style.textShadowOffsetY || 0} onChange={(e) => handleTitleStyleUpdate({ textShadowOffsetY: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                    <div className="border-t border-[#2a2a2a] pt-3"></div>
+                    <Field label="Glow Amount" rightLabel={`${titleLayer.style.glowBlur || 0}px`} stack={true}>
+                      <input type="range" min="0" max="50" step="1" value={titleLayer.style.glowBlur || 0} onChange={(e) => handleTitleStyleUpdate({ glowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                    </Field>
+                  </div>
+                </Group>
+              </div>
+            </Accordion>
+
+            <Accordion title="Layout" defaultOpen={false}>
+              <div className="space-y-4">
+                <Field label="Top Position" rightLabel={`${titleLayer.style.topOffset}%`} stack={true}>
+                  <input type="range" min="0" max="90" step="1" value={titleLayer.style.topOffset} onChange={(e) => handleTitleStyleUpdate({ topOffset: parseInt(e.target.value) })} className={rangeClass} />
+                </Field>
+              </div>
+            </Accordion>
+
+            <Accordion title="Animation Effect" defaultOpen={true}>
+              <div className="p-3 bg-[#111] border border-[#222] rounded-md">
+                <AnimationControls animation={titleLayer.animation || { id: 'custom', name: 'Custom', duration: (titleLayer.endTime - titleLayer.startTime), scope: 'element', stagger: 0.05, effects: [] }} onChange={(newAnim) => onUpdateTitleLayer!({ animation: newAnim })} />
+              </div>
+            </Accordion>
+          </div>
+        )}
+
+        {/* TRANSITION MODE */}
+        {!isTitleSelected && !selectedDialogue && selectedTransition && selectedSegment && (
+          <Accordion title="Transition Settings" defaultOpen={true}>
+            <div className="space-y-5">
+              <Field label="Type" stack={true}>
+                <select value={currentTransition?.type || 'FADE'} onChange={(e) => handleTransitionChange({ type: e.target.value as TransitionType })} className={inputClass}>
+                  <option value="FADE">Opacity Fade</option>
+                  <option value="CROSSFADE">Crossfade</option>
+                  <option value="WASH_WHITE">Wash White</option>
+                  <option value="WASH_BLACK">Wash Black</option>
+                  <option value="WASH_COLOR">Wash Color</option>
+                </select>
+              </Field>
+
+              <Field label="Duration" rightLabel={`${currentTransition?.duration?.toFixed(2) || 0.5}s`} stack={true}>
+                <input type="range" min="0.1" max="3.0" step="0.1" value={currentTransition?.duration || 0.5} onChange={(e) => handleTransitionChange({ duration: parseFloat(e.target.value) })} className={rangeClass} />
+              </Field>
+
+              <Field label="CSS Blend Mode" stack={true}>
+                <select value={currentTransition?.blendMode || 'normal'} onChange={(e) => handleTransitionChange({ blendMode: e.target.value })} className={inputClass}>
+                  {BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</option>)}
+                </select>
+              </Field>
+
+              {currentTransition?.type === 'WASH_COLOR' && (
+                <Group title="Wash Color">
+                  <Field label="Color" stack={true}>
+                    <ColorPicker value={currentTransition.color || '#ff0000'} onChange={(v) => handleTransitionChange({ color: v })} />
+                  </Field>
+                </Group>
+              )}
 
               <div className="pt-4 border-t border-[#333]">
-                <div className="flex justify-between items-center mb-2">
-                  <label className="text-xs text-gray-400">AI Analysis</label>
-                  {mediaAnalysis && <span className="text-[10px] text-green-400">Done</span>}
-                </div>
-
-                <textarea
-                  value={analysisFocus}
-                  onChange={(e) => setAnalysisFocus(e.target.value)}
-                  placeholder="E.g. Focus on specific objects, actions, or details..."
-                  className="w-full bg-[#121212] border border-[#333] rounded p-2 text-xs text-white mb-2 outline-none focus:border-purple-500 min-h-[60px]"
-                />
-
-                <button
-                  onClick={() => onAnalyze && onAnalyze(selectedSegment.mediaId, analysisFocus)}
-                  disabled={isProcessing}
-                  className="w-full py-1.5 bg-purple-600/20 text-purple-400 border border-purple-600/50 rounded hover:bg-purple-600/30 text-xs font-medium disabled:opacity-50 flex items-center justify-center gap-2"
-                >
-                  {isProcessing ? (
-                    <>
-                      <span className="w-3 h-3 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></span>
-                      Analyzing...
-                    </>
-                  ) : (mediaAnalysis ? 'Refine / Re-Analyze' : 'Deep Analyze Media')}
+                <button onClick={removeTransition} className="w-full py-2 bg-red-900/20 text-red-400 border border-red-900/50 rounded-md hover:bg-red-900/40 text-[11px] font-bold tracking-widest uppercase transition-colors">
+                  Remove Transition
                 </button>
-                <p className="text-[9px] text-gray-600 mt-2">
-                  Use custom focus to ask AI to identify specific people, objects, or context in this clip.
-                </p>
+                <p className="text-[9px] text-gray-500 mt-2 text-center">Selected: {selectedTransition.side.toUpperCase()} of {selectedSegment.description}</p>
               </div>
+            </div>
+          </Accordion>
+        )}
 
-            </>
-          )
+        {/* CLIP MODE */}
+        {!isTitleSelected && !selectedDialogue && !selectedTransition && selectedSegment && (
+          <div className="space-y-4">
+            <Accordion title="Clip Settings" defaultOpen={true}>
+              <div className="space-y-4">
+                <Field label="Name" stack={true}>
+                  <input type="text" value={selectedSegment.description} onChange={(e) => onUpdateSegment({ ...selectedSegment, description: e.target.value })} className={inputClass} />
+                </Field>
+
+                {selectedSegment.type === 'blank' && (
+                  <Field label="Blank Card Text" stack={true}>
+                    <textarea value={selectedSegment.customText || ''} onChange={(e) => onUpdateSegment({ ...selectedSegment, customText: e.target.value })} className={`${inputClass} min-h-[60px] text-sm`} placeholder="Display text..." />
+                  </Field>
+                )}
+
+                <Field label="Timeline Color" stack={true}>
+                  <div className="flex gap-2 flex-wrap">
+                    {['#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#a855f7', '#ec4899', '#78716c', '#444444'].map(c => (
+                      <button key={c} onClick={() => onUpdateSegment({ ...selectedSegment, color: c })} className={`w-6 h-6 rounded-full border border-white/10 transition-transform hover:scale-110 ${selectedSegment.color === c ? 'ring-2 ring-white scale-110 shadow-lg' : ''}`} style={{ backgroundColor: c }} />
+                    ))}
+                  </div>
+                </Field>
+
+                <div className="grid grid-cols-3 gap-2 pt-2">
+                  <div className="bg-[#222] p-2 rounded border border-[#333]">
+                    <div className="text-[9px] text-gray-500 uppercase font-bold text-center">In</div>
+                    <div className="text-[11px] font-mono text-gray-300 text-center">{selectedSegment.startTime.toFixed(2)}s</div>
+                  </div>
+                  <div className="bg-[#222] p-2 rounded border border-[#333]">
+                    <div className="text-[9px] text-gray-500 uppercase font-bold text-center">Out</div>
+                    <div className="text-[11px] font-mono text-gray-300 text-center">{selectedSegment.endTime.toFixed(2)}s</div>
+                  </div>
+                  <div className="bg-[#1e1a2d] p-2 rounded border border-indigo-900/50 shadow-inner">
+                    <div className="text-[9px] text-indigo-400/80 uppercase font-bold text-center">Duration</div>
+                    <div className="text-[11px] font-mono text-indigo-300 text-center">{(selectedSegment.endTime - selectedSegment.startTime).toFixed(2)}s</div>
+                  </div>
+                </div>
+              </div>
+            </Accordion>
+
+            {selectedSegment.type !== 'blank' && (
+              <Accordion title="AI Analysis" defaultOpen={false}>
+                <div className="space-y-4">
+                  {mediaAnalysis && (
+                    <div className="bg-green-900/20 border border-green-900/50 rounded p-2 flex items-center gap-2 mb-2">
+                      <span className="w-2 h-2 rounded-full bg-green-500 blink"></span>
+                      <span className="text-[10px] text-green-400 font-medium">Analysis Completed</span>
+                    </div>
+                  )}
+                  <Field label="Analysis Focus" stack={true}>
+                    <textarea value={analysisFocus} onChange={(e) => setAnalysisFocus(e.target.value)} placeholder="Focus on objects, faces, specific actions..." className={`${inputClass} min-h-[60px] text-sm`} />
+                  </Field>
+
+                  <button onClick={() => onAnalyze && onAnalyze(selectedSegment.mediaId, analysisFocus)} disabled={isProcessing} className="w-full py-2.5 bg-indigo-600/20 text-indigo-400 border border-indigo-600/50 rounded-md hover:bg-indigo-600/30 text-[11px] font-bold uppercase tracking-widest disabled:opacity-50 flex items-center justify-center gap-2 transition-colors">
+                    {isProcessing ? (
+                      <><span className="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></span> Analyzing...</>
+                    ) : (mediaAnalysis ? 'Refine / Re-Analyze' : 'Run Deep Analysis')}
+                  </button>
+                  <p className="text-[9px] text-gray-500 text-center leading-relaxed max-w-[90%] mx-auto">Use focus to ask AI to find exact frames matching specific descriptions.</p>
+                </div>
+              </Accordion>
+            )}
+          </div>
         )}
       </div>
     </div>

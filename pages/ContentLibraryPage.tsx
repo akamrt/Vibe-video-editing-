@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { contentDB, VideoRecord, TranscriptSegment, Category, GeneratedShort, generateId } from '../services/contentDatabase';
-import { searchTranscripts, generateShort, SearchResult } from '../services/contentAIService';
+import { searchTranscripts, generateShort, SearchResult, buildShortPrompt, importManualShort } from '../services/contentAIService';
 import { CookieUploadButton } from '../components/CookieUploadButton';
+import type { KeywordEmphasis } from '../types';
+import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from '../services/costTracker';
+import { detectFillersFromTranscript, FillerDetection } from '../services/geminiService';
 
 // ==================== Types ====================
 
@@ -16,7 +19,9 @@ interface ImportingVideo {
 export const ContentLibraryPage: React.FC<{
     onNavigateToEditor?: () => void;
     onExportShort?: (short: GeneratedShort) => Promise<void>;
-}> = ({ onNavigateToEditor, onExportShort }) => {
+    autoCenterOnImport?: boolean;
+    onToggleAutoCenter?: (enabled: boolean) => void;
+}> = ({ onNavigateToEditor, onExportShort, autoCenterOnImport = false, onToggleAutoCenter }) => {
     // State
     const [isExporting, setIsExporting] = useState(false);
     const [urlInput, setUrlInput] = useState('');
@@ -42,6 +47,11 @@ export const ContentLibraryPage: React.FC<{
     const [isSearching, setIsSearching] = useState(false);
     const [generatedShorts, setGeneratedShorts] = useState<GeneratedShort[]>([]);
 
+    // AI Cost tracking
+    const [showCostPanel, setShowCostPanel] = useState(false);
+    const [costTotal, setCostTotal] = useState(0);
+    const [costLog, setCostLog] = useState<CostEntry[]>([]);
+
     // Short Generation Modal
     const [showShortModal, setShowShortModal] = useState(false);
     const [shortTargetVideo, setShortTargetVideo] = useState<string | null>(null);
@@ -50,12 +60,21 @@ export const ContentLibraryPage: React.FC<{
     const [isGeneratingShort, setIsGeneratingShort] = useState(false);
     const [generatedShort, setGeneratedShort] = useState<GeneratedShort | null>(null);
     const [refinementPrompt, setRefinementPrompt] = useState('');
-    const [selectedModel, setSelectedModel] = useState<string>('gemini-1.5-flash');
+    const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
+
+    // External AI Input
+    const [externalAiJson, setExternalAiJson] = useState('');
+    const [isGeneratingPrompt, setIsGeneratingPrompt] = useState(false);
+
+    // Filler detection
+    const [isDetectingFillers, setIsDetectingFillers] = useState(false);
+    const [fillerStatus, setFillerStatus] = useState('');
 
     // TTS Preview State
     const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
     const [previewClipIndex, setPreviewClipIndex] = useState(0);
     const [previewCaption, setPreviewCaption] = useState('');
+    const [previewKeywords, setPreviewKeywords] = useState<KeywordEmphasis[]>([]);
     const previewStopRef = useRef(false);
 
     // Group shorts by video for display
@@ -71,6 +90,17 @@ export const ContentLibraryPage: React.FC<{
     // Load data on mount
     useEffect(() => {
         loadData();
+        initCostTracker().then(() => {
+            setCostTotal(getSessionTotal());
+            setCostLog(getSessionLog());
+        });
+    }, []);
+
+    // Subscribe to cost updates
+    useEffect(() => {
+        const sync = () => { setCostTotal(getSessionTotal()); setCostLog(getSessionLog()); };
+        onCostUpdate(sync);
+        return () => offCostUpdate(sync);
     }, []);
 
     const loadData = async () => {
@@ -152,6 +182,52 @@ export const ContentLibraryPage: React.FC<{
         setIsGeneratingShort(false);
     };
 
+    const handleCopyPrompt = async () => {
+        if (!shortTargetVideo) return;
+        setIsGeneratingPrompt(true);
+        try {
+            const existingShorts = generatedShorts
+                .filter(s => s.videoId === shortTargetVideo)
+                .map(s => ({
+                    title: s.title,
+                    startTime: s.segments[0]?.startTime || 0,
+                    endTime: s.segments[s.segments.length - 1]?.endTime || 0
+                }));
+
+            const result = await buildShortPrompt(shortTargetVideo, shortPrompt, shortDuration, refinementPrompt, existingShorts);
+            if (result.success && result.prompt) {
+                await navigator.clipboard.writeText(result.prompt);
+                alert("Prompt copied to clipboard! Paste this into ChatGPT or Claude.");
+            } else {
+                alert('Failed to generate prompt: ' + (result.error || 'Unknown error'));
+            }
+        } catch (err: any) {
+            console.error('Prompt generation error:', err);
+            alert('Generation failed: ' + err.message);
+        }
+        setIsGeneratingPrompt(false);
+    };
+
+    const handleImportJson = async () => {
+        if (!shortTargetVideo || !externalAiJson.trim()) return;
+        try {
+            const result = await importManualShort(shortTargetVideo, externalAiJson, shortPrompt || "External AI (Manual Import)");
+            if (result.success && result.short) {
+                setGeneratedShort(result.short);
+                setExternalAiJson(''); // Clear input after success
+                loadData(); // Refresh shorts list
+                if (result.shorts && result.shorts.length > 1) {
+                    alert(`Successfully imported ${result.shorts.length} shorts! Showing preview for the first one. Close this modal to see all generated shorts in the library.`);
+                }
+            } else {
+                alert('Failed to import JSON: ' + (result.error || 'Unknown error'));
+            }
+        } catch (err: any) {
+            console.error('JSON import error:', err);
+            alert('Import failed: ' + err.message);
+        }
+    };
+
     // TTS Preview Functions
     const playPreview = async (short: GeneratedShort) => {
         if (isPreviewPlaying) {
@@ -174,6 +250,7 @@ export const ContentLibraryPage: React.FC<{
             setPreviewClipIndex(i);
             const segment = short.segments[i];
             setPreviewCaption(segment.text);
+            setPreviewKeywords(segment.keywords || []);
 
             // Create utterance
             const utterance = new SpeechSynthesisUtterance(segment.text);
@@ -197,7 +274,153 @@ export const ContentLibraryPage: React.FC<{
         window.speechSynthesis.cancel();
         setIsPreviewPlaying(false);
         setPreviewCaption('');
+        setPreviewKeywords([]);
         setPreviewClipIndex(0);
+    };
+
+    const handleWordClickToAddKeyword = (segIdx: number, wordIndex: number, word: string) => {
+        if (!generatedShort) return;
+        const updated = { ...generatedShort };
+        updated.segments = updated.segments.map((seg, si) => {
+            if (si !== segIdx) return seg;
+            const existing = seg.keywords || [];
+            const found = existing.findIndex(k => k.wordIndex === wordIndex);
+            if (found >= 0) {
+                // Remove keyword
+                return { ...seg, keywords: existing.filter((_, i) => i !== found) };
+            } else {
+                // Add keyword
+                const cleanWord = word.toLowerCase().replace(/[.,!?;:'"()]/g, '');
+                return { ...seg, keywords: [...existing, { word: cleanWord, wordIndex, enabled: true }] };
+            }
+        });
+        setGeneratedShort(updated);
+        contentDB.updateShort(updated);
+    };
+
+    const handleToggleRemoveWord = (segIdx: number, wordIndex: number) => {
+        if (!generatedShort) return;
+        const updated = { ...generatedShort };
+        updated.segments = updated.segments.map((seg, si) => {
+            if (si !== segIdx) return seg;
+            const removed = seg.removedWordIndices || [];
+            const isRemoved = removed.includes(wordIndex);
+            return {
+                ...seg,
+                removedWordIndices: isRemoved
+                    ? removed.filter(i => i !== wordIndex)
+                    : [...removed, wordIndex],
+            };
+        });
+        setGeneratedShort(updated);
+        contentDB.updateShort(updated);
+    };
+
+    /** Detect fillers from short transcript text and mark them as removed words */
+    const handleRemoveFillers = async () => {
+        if (!generatedShort || isDetectingFillers) return;
+        setIsDetectingFillers(true);
+        setFillerStatus('Analyzing transcript...');
+
+        try {
+            // Build transcript from short segments
+            const transcript = generatedShort.segments.map(seg => ({
+                startTime: seg.startTime,
+                endTime: seg.endTime,
+                text: seg.text,
+            }));
+
+            const detections = await detectFillersFromTranscript(transcript, setFillerStatus);
+
+            if (detections.length === 0) {
+                setFillerStatus('No fillers found');
+                setTimeout(() => setFillerStatus(''), 2000);
+                return;
+            }
+
+            // Map detections to word indices in each segment
+            const updated = { ...generatedShort };
+            updated.segments = updated.segments.map(seg => {
+                const segFillers = detections.filter(d =>
+                    d.startTime < seg.endTime && d.endTime > seg.startTime
+                );
+                if (segFillers.length === 0) return seg;
+
+                const words = seg.text.split(/\s+/);
+                const newRemoved = new Set(seg.removedWordIndices || []);
+
+                for (const filler of segFillers) {
+                    const fillerWords = filler.text.toLowerCase().split(/\s+/);
+                    // Find matching word sequence in segment text
+                    for (let i = 0; i <= words.length - fillerWords.length; i++) {
+                        if (newRemoved.has(i)) continue;
+                        const match = fillerWords.every((fw, fi) =>
+                            words[i + fi].toLowerCase().replace(/[.,!?;:'"()-]/g, '') === fw.replace(/[.,!?;:'"()-]/g, '')
+                        );
+                        if (match) {
+                            // For repeated words ("the the"), only remove the second occurrence
+                            const startIdx = filler.type === 'repeated' ? Math.ceil(fillerWords.length / 2) : 0;
+                            for (let fi = startIdx; fi < fillerWords.length; fi++) {
+                                newRemoved.add(i + fi);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                return { ...seg, removedWordIndices: [...newRemoved] };
+            });
+
+            setGeneratedShort(updated);
+            contentDB.updateShort(updated);
+            setFillerStatus(`Marked ${detections.length} fillers for removal`);
+            setTimeout(() => setFillerStatus(''), 3000);
+        } catch (e) {
+            console.error('[ContentLibrary] Filler detection failed:', e);
+            setFillerStatus(`Error: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        } finally {
+            setIsDetectingFillers(false);
+        }
+    };
+
+    const renderInteractiveText = (text: string, segIdx: number, keywords?: KeywordEmphasis[], removedWordIndices?: number[]) => {
+        const words = text.split(/(\s+)/);
+        const removedSet = new Set(removedWordIndices || []);
+        let wordIdx = 0;
+        return words.map((token, i) => {
+            if (/^\s+$/.test(token)) return <span key={i}>{token}</span>;
+            const currentIdx = wordIdx++;
+            const kw = keywords?.find(k => k.wordIndex === currentIdx && k.enabled);
+            const isRemoved = removedSet.has(currentIdx);
+            return (
+                <span
+                    key={i}
+                    onClick={(e) => { e.stopPropagation(); handleWordClickToAddKeyword(segIdx, currentIdx, token); }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); handleToggleRemoveWord(segIdx, currentIdx); }}
+                    className={`cursor-pointer hover:bg-white/10 rounded px-0.5 transition-colors ${kw ? 'font-bold' : ''} ${isRemoved ? 'line-through opacity-40' : ''}`}
+                    style={{ color: kw ? (kw.color || '#FFD700') : undefined }}
+                    title={isRemoved ? 'Right-click to restore' : kw ? 'Click to remove keyword | Right-click to strike out' : 'Click to add keyword | Right-click to strike out'}
+                >
+                    {token}
+                </span>
+            );
+        });
+    };
+
+    const toggleKeyword = (segIdx: number, kwIdx: number) => {
+        if (!generatedShort) return;
+        const updated = { ...generatedShort };
+        updated.segments = updated.segments.map((seg, si) => {
+            if (si !== segIdx || !seg.keywords) return seg;
+            return {
+                ...seg,
+                keywords: seg.keywords.map((kw, ki) =>
+                    ki === kwIdx ? { ...kw, enabled: !kw.enabled } : kw
+                )
+            };
+        });
+        setGeneratedShort(updated);
+        contentDB.updateShort(updated);
     };
 
     const openShortGenerator = (videoId: string, prefillPrompt?: string) => {
@@ -368,7 +591,7 @@ export const ContentLibraryPage: React.FC<{
 
                 {/* Stats */}
                 <div className="p-4 border-b border-[#222]">
-                    <div className="grid grid-cols-2 gap-2 text-xs mb-3">
+                    <div className="grid grid-cols-3 gap-2 text-xs mb-3">
                         <div className="bg-[#1a1a1a] rounded p-2">
                             <div className="text-gray-500">Sermons</div>
                             <div className="text-lg font-bold text-white">{stats.videoCount}</div>
@@ -377,7 +600,44 @@ export const ContentLibraryPage: React.FC<{
                             <div className="text-gray-500">Shorts</div>
                             <div className="text-lg font-bold text-white">{stats.shortCount}</div>
                         </div>
+                        <div
+                            className={`bg-[#1a1a1a] rounded p-2 cursor-pointer hover:bg-[#222] transition-colors ${costTotal >= 2 ? 'border border-red-500/50' : costTotal >= 0.50 ? 'border border-yellow-500/30' : ''}`}
+                            onClick={() => setShowCostPanel(p => !p)}
+                            title="Click to see AI cost breakdown"
+                        >
+                            <div className="text-gray-500">AI Cost</div>
+                            <div className={`text-lg font-bold font-mono ${costTotal >= 2 ? 'text-red-400' : costTotal >= 0.50 ? 'text-yellow-400' : 'text-green-400'}`}>
+                                ${costTotal.toFixed(2)}
+                            </div>
+                        </div>
                     </div>
+                    {showCostPanel && (
+                        <div className="bg-[#111] border border-[#333] rounded-lg mb-3 max-h-48 overflow-y-auto text-xs">
+                            <div className="sticky top-0 bg-[#111] p-2 border-b border-[#333] flex items-center justify-between">
+                                <span className="font-bold text-white">AI Cost Log</span>
+                                <button onClick={() => { clearSession().then(() => { setCostTotal(0); setCostLog([]); }); }} className="text-gray-400 hover:text-red-400 text-[10px]">Clear</button>
+                            </div>
+                            {costLog.length === 0 ? (
+                                <div className="p-2 text-gray-500 text-center">No AI calls yet</div>
+                            ) : (
+                                <div className="divide-y divide-[#222]">
+                                    {[...costLog].reverse().map(e => (
+                                        <div key={e.id} className="px-2 py-1 flex items-center gap-2">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="font-bold text-white truncate">{e.operation}</div>
+                                                <div className="text-gray-500 text-[10px]">{e.model} &middot; {e.inputTokens.toLocaleString()} in / {e.outputTokens.toLocaleString()} out</div>
+                                            </div>
+                                            <div className="font-mono text-green-400 whitespace-nowrap text-[10px]">${e.estimatedCost.toFixed(4)}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            <div className="sticky bottom-0 bg-[#111] p-2 border-t border-[#333] flex justify-between font-bold">
+                                <span className="text-white">Total</span>
+                                <span className={`font-mono ${costTotal >= 2 ? 'text-red-400' : costTotal >= 0.50 ? 'text-yellow-400' : 'text-green-400'}`}>${costTotal.toFixed(4)}</span>
+                            </div>
+                        </div>
+                    )}
                     <div className="flex justify-center">
                         <CookieUploadButton />
                     </div>
@@ -588,7 +848,20 @@ export const ContentLibraryPage: React.FC<{
                 {/* Generated Shorts Tab */}
                 {activeTab === 'shorts' && (
                     <div className="flex-1 overflow-auto p-4">
-                        <h2 className="text-xl font-bold mb-4">⚡ Generated Shorts</h2>
+                        <div className="flex items-center justify-between mb-4">
+                            <h2 className="text-xl font-bold">⚡ Generated Shorts</h2>
+                            {onToggleAutoCenter && (
+                                <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
+                                    <input
+                                        type="checkbox"
+                                        checked={autoCenterOnImport}
+                                        onChange={e => onToggleAutoCenter(e.target.checked)}
+                                        className="accent-indigo-500"
+                                    />
+                                    Auto-center person on export
+                                </label>
+                            )}
+                        </div>
                         {generatedShorts.length === 0 ? (
                             <div className="text-center py-12 text-gray-500">
                                 <div className="text-4xl mb-3">⚡</div>
@@ -707,23 +980,70 @@ export const ContentLibraryPage: React.FC<{
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">AI Model</label>
                                         <select value={selectedModel} onChange={e => setSelectedModel(e.target.value)} className="w-full bg-[#222] border border-[#333] rounded px-3 py-2">
-                                            <option value="gemini-1.5-flash">Gemini 1.5 Flash (Most Stable, Recommended)</option>
-                                            <option value="gemini-2.0-flash">Gemini 2.0 Flash (Fastest, may hit limits)</option>
-                                            <option value="gemini-2.0-flash-lite-preview">Gemini 2.0 Flash Lite (Preview)</option>
-                                            <option value="gemini-exp-1206">Gemini Exp 1206 (Experimental)</option>
+                                            <optgroup label="Gemini (Free Tier)">
+                                                <option value="gemini-2.5-flash">Gemini 2.5 Flash (Recommended)</option>
+                                                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite (Fastest)</option>
+                                            </optgroup>
+                                            <optgroup label="OpenAI">
+                                                <option value="gpt-4o">GPT-4o (Best Quality)</option>
+                                                <option value="gpt-4o-mini">GPT-4o Mini (Fast + Cheap)</option>
+                                                <option value="o3-mini">o3-mini (Reasoning)</option>
+                                            </optgroup>
+                                            <optgroup label="Gemini (Paid Key Required)">
+                                                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                                                <option value="gemini-3-flash-preview">Gemini 3 Flash (Preview)</option>
+                                                <option value="gemini-3-pro-preview">Gemini 3 Pro (Preview)</option>
+                                            </optgroup>
                                             <optgroup label="Moonshot AI (Kimi)">
                                                 <option value="moonshot-v1-8k">Kimi 8k (Standard)</option>
                                                 <option value="moonshot-v1-32k">Kimi 32k (Long Context)</option>
                                                 <option value="moonshot-v1-128k">Kimi 128k (Max Context)</option>
                                             </optgroup>
+                                            <optgroup label="MiniMax (Coding Plan)">
+                                                <option value="MiniMax-M2">MiniMax M2 (Fast)</option>
+                                                <option value="MiniMax-M2.5">MiniMax M2.5 (Pro)</option>
+                                            </optgroup>
                                         </select>
-                                        <p className="text-xs text-gray-600 mt-1">If generation fails, try switching to 1.5 Flash.</p>
+                                        <p className="text-xs text-gray-600 mt-1">OpenAI and Gemini Pro/3 require paid API keys.</p>
 
                                     </div>
 
                                     <button onClick={handleGenerateShort} disabled={isGeneratingShort} className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg font-bold">
                                         {isGeneratingShort ? '🔄 Generating...' : shortPrompt.trim() ? '⚡ Generate Short' : '✨ Auto-Generate Best Moments'}
                                     </button>
+                                </div>
+
+                                <div className="mt-8 pt-6 border-t border-[#333]">
+                                    <h4 className="text-sm font-bold text-gray-300 mb-2">🤖 Use External AI (ChatGPT / Claude)</h4>
+                                    <p className="text-xs text-gray-500 mb-4">
+                                        Want to use your own ChatGPT or Claude Plus subscription? Copy the prompt below, generate the JSON on their website, and paste it back here to preview and export!
+                                    </p>
+                                    <div className="space-y-3">
+                                        <button
+                                            onClick={handleCopyPrompt}
+                                            disabled={isGeneratingPrompt}
+                                            className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-indigo-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                                        >
+                                            {isGeneratingPrompt ? '⏳ Formatting Prompt...' : '📋 1. Copy Prompt to Clipboard'}
+                                        </button>
+
+                                        <div className="relative">
+                                            <textarea
+                                                value={externalAiJson}
+                                                onChange={e => setExternalAiJson(e.target.value)}
+                                                placeholder="2. Paste the JSON result here from ChatGPT or Claude..."
+                                                className="w-full bg-[#1a1a1a] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-green-400 focus:border-indigo-500 outline-none h-24 resize-none"
+                                            />
+                                        </div>
+
+                                        <button
+                                            onClick={handleImportJson}
+                                            disabled={!externalAiJson.trim()}
+                                            className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-sm font-bold"
+                                        >
+                                            📥 3. Import & Preview Short
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         ) : (
@@ -761,7 +1081,18 @@ export const ContentLibraryPage: React.FC<{
                                         {isPreviewPlaying && previewCaption ? (
                                             <div className="absolute bottom-8 left-4 right-4">
                                                 <div className="bg-black/80 rounded-lg p-4 text-center">
-                                                    <p className="text-white text-lg font-medium leading-relaxed">{previewCaption}</p>
+                                                    <p className="text-white text-lg font-medium leading-relaxed">{(() => {
+                                                        if (!previewKeywords || previewKeywords.length === 0) return previewCaption;
+                                                        const words = previewCaption.split(/(\s+)/);
+                                                        let wIdx = 0;
+                                                        return words.map((tok: string, ti: number) => {
+                                                            if (/^\s+$/.test(tok)) return <span key={ti}>{tok}</span>;
+                                                            const kw = previewKeywords.find((k: any) => k.wordIndex === wIdx && k.enabled);
+                                                            const el = kw ? <span key={ti} className="font-bold" style={{ color: kw.color || '#FFD700' }}>{tok}</span> : <span key={ti}>{tok}</span>;
+                                                            wIdx++;
+                                                            return el;
+                                                        });
+                                                    })()}</p>
                                                 </div>
                                             </div>
                                         ) : (
@@ -798,7 +1129,7 @@ export const ContentLibraryPage: React.FC<{
                                     </button>
                                 </div>
 
-                                {/* TTS Preview Controls */}
+                                {/* TTS Preview Controls + Filler Removal */}
                                 <div className="flex justify-center gap-4 mb-4">
                                     <button
                                         onClick={() => isPreviewPlaying ? stopPreview() : playPreview(generatedShort)}
@@ -806,11 +1137,23 @@ export const ContentLibraryPage: React.FC<{
                                     >
                                         {isPreviewPlaying ? '⏹ Stop Preview' : '🔊 Play with TTS'}
                                     </button>
+                                    <button
+                                        onClick={handleRemoveFillers}
+                                        disabled={isDetectingFillers}
+                                        className="px-4 py-2 rounded-lg font-medium bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-sm"
+                                        title="AI-detect filler words in transcript and mark them for removal (text-only, low cost)"
+                                    >
+                                        {isDetectingFillers ? fillerStatus || 'Detecting...' : 'Clean Fillers'}
+                                    </button>
                                 </div>
+                                {fillerStatus && !isDetectingFillers && (
+                                    <div className="text-center text-xs text-amber-400 mb-2">{fillerStatus}</div>
+                                )}
 
                                 {/* Clips breakdown */}
                                 <div className="mb-4">
-                                    <div className="text-xs text-gray-500 mb-2">📋 CLIPS BREAKDOWN</div>
+                                    <div className="text-xs text-gray-500 mb-1">📋 CLIPS BREAKDOWN</div>
+                                    <div className="text-[9px] text-gray-600 mb-2">Click word: toggle keyword | Right-click: strike out (removed on export)</div>
                                     <div className="space-y-2 max-h-48 overflow-auto">
                                         {generatedShort.segments.map((seg, i) => (
                                             <div key={i} className={`rounded p-3 border ${isPreviewPlaying && i === previewClipIndex ? 'bg-purple-600/20 border-purple-500' : 'bg-[#222] border-transparent'}`}>
@@ -820,12 +1163,30 @@ export const ContentLibraryPage: React.FC<{
                                                     </span>
                                                     <span className="text-xs text-gray-500">{formatTime(seg.startTime)} - {formatTime(seg.endTime)}</span>
                                                 </div>
-                                                <p className="text-sm text-gray-300">{seg.text}</p>
+                                                <p className="text-sm text-gray-300">{renderInteractiveText(seg.text, i, seg.keywords, seg.removedWordIndices)}</p>
                                             </div>
                                         ))}
                                     </div>
                                 </div>
 
+                                {generatedShort.segments.some(s => s.keywords && s.keywords.length > 0) && (
+                                    <div className="mb-4">
+                                        <div className="text-xs text-gray-500 mb-2">KEYWORD EMPHASIS</div>
+                                        <div className="flex flex-wrap gap-2">
+                                            {generatedShort.segments.flatMap((seg, segIdx) =>
+                                                (seg.keywords || []).map((kw, kwIdx) => (
+                                                    <label key={`${segIdx}-${kwIdx}`}
+                                                        className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs cursor-pointer ${kw.enabled ? 'bg-yellow-600/20 border-yellow-500/50 text-yellow-300' : 'bg-[#222] border-[#444] text-gray-500 line-through'}`}>
+                                                        <input type="checkbox" checked={kw.enabled}
+                                                            onChange={() => toggleKeyword(segIdx, kwIdx)}
+                                                            className="accent-yellow-500" />
+                                                        {kw.word}
+                                                    </label>
+                                                ))
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* Refinement UI */}
                                 <div className="mb-4 pt-4 border-t border-[#333]">

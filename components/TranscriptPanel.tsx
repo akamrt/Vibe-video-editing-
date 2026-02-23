@@ -1,23 +1,96 @@
-import React, { useRef, useEffect } from 'react';
-import { VideoAnalysis } from '../types';
+import React, { useRef, useState, useMemo } from 'react';
+import { VideoAnalysis, RemovedWord } from '../types';
 
 interface TranscriptPanelProps {
     analysis: VideoAnalysis | null;
+    mediaId?: string;
     currentTime: number;
     onSeek: (time: number) => void;
     onSelect?: (index: number) => void;
     selectedIndex?: number | null;
+    removedWords?: RemovedWord[];
+    onRemoveWords?: (words: RemovedWord[]) => void;
+    onRestoreWord?: (wordId: string) => void;
 }
 
-const TranscriptPanel: React.FC<TranscriptPanelProps> = ({ analysis, currentTime, onSeek, onSelect, selectedIndex }) => {
+interface ParsedWord {
+    id: string;
+    text: string;
+    startTime: number;
+    endTime: number;
+    globalEventIndex: number;
+}
+
+const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
+    analysis, mediaId, currentTime, onSeek, onSelect, selectedIndex,
+    removedWords = [], onRemoveWords, onRestoreWord
+}) => {
     const scrollRef = useRef<HTMLDivElement>(null);
+    const [selectedWordIds, setSelectedWordIds] = useState<Set<string>>(new Set());
+    const [activeTab, setActiveTab] = useState<'transcript' | 'removed'>('transcript');
 
-    // Filter dialogue events
-    // Use loose check for type to handle imported transcripts that might be labeled differently in future
-    const dialogueEvents = analysis?.events?.filter(e => e.type === 'dialogue') || [];
+    const dialogueEvents = useMemo(() => analysis?.events?.filter(e => e.type === 'dialogue') || [], [analysis]);
 
-    // Debug render
-    // console.log('[TranscriptPanel] Render. Events:', dialogueEvents.length);
+    // Pre-parse words so we can render them individually
+    const wordsByEvent = useMemo(() => {
+        return dialogueEvents.map((event, globalIndex) => {
+            const rawWords = (event.details?.split(/\s+/) || []).filter(w => w.trim().length > 0);
+            const totalChars = rawWords.join('').length;
+            const duration = event.endTime - event.startTime;
+
+            let charsSoFar = 0;
+            return rawWords.map((text, wordIndex) => {
+                const wordLength = text.length;
+                const wordStart = event.startTime + (duration * (charsSoFar / totalChars));
+                charsSoFar += wordLength;
+                const wordEnd = event.startTime + (duration * (charsSoFar / totalChars));
+
+                return {
+                    id: `${mediaId || 'none'}-${globalIndex}-${wordIndex}`,
+                    text,
+                    startTime: wordStart,
+                    endTime: wordEnd,
+                    globalEventIndex: globalIndex
+                } as ParsedWord;
+            });
+        });
+    }, [dialogueEvents, mediaId]);
+
+    const handleWordClick = (word: ParsedWord, e: React.MouseEvent) => {
+        e.stopPropagation();
+        onSeek(word.startTime);
+
+        const newSet = new Set(selectedWordIds);
+        if (newSet.has(word.id)) {
+            newSet.delete(word.id);
+        } else {
+            newSet.add(word.id);
+        }
+        setSelectedWordIds(newSet);
+    };
+
+    const handleCutSelected = () => {
+        if (!onRemoveWords || !mediaId) return;
+        const wordsToRemove: RemovedWord[] = [];
+
+        wordsByEvent.forEach(eventWords => {
+            eventWords.forEach(word => {
+                if (selectedWordIds.has(word.id)) {
+                    wordsToRemove.push({
+                        id: word.id,
+                        mediaId,
+                        text: word.text,
+                        startTime: word.startTime,
+                        endTime: word.endTime,
+                        originalEventIndex: word.globalEventIndex
+                    });
+                }
+            });
+        });
+
+        onRemoveWords(wordsToRemove);
+        setSelectedWordIds(new Set());
+    };
 
     if (!analysis) {
         return (
@@ -36,59 +109,103 @@ const TranscriptPanel: React.FC<TranscriptPanelProps> = ({ analysis, currentTime
         )
     }
 
-    return (
-        <div className="flex flex-col h-full bg-[#1e1e1e] overflow-hidden">
-            <div className="p-3 border-b border-[#3a3a3a] bg-[#2a2a2a]">
-                <h2 className="text-sm font-semibold text-gray-200">Transcript</h2>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {dialogueEvents
-                    .filter(event => Math.abs(event.startTime - currentTime) < 60) // Virtualization: Only show events within 1 min window
-                    .map((event, idx) => {
-                        // Note: idx is local index after filter. 
-                        // We need to find the original index for 'onSelect'.
-                        // Since 'dialogueEvents' is the source, let's find the index in THAT array.
-                        // This is slow (O(N*M)). Better to keep original index in the event object?
-                        // The App.tsx passes 'index' to onSelect.
-                        // Let's use `indexOf` or just pass the time to seek.
-                        // Wait, `onSelect` takes an index.
-                        // We need the GLOBAL index.
-                        const globalIndex = dialogueEvents.indexOf(event);
+    const removedIds = new Set(removedWords.map(rw => rw.id));
+    const activeWordsCount = wordsByEvent.flat().filter(w => !removedIds.has(w.id)).length;
 
-                        const isActive = currentTime >= event.startTime && currentTime <= event.endTime;
-                        const isSelected = selectedIndex === globalIndex;
+    return (
+        <div className="flex flex-col h-full bg-[#1e1e1e] overflow-hidden relative">
+            <div className="flex border-b border-[#3a3a3a] bg-[#2a2a2a]">
+                <button onClick={() => setActiveTab('transcript')} className={`flex-1 py-2 text-xs font-bold transition-colors ${activeTab === 'transcript' ? 'text-blue-400 border-b-2 border-blue-400 bg-[#333]' : 'text-gray-400 hover:bg-[#333]'}`}>
+                    TRANSCRIPT ({activeWordsCount})
+                </button>
+                <button onClick={() => setActiveTab('removed')} className={`flex-1 py-2 text-xs font-bold transition-colors ${activeTab === 'removed' ? 'text-red-400 border-b-2 border-red-400 bg-[#333]' : 'text-gray-400 hover:bg-[#333]'}`}>
+                    REMOVED ({removedWords.length})
+                </button>
+            </div>
+
+            {activeTab === 'transcript' && (
+                <div className="flex-1 overflow-y-auto p-6 pb-24 text-[17px] leading-8 text-gray-200 tracking-wide font-medium" ref={scrollRef}>
+                    {wordsByEvent.map((words, globalIndex) => {
+                        // Filter out words that are removed
+                        const visibleWords = words.filter(w => !removedIds.has(w.id));
+                        if (visibleWords.length === 0) return null;
 
                         return (
-                            <div
-                                key={globalIndex}
-                                onClick={() => {
-                                    onSeek(event.startTime);
-                                    if (onSelect) onSelect(globalIndex);
-                                }}
-                                className={`p-3 rounded-lg cursor-pointer transition-all border-l-2 
-                                ${isSelected ? 'bg-purple-900/40 border-purple-500 shadow-md' :
-                                        isActive ? 'bg-[#3a3a3a] border-blue-500' : 'hover:bg-[#2a2a2a] border-transparent'}`}
-                            >
-                                <div className="flex items-center justify-between mb-1">
-                                    <span className={`text-xs font-bold uppercase tracking-wider ${isSelected ? 'text-purple-300' : 'text-blue-400'}`}>
-                                        {event.label}
-                                    </span>
-                                    <span className="text-[10px] text-gray-500 font-mono">
-                                        {new Date(event.startTime * 1000).toISOString().substr(14, 5)}
-                                    </span>
-                                </div>
-                                <p className={`text-sm leading-relaxed ${isActive || isSelected ? 'text-white' : 'text-gray-400'}`}>
-                                    {event.details}
-                                </p>
-                            </div>
+                            <span key={globalIndex} className="mr-1">
+                                {visibleWords.map(word => {
+                                    const isWordSelected = selectedWordIds.has(word.id);
+
+                                    // Highlight if current time is within this word's exact timeline duration
+                                    const isWordActive = currentTime >= word.startTime && currentTime <= word.endTime;
+
+                                    return (
+                                        <span
+                                            key={word.id}
+                                            onClick={(e) => handleWordClick(word, e)}
+                                            className={`px-[2px] py-[2px] rounded transition-colors cursor-text inline-block ${isWordSelected
+                                                ? 'bg-red-500 text-white'
+                                                : isWordActive
+                                                    ? 'bg-blue-500/80 text-white underline decoration-2'
+                                                    : 'hover:bg-blue-500/20 text-gray-300'
+                                                }`}
+                                        >
+                                            {word.text}
+                                        </span>
+                                    );
+                                })}
+                                <span> </span>
+                            </span>
                         )
                     })}
-                {dialogueEvents.length > 0 && Math.abs(dialogueEvents[dialogueEvents.length - 1].startTime - currentTime) > 60 && (
-                    <div className="text-center text-xs text-gray-600 py-2">
-                        ... seeking to browse more ...
-                    </div>
-                )}
-            </div>
+                </div>
+            )}
+
+            {activeTab === 'removed' && (
+                <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                    {removedWords.length === 0 ? (
+                        <div className="text-center text-gray-500 text-sm mt-10 p-6 bg-[#252525] rounded-lg">
+                            No words have been removed yet.
+                            <br /><span className="text-xs text-gray-600 mt-2 block">Select words in the transcript tab to remove them.</span>
+                        </div>
+                    ) : (
+                        removedWords.map((word) => (
+                            <div key={word.id} className="flex items-center justify-between bg-[#2a2a2a] p-3 rounded border border-red-900/40 hover:border-red-500/50 transition-colors">
+                                <div className="flex flex-col">
+                                    <span className="text-gray-300 text-sm font-medium line-through decoration-red-500 decoration-2">{word.text}</span>
+                                    <span className="text-[10px] text-gray-500 font-mono mt-1">
+                                        {new Date(word.startTime * 1000).toISOString().substr(14, 5)}
+                                    </span>
+                                </div>
+                                <button
+                                    onClick={() => onRestoreWord && onRestoreWord(word.id)}
+                                    className="px-4 py-1.5 bg-green-600/20 text-green-400 hover:bg-green-600 hover:text-white rounded text-xs font-bold transition-colors"
+                                >
+                                    Restore
+                                </button>
+                            </div>
+                        ))
+                    )}
+                </div>
+            )}
+
+            {/* Floating Action Bar for Selections */}
+            {selectedWordIds.size > 0 && activeTab === 'transcript' && (
+                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-[#1a1a1a] border border-[#444] rounded-full shadow-2xl px-5 py-3 flex items-center gap-4 animate-in slide-in-from-bottom-5 z-10 transition-all">
+                    <span className="text-sm font-bold text-gray-200">{selectedWordIds.size} word{selectedWordIds.size !== 1 ? 's' : ''} selected</span>
+                    <button
+                        onClick={handleCutSelected}
+                        className="bg-red-600 hover:bg-red-500 text-white px-5 py-1.5 rounded-full text-sm font-bold shadow-lg transition-transform hover:scale-105 active:scale-95"
+                    >
+                        Cut / Remove
+                    </button>
+                    <button
+                        onClick={() => setSelectedWordIds(new Set())}
+                        className="text-gray-400 hover:text-white px-3 py-1.5 rounded-full text-xs font-bold hover:bg-[#333] transition-colors"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            )}
         </div>
     );
 };

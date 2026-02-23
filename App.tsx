@@ -1,18 +1,30 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import Timeline from './components/Timeline';
-import ChatPanel from './components/ChatPanel';
+
 import TranscriptPanel from './components/TranscriptPanel';
 import PropertiesPanel from './components/PropertiesPanel';
 import MediaBin from './components/MediaBin';
 import ViewportOverlay from './components/ViewportOverlay';
 import ExportModal from './components/ExportModal';
 import GraphEditor from './components/GraphEditor';
-import { ProjectState, Segment, ChatMessage, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset } from './types';
-import { analyzeVideoContent, generateVibeEdit, chatWithVideoContext, transcribeAudio, performDeepAnalysis } from './services/geminiService';
+import { ProjectState, Segment, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord } from './types';
+import RemotionPreview from './components/remotion/RemotionPreview';
+import TemplateManager from './components/remotion/TemplateManager';
+import AnimatedText from './components/remotion/AnimatedText';
+import { analyzeVideoContent, transcribeAudio, performDeepAnalysis, detectPersonPosition, detectFillerWords, detectFillersFromTranscript, redetectFillerWords, redetectFillersFromTranscript, FillerDetection } from './services/geminiService';
+import FillerConfirmModal from './components/FillerConfirmModal';
+import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
 import { YoutubeImportModal } from './components/YoutubeImportModal';
 import ContentLibraryPage from './pages/ContentLibraryPage';
 import { GeneratedShort, contentDB } from './services/contentDatabase';
-import { getInterpolatedTransform, transformToCss, ASPECT_RATIO_PRESETS, calculateCropRegion } from './utils/interpolation';
+import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion } from './utils/interpolation';
+import { resolveGradientStops, buildGradientCSS } from './utils/gradientUtils';
+import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
+import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes } from './services/templateTrackingService';
+import TrackingPanel from './components/TrackingPanel';
+import TrackerOverlay from './components/TrackerOverlay';
+import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
+import { getAudioBuffer, findNearestSilence, snapFillerRange, clearAudioBufferCache } from './utils/audioAnalysis';
 
 const INITIAL_SUBTITLE_STYLE: SubtitleStyle = {
   fontFamily: 'Arial',
@@ -55,32 +67,197 @@ const INITIAL_STATE: ProjectState = {
   loopMode: false,
   subtitleStyle: INITIAL_SUBTITLE_STYLE,
   titleStyle: INITIAL_TITLE_STYLE,
-  titleLayer: null
+  titleLayer: null,
+  activeSubtitleTemplate: null,
+  activeTitleTemplate: null,
+  activeKeywordAnimation: null,
+  removedWords: [],
 };
+
+// --- Auto-center utilities (used by handleCenterPerson + autoCenterSegment) ---
+
+async function seekAndCaptureFrame(
+  videoEl: HTMLVideoElement,
+  targetTime: number,
+  timeoutMs = 5000
+): Promise<Blob | null> {
+  await new Promise<void>((resolve) => {
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      videoEl.removeEventListener('seeked', onSeeked);
+      resolve();
+    };
+    const onSeeked = () => {
+      if (videoEl.readyState >= 2) {
+        finish();
+      } else {
+        let attempts = 0;
+        const poll = () => {
+          if (resolved) return;
+          if (videoEl.readyState >= 2 || attempts >= 50) finish();
+          else { attempts++; setTimeout(poll, 10); }
+        };
+        setTimeout(poll, 10);
+      }
+    };
+    if (Math.abs(videoEl.currentTime - targetTime) < 0.01 && videoEl.readyState >= 2) {
+      finish();
+      return;
+    }
+    videoEl.addEventListener('seeked', onSeeked);
+    videoEl.currentTime = targetTime;
+    setTimeout(finish, timeoutMs);
+  });
+
+  if (videoEl.videoWidth === 0 || videoEl.videoHeight === 0) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = videoEl.videoWidth;
+  canvas.height = videoEl.videoHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.drawImage(videoEl, 0, 0);
+  return new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), 'image/png');
+  });
+}
+
+function computeCenterTranslation(
+  detection: { centerX: number; centerY: number },
+  videoNativeW: number,
+  videoNativeH: number,
+  previewAspectRatio: string
+): { translateX: number; translateY: number } {
+  const videoAR = videoNativeW / videoNativeH;
+  const arPreset = previewAspectRatio !== 'custom'
+    ? ASPECT_RATIO_PRESETS[previewAspectRatio]
+    : null;
+  const cropAR = arPreset ? arPreset.ratio : videoAR;
+
+  const visibleFractionX = Math.min(1, cropAR / videoAR);
+  const visibleFractionY = Math.min(1, videoAR / cropAR);
+
+  const translateX = -(detection.centerX - 50);
+  const translateY = -(detection.centerY - 50);
+
+  const maxShiftX = Math.max(5, (1 - visibleFractionX) * 50);
+  const maxShiftY = Math.max(5, (1 - visibleFractionY) * 50);
+
+  return {
+    translateX: Math.max(-maxShiftX, Math.min(maxShiftX, translateX)),
+    translateY: Math.max(-maxShiftY, Math.min(maxShiftY, translateY)),
+  };
+}
 
 function App() {
   const [project, setProject] = useState<ProjectState>(INITIAL_STATE);
   const projectRef = useRef(project);
   useEffect(() => { projectRef.current = project; }, [project]);
 
-  // Persistence Loading
+  // Cost tracker: load persisted data + subscribe to updates
   useEffect(() => {
-    contentDB.getProject().then(saved => {
+    const sync = () => { setCostTotal(getSessionTotal()); setCostLog(getSessionLog()); };
+    initCostTracker().then(sync);
+    onCostUpdate(sync);
+    return () => offCostUpdate(sync);
+  }, []);
+
+  // Persistence Loading (with migration for new fields)
+  const hasLoadedRef = useRef(false);
+  useEffect(() => {
+    clearAudioBufferCache(); // Clear stale audio caches from any prior session
+    contentDB.getProject().then(async (saved) => {
       if (saved) {
-        setProject(saved);
+        setProject({
+          ...INITIAL_STATE,
+          ...saved,
+          activeSubtitleTemplate: saved.activeSubtitleTemplate ?? null,
+          activeTitleTemplate: saved.activeTitleTemplate ?? null,
+          activeKeywordAnimation: saved.activeKeywordAnimation ?? null,
+        });
         console.log('Project loaded from storage');
+      } else {
+        // No saved project — still restore user style/template preferences
+        const prefs = await contentDB.getPreferences();
+        if (prefs) {
+          setProject(prev => ({
+            ...prev,
+            subtitleStyle: prefs.subtitleStyle,
+            titleStyle: prefs.titleStyle,
+            activeSubtitleTemplate: prefs.activeSubtitleTemplate,
+            activeTitleTemplate: prefs.activeTitleTemplate,
+            activeKeywordAnimation: prefs.activeKeywordAnimation,
+          }));
+          console.log('User preferences restored');
+        }
       }
+      hasLoadedRef.current = true;
     });
   }, []);
 
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: '1', role: 'model', text: 'Welcome to VibeCut Pro. Upload clips to the Media Bin to begin editing.', timestamp: new Date() }
-  ]);
+  // Auto-save: debounce project state changes to IndexedDB
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!hasLoadedRef.current) return; // Don't save until initial load completes
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      contentDB.saveProject(project).catch(e => console.warn('Auto-save failed:', e));
+    }, 1500);
+    return () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); };
+  }, [project]);
+
+  // Auto-save user preferences (styles/templates) - persists across New Project
+  const prefSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!hasLoadedRef.current) return;
+    if (prefSaveTimerRef.current) clearTimeout(prefSaveTimerRef.current);
+    prefSaveTimerRef.current = setTimeout(() => {
+      contentDB.savePreferences({
+        subtitleStyle: project.subtitleStyle,
+        titleStyle: project.titleStyle,
+        activeSubtitleTemplate: project.activeSubtitleTemplate,
+        activeTitleTemplate: project.activeTitleTemplate,
+        activeKeywordAnimation: project.activeKeywordAnimation,
+      }).catch(e => console.warn('Preferences save failed:', e));
+    }, 1500);
+    return () => { if (prefSaveTimerRef.current) clearTimeout(prefSaveTimerRef.current); };
+  }, [project.subtitleStyle, project.titleStyle, project.activeSubtitleTemplate, project.activeTitleTemplate, project.activeKeywordAnimation]);
+
   const [status, setStatus] = useState<ProcessingStatus>(ProcessingStatus.IDLE);
-  const [editPrompt, setEditPrompt] = useState('');
+  const [centeringProgress, setCenteringProgress] = useState('');
+  const [outOfZoneThreshold, setOutOfZoneThreshold] = useState(0); // % distance from center before centering (0=always follow)
+  const [scanSmooth, setScanSmooth] = useState(false);             // Apply Gaussian smoothing after scan
+  const [scanSmoothAmount, setScanSmoothAmount] = useState(50);    // Smoothing strength 0-100
+  const [scanProgress, setScanProgress] = useState('');
+  const [showScanPanel, setShowScanPanel] = useState(false);
+  const scanButtonRef = useRef<HTMLButtonElement>(null);
+  const [fillerProgress, setFillerProgress] = useState('');
+  const [showCostPanel, setShowCostPanel] = useState(false);
+  const [costTotal, setCostTotal] = useState(0);
+  const [costLog, setCostLog] = useState<CostEntry[]>([]);
+  const [trackingProgress, setTrackingProgress] = useState<{ progress: number; label: string } | null>(null);
+  const [trackingMode, setTrackingMode] = useState<TrackingMode>('idle');
+  const [selectedTrackerId, setSelectedTrackerId] = useState<string | null>(null);
+  const trackingTemplatesRef = useRef<Map<string, ImageData>>(new Map());
+  const trackingAbortRef = useRef<AbortController | null>(null);
+  const autoCenteringRef = useRef(false);
+  const [autoCenterOnImport, setAutoCenterOnImport] = useState(false);
+  const [trackingZoom, setTrackingZoom] = useState(1);
+  const [trackingPan, setTrackingPan] = useState({ x: 0, y: 0 });
+  // Left Panel State (Media Bin vs Properties)
+  const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'properties'>('media');
 
   // Right Panel State
-  const [activeRightTab, setActiveRightTab] = useState<'properties' | 'chat' | 'transcript'>('properties');
+  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking'>('transcript');
+
+  // Reset zoom/pan when leaving tracking tab
+  useEffect(() => {
+    if (activeRightTab !== 'tracking') {
+      setTrackingZoom(1);
+      setTrackingPan({ x: 0, y: 0 });
+    }
+  }, [activeRightTab]);
 
   const [showAnalysisModal, setShowAnalysisModal] = useState(false);
   const [selectedMediaId, setSelectedMediaId] = useState<string | null>(null);
@@ -90,7 +267,8 @@ function App() {
   const [selectedTransition, setSelectedTransition] = useState<{ segId: string; side: 'in' | 'out' } | null>(null);
 
   // Dialogue Selection { mediaId, eventIndex }
-  const [selectedDialogue, setSelectedDialogue] = useState<{ mediaId: string; index: number } | null>(null);
+  const [selectedDialogues, setSelectedDialogues] = useState<Array<{ mediaId: string; index: number }>>([]);
+  const selectedDialogue = selectedDialogues[0] || null;
 
   // Title Selection
   const [isTitleSelected, setIsTitleSelected] = useState(false);
@@ -98,25 +276,39 @@ function App() {
   const [isCaching, setIsCaching] = useState(false);
   const [rippleMode, setRippleMode] = useState(true);
   const [snappingEnabled, setSnappingEnabled] = useState(true);
-  const [isChatLoading, setIsChatLoading] = useState(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [isSaving, setIsSaving] = useState(false);
   const [showYoutubeModal, setShowYoutubeModal] = useState(false);
+  const [showFillerModal, setShowFillerModal] = useState(false);
+  const [fillerDetections, setFillerDetections] = useState<FillerDetectionWithMedia[]>([]);
   const [activePage, setActivePage] = useState<'editor' | 'library'>('editor');
 
   // Viewport & Export Settings
   const [viewportSettings, setViewportSettings] = useState<ViewportSettings>({
     previewAspectRatio: '9:16',
-    showOverlay: false,
+    showOverlay: true,
     overlayOpacity: 0.6
   });
   const [showExportModal, setShowExportModal] = useState(false);
   const [showGraphEditor, setShowGraphEditor] = useState(false);
   const [activeBottomTab, setActiveBottomTab] = useState<'timeline' | 'graph'>('timeline');
+  const [viewportMode, setViewportMode] = useState<'standard' | 'remotion'>('standard');
 
-  // Undo/Redo history for keyframes
-  const [undoStack, setUndoStack] = useState<Array<{ segmentId: string; keyframes: ClipKeyframe[] }>>([]);
-  const [redoStack, setRedoStack] = useState<Array<{ segmentId: string; keyframes: ClipKeyframe[] }>>([]);
+  // Undo/Redo history (generic union type)
+  type UndoAction =
+    | { type: 'keyframes'; segmentId: string; keyframes: ClipKeyframe[] }
+    | { type: 'dialogueEvent'; mediaId: string; index: number; event: AnalysisEvent }
+    | { type: 'dialogueEvents'; mediaId: string; events: AnalysisEvent[] }
+    | { type: 'subtitleTemplate'; template: SubtitleTemplate | null }
+    | { type: 'subtitleStyle'; style: SubtitleStyle }
+    | { type: 'keywordAnimation'; animation: TextAnimation | null }
+    | { type: 'segments'; segments: Segment[] }
+    | { type: 'fillerClean'; segments: Segment[]; library: MediaItem[] }
+    | { type: 'transcriptEdit'; segments: Segment[]; removedWords: RemovedWord[]; library?: MediaItem[] }
+    | { type: 'transcriptRestore'; segments: Segment[]; removedWords: RemovedWord[]; library?: MediaItem[] };
+
+  const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoAction[]>([]);
 
   // Global/Root transform keyframes (affects all clips)
   const [globalKeyframes, setGlobalKeyframes] = useState<ClipKeyframe[]>([]);
@@ -129,6 +321,23 @@ function App() {
   const [viewportDragStart, setViewportDragStart] = useState({ x: 0, y: 0 });
   const [viewportDragStartTransform, setViewportDragStartTransform] = useState({ translateX: 0, translateY: 0 });
 
+  // Subtitle viewport drag state
+  const [subtitleDragState, setSubtitleDragState] = useState<{
+    mediaId: string; index: number;
+    startX: number; startY: number;
+    origTx: number; origTy: number;
+  } | null>(null);
+
+  // Title viewport drag state
+  const [titleDragState, setTitleDragState] = useState<{
+    startX: number; startY: number;
+    origTx: number; origTy: number;
+  } | null>(null);
+
+  // Debounced undo capture for continuous style changes (sliders)
+  const styleUndoCaptured = useRef<boolean>(false);
+  const styleUndoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // We now manage a map of video refs for multi-track playback
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const overlayRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -139,6 +348,21 @@ function App() {
 
   const viewportContainerRef = useRef<HTMLDivElement>(null);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+
+  // Effective crop region dimensions (accounts for aspect ratio letterboxing)
+  const cropDims = useMemo(() => {
+    if (viewportSize.width === 0 || viewportSize.height === 0) return viewportSize;
+    const arPreset = viewportSettings.previewAspectRatio !== 'custom'
+      ? ASPECT_RATIO_PRESETS[viewportSettings.previewAspectRatio]
+      : null;
+    if (!arPreset) return viewportSize;
+    const cr = viewportSize.width / viewportSize.height;
+    if (cr > arPreset.ratio) {
+      return { width: viewportSize.height * arPreset.ratio, height: viewportSize.height };
+    } else {
+      return { width: viewportSize.width, height: viewportSize.width / arPreset.ratio };
+    }
+  }, [viewportSize, viewportSettings.previewAspectRatio]);
 
   // Computed Sequence Info
   const contentDuration = useMemo(() => {
@@ -256,6 +480,12 @@ function App() {
 
   const isSubtitleUnlinked = !!selectedDialogueEvent?.styleOverride;
 
+  const isTemplateUnlinked = !!selectedDialogueEvent?.templateOverride;
+
+  const effectiveSubtitleTemplate = useMemo(() => {
+    return selectedDialogueEvent?.templateOverride || project.activeSubtitleTemplate;
+  }, [selectedDialogueEvent, project.activeSubtitleTemplate]);
+
 
   // Playback Engine
   useEffect(() => {
@@ -357,7 +587,10 @@ function App() {
           }
         } else {
           if (!videoEl.paused) videoEl.pause();
-          videoEl.currentTime = sourceTime; // Force sync when paused
+          // Don't fight the tracking service's seeks or auto-centering seeks
+          if (trackingMode !== 'tracking' && !autoCenteringRef.current) {
+            videoEl.currentTime = sourceTime; // Force sync when paused
+          }
         }
 
         // --- Transition Logic ---
@@ -456,6 +689,13 @@ function App() {
         }
       }
 
+      // Don't intercept Delete/Backspace when graph editor has focus —
+      // the graph editor handles its own keyframe deletion
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const inGraphEditor = document.activeElement?.closest('[data-graph-editor]');
+        if (inGraphEditor) return;
+      }
+
       if (selectedSegmentIds.length > 0) {
         if (e.key === 'Delete') performDelete(selectedSegmentIds, false);
         else if (e.key === 'Backspace') performDelete(selectedSegmentIds, true);
@@ -490,24 +730,26 @@ function App() {
     return () => resizeObserver.disconnect();
   }, [activePage]); // Re-run when page changes
 
+  // Push an undo action onto the stack
+  const pushUndo = (action: UndoAction) => {
+    setUndoStack(prev => [...prev.slice(-49), action]);
+    setRedoStack([]);
+  };
+
   // Handler for updating segment keyframes (with undo support)
   const handleUpdateKeyframes = (segmentId: string, keyframes: ClipKeyframe[], skipUndo = false) => {
     if (segmentId === 'global') {
-      // Handle global keyframes
       if (!skipUndo) {
-        setUndoStack(prev => [...prev.slice(-49), { segmentId: 'global', keyframes: globalKeyframes }]);
-        setRedoStack([]);
+        pushUndo({ type: 'keyframes', segmentId: 'global', keyframes: globalKeyframes });
       }
       setGlobalKeyframes(keyframes);
       return;
     }
 
     if (!skipUndo) {
-      // Save current state to undo stack
       const currentSegment = project.segments.find(s => s.id === segmentId);
       if (currentSegment) {
-        setUndoStack(prev => [...prev.slice(-49), { segmentId, keyframes: currentSegment.keyframes || [] }]);
-        setRedoStack([]); // Clear redo stack on new change
+        pushUndo({ type: 'keyframes', segmentId, keyframes: currentSegment.keyframes || [] });
       }
     }
 
@@ -533,56 +775,108 @@ function App() {
     };
   };
 
+  // Apply an undo/redo action, pushing the inverse onto the other stack
+  const applyUndoAction = (action: UndoAction, pushToStack: (a: UndoAction) => void) => {
+    switch (action.type) {
+      case 'keyframes': {
+        if (action.segmentId === 'global') {
+          pushToStack({ type: 'keyframes', segmentId: 'global', keyframes: globalKeyframes });
+          setGlobalKeyframes(action.keyframes);
+        } else {
+          const seg = project.segments.find(s => s.id === action.segmentId);
+          if (seg) {
+            pushToStack({ type: 'keyframes', segmentId: action.segmentId, keyframes: seg.keyframes || [] });
+            handleUpdateKeyframes(action.segmentId, action.keyframes, true);
+          }
+        }
+        break;
+      }
+      case 'dialogueEvent': {
+        const media = project.library.find(m => m.id === action.mediaId);
+        const currentEvent = media?.analysis?.events[action.index];
+        if (currentEvent) {
+          pushToStack({ type: 'dialogueEvent', mediaId: action.mediaId, index: action.index, event: { ...currentEvent } });
+          handleUpdateDialogue(action.mediaId, action.index, action.event);
+        }
+        break;
+      }
+      case 'dialogueEvents': {
+        const media = project.library.find(m => m.id === action.mediaId);
+        if (media?.analysis) {
+          pushToStack({ type: 'dialogueEvents', mediaId: action.mediaId, events: [...media.analysis.events] });
+          setProject(prev => ({
+            ...prev,
+            library: prev.library.map(m =>
+              m.id === action.mediaId && m.analysis
+                ? { ...m, analysis: { ...m.analysis, events: action.events } }
+                : m
+            )
+          }));
+        }
+        break;
+      }
+      case 'subtitleTemplate': {
+        pushToStack({ type: 'subtitleTemplate', template: project.activeSubtitleTemplate });
+        setProject(p => ({ ...p, activeSubtitleTemplate: action.template }));
+        break;
+      }
+      case 'subtitleStyle': {
+        pushToStack({ type: 'subtitleStyle', style: { ...project.subtitleStyle } });
+        setProject(p => ({ ...p, subtitleStyle: action.style }));
+        break;
+      }
+      case 'keywordAnimation': {
+        pushToStack({ type: 'keywordAnimation', animation: project.activeKeywordAnimation });
+        setProject(p => ({ ...p, activeKeywordAnimation: action.animation }));
+        break;
+      }
+      case 'segments': {
+        pushToStack({ type: 'segments', segments: [...project.segments] });
+        setProject(prev => ({ ...prev, segments: action.segments }));
+        break;
+      }
+      case 'fillerClean': {
+        pushToStack({
+          type: 'fillerClean',
+          segments: [...project.segments],
+          library: project.library.map(m => ({ ...m, analysis: m.analysis ? { ...m.analysis, events: [...m.analysis.events] } : null }))
+        });
+        setProject(prev => ({ ...prev, segments: action.segments, library: action.library }));
+        break;
+      }
+      case 'transcriptEdit':
+      case 'transcriptRestore': {
+        pushToStack({
+          type: action.type,
+          segments: [...project.segments],
+          removedWords: project.removedWords ? [...project.removedWords] : [],
+          library: project.library.map(m => ({ ...m, analysis: m.analysis ? { ...m.analysis, events: m.analysis.events.map(e => ({ ...e })) } : null }))
+        });
+        setProject(prev => ({
+          ...prev,
+          segments: action.segments,
+          removedWords: action.removedWords,
+          library: action.library ? action.library : prev.library
+        }));
+        break;
+      }
+    }
+  };
+
   // Undo handler
   const handleUndo = () => {
     if (undoStack.length === 0) return;
-
-    const lastState = undoStack[undoStack.length - 1];
-
-    if (lastState.segmentId === 'global') {
-      // Push current global to redo
-      setRedoStack(prev => [...prev, { segmentId: 'global', keyframes: globalKeyframes }]);
-      // Restore from undo
-      setGlobalKeyframes(lastState.keyframes);
-      // Remove from undo stack
-      setUndoStack(prev => prev.slice(0, -1));
-    } else {
-      const currentSegment = project.segments.find(s => s.id === lastState.segmentId);
-      if (currentSegment) {
-        // Push current to redo
-        setRedoStack(prev => [...prev, { segmentId: lastState.segmentId, keyframes: currentSegment.keyframes || [] }]);
-        // Restore from undo
-        handleUpdateKeyframes(lastState.segmentId, lastState.keyframes, true);
-        // Remove from undo stack
-        setUndoStack(prev => prev.slice(0, -1));
-      }
-    }
+    const action = undoStack[undoStack.length - 1];
+    setUndoStack(prev => prev.slice(0, -1));
+    applyUndoAction(action, (a) => setRedoStack(prev => [...prev, a]));
   };
 
   // Redo handler
   const handleRedo = () => {
     if (redoStack.length === 0) return;
-
-    const lastState = redoStack[redoStack.length - 1];
-
-    if (lastState.segmentId === 'global') {
-      // Push current global to undo
-      setUndoStack(prev => [...prev, { segmentId: 'global', keyframes: globalKeyframes }]);
-      // Restore from redo
-      setGlobalKeyframes(lastState.keyframes);
-      // Remove from redo stack
-      setRedoStack(prev => prev.slice(0, -1));
-    } else {
-      const currentSegment = project.segments.find(s => s.id === lastState.segmentId);
-      if (currentSegment) {
-        // Push current to undo
-        setUndoStack(prev => [...prev, { segmentId: lastState.segmentId, keyframes: currentSegment.keyframes || [] }]);
-        // Restore from redo
-        handleUpdateKeyframes(lastState.segmentId, lastState.keyframes, true);
-        // Remove from redo stack
-        setRedoStack(prev => prev.slice(0, -1));
-      }
-    }
+    const action = redoStack[redoStack.length - 1];
+    setRedoStack(prev => prev.slice(0, -1));
+    applyUndoAction(action, (a) => setUndoStack(prev => [...prev, a]));
   };
 
   // Viewport drag handlers for repositioning clips
@@ -610,14 +904,57 @@ function App() {
   };
 
   const handleViewportMouseMove = (e: React.MouseEvent) => {
+    // Subtitle drag takes priority — use crop region dims for 1:1 mapping
+    if (subtitleDragState && cropDims.width > 0) {
+      const dx = (e.clientX - subtitleDragState.startX) / cropDims.width * 100;
+      const dy = (e.clientY - subtitleDragState.startY) / cropDims.height * 100;
+      const media = project.library.find(m => m.id === subtitleDragState.mediaId);
+      const evt = media?.analysis?.events[subtitleDragState.index];
+      if (evt) {
+        handleUpdateDialogue(subtitleDragState.mediaId, subtitleDragState.index, {
+          ...evt,
+          translateX: subtitleDragState.origTx + dx,
+          translateY: subtitleDragState.origTy + dy,
+        });
+      }
+      return;
+    }
+
+    // Title drag — update keyframe at current time
+    if (titleDragState && cropDims.width > 0 && project.titleLayer) {
+      const dx = (e.clientX - titleDragState.startX) / cropDims.width * 100;
+      const dy = (e.clientY - titleDragState.startY) / cropDims.height * 100;
+      const newTx = titleDragState.origTx + dx;
+      const newTy = titleDragState.origTy + dy;
+      const t = project.currentTime - project.titleLayer.startTime;
+      const existingKfs = project.titleLayer.keyframes || [];
+      const existingIdx = existingKfs.findIndex(kf => Math.abs(kf.time - t) < 0.01);
+      const baseKf: ClipKeyframe = existingIdx >= 0 ? existingKfs[existingIdx]
+        : { time: t, translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+      const updatedKf = { ...baseKf, time: t, translateX: newTx, translateY: newTy };
+      const newKfs = existingIdx >= 0
+        ? existingKfs.map((kf, i) => i === existingIdx ? updatedKf : kf)
+        : [...existingKfs, updatedKf].sort((a, b) => a.time - b.time);
+      handleUpdateTitleLayer({ keyframes: newKfs });
+      return;
+    }
+
     if (!isViewportDragging || viewportSize.width === 0) return;
 
     const dx = e.clientX - viewportDragStart.x;
     const dy = e.clientY - viewportDragStart.y;
 
-    // Convert pixel delta to percentage of viewport
-    const deltaX = (dx / viewportSize.width) * 100;
-    const deltaY = (dy / viewportSize.height) * 100;
+    // Convert pixel delta to percentage of video display area (object-contain),
+    // matching the coordinate space used by tracking keyframes (% of video native dims)
+    const dragVideoEl = primarySelectedSegment ? videoRefs.current.get(primarySelectedSegment.id) : null;
+    const dragVW = dragVideoEl?.videoWidth || 1920;
+    const dragVH = dragVideoEl?.videoHeight || 1080;
+    const dragVideoAR = dragVW / dragVH;
+    const dragContainerAR = viewportSize.width / (viewportSize.height || 1);
+    const dragDisplayW = dragContainerAR > dragVideoAR ? viewportSize.height * dragVideoAR : viewportSize.width;
+    const dragDisplayH = dragContainerAR > dragVideoAR ? viewportSize.height : viewportSize.width / dragVideoAR;
+    const deltaX = (dx / dragDisplayW) * 100;
+    const deltaY = (dy / dragDisplayH) * 100;
 
     const newTranslateX = viewportDragStartTransform.translateX + deltaX;
     const newTranslateY = viewportDragStartTransform.translateY + deltaY;
@@ -682,7 +1019,60 @@ function App() {
 
   const handleViewportMouseUp = () => {
     setIsViewportDragging(false);
+    setSubtitleDragState(null);
+    setTitleDragState(null);
   };
+
+  // Tracking zoom: wheel to zoom-about-point, middle-drag to pan
+  const handleTrackingWheel = useCallback((e: React.WheelEvent) => {
+    if (activeRightTab !== 'tracking') return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // Zoom-about-point
+    const workspaceX = (mouseX - trackingPan.x) / trackingZoom;
+    const workspaceY = (mouseY - trackingPan.y) / trackingZoom;
+
+    const delta = -Math.sign(e.deltaY) * 0.15;
+    const newZoom = Math.max(0.5, Math.min(8, trackingZoom + delta));
+
+    const newPanX = mouseX - workspaceX * newZoom;
+    const newPanY = mouseY - workspaceY * newZoom;
+
+    setTrackingZoom(newZoom);
+    setTrackingPan({ x: newPanX, y: newPanY });
+  }, [activeRightTab, trackingZoom, trackingPan]);
+
+  const trackingPanRef = useRef<{ startX: number; startY: number; startPanX: number; startPanY: number } | null>(null);
+
+  const handleTrackingPanStart = useCallback((e: React.MouseEvent) => {
+    // Middle mouse button or Alt+left click for panning
+    if (activeRightTab !== 'tracking' || trackingZoom === 1) return;
+    if (e.button === 1 || (e.button === 0 && e.altKey)) {
+      e.preventDefault();
+      trackingPanRef.current = {
+        startX: e.clientX, startY: e.clientY,
+        startPanX: trackingPan.x, startPanY: trackingPan.y,
+      };
+      const handleMove = (me: MouseEvent) => {
+        if (!trackingPanRef.current) return;
+        setTrackingPan({
+          x: trackingPanRef.current.startPanX + (me.clientX - trackingPanRef.current.startX),
+          y: trackingPanRef.current.startPanY + (me.clientY - trackingPanRef.current.startY),
+        });
+      };
+      const handleUp = () => {
+        trackingPanRef.current = null;
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleUp);
+      };
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleUp);
+    }
+  }, [activeRightTab, trackingZoom, trackingPan]);
 
   // Get current clip time for graph editor (time within the selected segment)
   const graphEditorClipTime = useMemo(() => {
@@ -749,6 +1139,22 @@ function App() {
     canvas.width = outputWidth;
     canvas.height = outputHeight;
     const ctx = canvas.getContext('2d')!;
+
+    // Calculate the viewport safe zone height at the moment of export.
+    // The viewport uses CSS font sizes (e.g. 16px) designed for a viewport of this height.
+    // We need this to scale fonts/positions proportionally for the export resolution.
+    let safeZoneHeight = viewportSize.height || 360;
+    const arPresetExport = viewportSettings.previewAspectRatio !== 'custom'
+      ? ASPECT_RATIO_PRESETS[viewportSettings.previewAspectRatio]
+      : null;
+    if (arPresetExport && viewportSize.width > 0 && viewportSize.height > 0) {
+      const cr = viewportSize.width / viewportSize.height;
+      if (cr > arPresetExport.ratio) {
+        safeZoneHeight = viewportSize.height;
+      } else {
+        safeZoneHeight = viewportSize.width / arPresetExport.ratio;
+      }
+    }
 
     // 3. Recorder Setup
     const canvasStream = canvas.captureStream(settings.fps);
@@ -818,18 +1224,19 @@ function App() {
           const transform = getCombinedTransform(activeSeg.keyframes, clipTime, currentTime);
 
           ctx.save();
+          const coverScale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
+          const drawWidth = vid.videoWidth * coverScale;
+          const drawHeight = vid.videoHeight * coverScale;
           ctx.translate(outputWidth / 2, outputHeight / 2);
-          ctx.translate(transform.translateX * outputWidth / 100, transform.translateY * outputHeight / 100);
+          // Translate in cover-scaled video space (keyframes are % of video native dims)
+          ctx.translate(transform.translateX * drawWidth / 100, transform.translateY * drawHeight / 100);
           ctx.scale(transform.scale, transform.scale);
           ctx.rotate(transform.rotation * Math.PI / 180);
 
-          const scale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
-          const drawWidth = vid.videoWidth * scale;
-          const drawHeight = vid.videoHeight * scale;
           ctx.drawImage(vid, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
           ctx.restore();
 
-          // Draw Subtitles
+          // Draw Subtitles (with animation support)
           const media = projectRef.current.library.find(m => m.id === activeSeg.mediaId);
           if (media && media.analysis) {
             const mediaTime = activeSeg.startTime + (clipTime);
@@ -838,53 +1245,44 @@ function App() {
             );
 
             if (subtitle) {
-              const style = subtitle.styleOverride || projectRef.current.subtitleStyle;
-              const scaleFactor = outputHeight / 720;
-              const fontSize = (style.fontSize || 24) * scaleFactor;
+              // Resolve template and style (same logic as viewport)
+              const subTemplate = subtitle.templateOverride || projectRef.current.activeSubtitleTemplate;
+              const sourceStyle = subtitle.styleOverride || projectRef.current.subtitleStyle;
 
-              ctx.save();
-              ctx.font = `${style.bold ? 'bold ' : ''}${style.italic ? 'italic ' : ''}${fontSize}px ${style.fontFamily || 'Arial'}`;
-              ctx.textAlign = (style.textAlign as CanvasTextAlign) || 'center';
-              ctx.textBaseline = 'bottom';
-
-              const x = style.textAlign === 'left' ? outputWidth * 0.05 :
-                style.textAlign === 'right' ? outputWidth * 0.95 :
-                  outputWidth / 2;
-              const y = outputHeight - (outputHeight * ((style.bottomOffset || 10) / 100));
-
-              const text = subtitle.details;
-
-              // Background Box
-              if (style.backgroundType === 'box' || style.backgroundType === 'rounded') {
-                const metrics = ctx.measureText(text);
-                const padding = 10 * scaleFactor;
-                const w = metrics.width + padding * 2;
-                const h = fontSize + padding;
-                const bx = x - (style.textAlign === 'center' ? w / 2 : style.textAlign === 'right' ? w : 0);
-                const by = y - h + (padding / 2);
-
-                ctx.fillStyle = style.backgroundColor || 'rgba(0,0,0,0.5)';
-                if (style.backgroundType === 'rounded') {
-                  if (ctx.roundRect) {
-                    ctx.beginPath();
-                    ctx.roundRect(bx, by, w, h, (style.boxBorderRadius || 4) * scaleFactor);
-                    ctx.fill();
-                  } else {
-                    ctx.fillRect(bx, by, w, h);
-                  }
-                } else {
-                  ctx.fillRect(bx, by, w, h);
-                }
-              } else if (style.backgroundType === 'outline') {
-                ctx.strokeStyle = style.backgroundColor || '#000000';
-                ctx.lineWidth = 4 * scaleFactor;
-                ctx.lineJoin = 'round';
-                ctx.strokeText(text, x, y);
+              // Calculate interpolated transform for this frame
+              let kfTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+              if (subtitle.keyframes && subtitle.keyframes.length > 0) {
+                const sourceTime = activeSeg.startTime + clipTime;
+                const subTime = sourceTime - subtitle.startTime;
+                kfTransform = getInterpolatedTransform(subtitle.keyframes, subTime);
               }
 
-              ctx.fillStyle = style.color || '#ffffff';
-              ctx.fillText(text, x, y);
-              ctx.restore();
+              // Base offsets
+              const evtTx = subtitle.translateX || 0;
+              const evtTy = subtitle.translateY || 0;
+
+              // Animation frame (local to subtitle event)
+              const sourceTime = activeSeg.startTime + clipTime;
+              const localFrame = Math.round((sourceTime - subtitle.startTime) * settings.fps);
+              const subAnim = subTemplate?.animation || null;
+
+              drawSubtitleOnCanvas({
+                ctx,
+                text: subtitle.details,
+                style: sourceStyle,
+                templateStyle: subTemplate?.style || null,
+                animation: subAnim,
+                frame: localFrame,
+                fps: settings.fps,
+                outputWidth,
+                outputHeight,
+                viewportSafeZoneHeight: safeZoneHeight,
+                totalTx: evtTx + kfTransform.translateX,
+                totalTy: evtTy + kfTransform.translateY,
+                totalScale: kfTransform.scale,
+                totalRotation: kfTransform.rotation,
+                wordEmphases: subtitle.wordEmphases,
+              });
             }
           }
         }
@@ -922,148 +1320,90 @@ function App() {
     console.log('[Import] Starting import...', { url, download, manualFile });
     setStatus(ProcessingStatus.TRANSCRIBING);
     try {
-      // 1. Fetch Transcript
-      console.log('[Import] Fetching transcript...');
-      // Cache busting to ensure fresh data
-      const transcriptRes = await fetch(`/api/transcript?url=${encodeURIComponent(url)}&_t=${Date.now()}`);
-      console.log('[Import] Transcript response status:', transcriptRes.status);
+      // 1. Fetch Transcript (NON-FATAL — video still imports even if transcript fails)
+      let processedEvents: AnalysisEvent[] = [];
+      let videoTitle = "YouTube Video";
+      let transcriptWarning = '';
 
-      const transcriptData = await transcriptRes.json();
-      console.log('[Import] Transcript data received:', transcriptData);
+      try {
+        console.log('[Import] Fetching transcript...');
+        const transcriptRes = await fetch(`/api/transcript?url=${encodeURIComponent(url)}&_t=${Date.now()}`);
+        console.log('[Import] Transcript response status:', transcriptRes.status);
 
-      if (transcriptData.error) throw new Error(transcriptData.error);
+        const transcriptData = await transcriptRes.json();
+        console.log('[Import] Transcript data received:', transcriptData);
 
-      if (!transcriptData.segments) {
-        throw new Error('No segments found in transcript data');
-      }
+        if (transcriptData.error) {
+          transcriptWarning = transcriptData.error;
+          console.warn('[Import] Transcript warning from server:', transcriptData.error);
+        } else {
+          videoTitle = transcriptData.title || "YouTube Video";
 
-      // Process segments: Split sentences into words if needed to ensure "One Word" blocks
-      const events: AnalysisEvent[] = [];
+          // Process segments: Split sentences into words for "One Word" subtitle blocks
+          const events: AnalysisEvent[] = [];
 
-      if (transcriptData.segments) {
-        transcriptData.segments.forEach((seg: any) => {
-          // Clean text: replace tags with space, then trim
-          // Fixes: "We<00:00:00.400><c>" -> "We"
-          let text = seg.text || "";
-          text = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+          if (transcriptData.segments && transcriptData.segments.length > 0) {
+            transcriptData.segments.forEach((seg: any) => {
+              // Clean VTT tags: "We<00:00:00.400><c>" -> "We"
+              let text = seg.text || "";
+              text = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              if (!text) return;
 
-          if (!text) return;
+              const words = text.split(/\s+/);
+              const segDurationMs = Math.abs(Number(seg.duration));
+              const segStartMs = Number(seg.start);
 
-          const words = text.split(/\s+/);
-          // Sanitize values from server
-          const segDurationMs = Math.abs(Number(seg.duration));
-          const segStartMs = Number(seg.start);
-
-          if (words.length > 1) {
-            // Distribute duration equally
-            const durationPerWord = segDurationMs / words.length;
-            words.forEach((w: string, i: number) => {
-              events.push({
-                type: 'dialogue',
-                startTime: segStartMs + (i * durationPerWord),
-                endTime: segStartMs + ((i + 1) * durationPerWord),
-                label: 'speech',
-                details: w
-              });
+              if (words.length > 1) {
+                const durationPerWord = segDurationMs / words.length;
+                words.forEach((w: string, i: number) => {
+                  events.push({ type: 'dialogue', startTime: segStartMs + (i * durationPerWord), endTime: segStartMs + ((i + 1) * durationPerWord), label: 'speech', details: w });
+                });
+              } else {
+                events.push({ type: 'dialogue', startTime: segStartMs, endTime: segStartMs + segDurationMs, label: 'speech', details: text });
+              }
             });
+            console.log(`[Import] Generated ${events.length} raw word events.`);
           } else {
-            // Single word or empty
-            events.push({
-              type: 'dialogue',
-              startTime: segStartMs,
-              endTime: segStartMs + segDurationMs,
-              label: 'speech',
-              details: text
-            });
-          }
-        });
-        console.log(`[Import] Generated ${events.length} raw word events.`);
-      }
-
-      // Post-Process: Combine short/rapid words into "Slides"
-      // Rules:
-      // 1. If an event is < 0.2s, it MUST be merged unless it's the last one.
-      // 2. Accumulate words up to ~3 words or ~0.8s max duration for readability.
-      const processedEvents: AnalysisEvent[] = [];
-      if (events.length > 0) {
-        let buffer: AnalysisEvent[] = [events[0]];
-
-        for (let i = 1; i < events.length; i++) {
-          const current = events[i];
-          const prev = buffer[buffer.length - 1];
-
-          // Check continuity (gap < 0.1s)
-          const isContiguous = (current.startTime - prev.endTime) < 0.1;
-
-          // Conditions to merge:
-          // - Contiguous AND
-          // - (Current buffer is too short duration OR too few words)
-          // - AND adding next word doesn't exceed Max limits
-
-          const bufferDuration = prev.endTime - buffer[0].startTime;
-          const combinedDuration = current.endTime - buffer[0].startTime;
-          const wordCount = buffer.length;
-
-          // Merge if:
-          // 1. Gap is small
-          // 2. AND (Buffer is very short (<0.5s) OR Words < 3)
-          // 3. AND Combined duration < 1.0s (don't make super long slides)
-
-
-
-          // Deduplication Check
-          const isDuplicate = current.details.trim().toLowerCase() === prev.details.trim().toLowerCase();
-          const isOverlap = current.startTime < prev.endTime;
-          if (isDuplicate && isOverlap) {
-            prev.endTime = Math.max(prev.endTime, current.endTime);
-            continue; // Skip adding to buffer
+            transcriptWarning = 'No caption segments found for this video.';
           }
 
-          // Merge if:
-          // 1. Gap is small
-          // 2. AND (Buffer is very short (<0.5s) OR Words < 3)
-          // 3. AND Combined duration < 1.0s (don't make super long slides)
+          // Post-Process: Combine rapid/short words into readable "Slides"
+          if (events.length > 0) {
+            let buffer: AnalysisEvent[] = [events[0]];
 
-          if (isContiguous && (bufferDuration < 0.5 || wordCount < 3) && combinedDuration < 1.2) {
-            buffer.push(current);
-            // Update the "previous" (which is actually just the last in buffer for continuity check next loop)
-          } else {
-            // Flush buffer
-            const start = buffer[0].startTime;
-            const end = buffer[buffer.length - 1].endTime;
-            const text = buffer.map(e => e.details).join(' ');
+            for (let i = 1; i < events.length; i++) {
+              const current = events[i];
+              const prev = buffer[buffer.length - 1];
+              const isContiguous = (current.startTime - prev.endTime) < 0.1;
+              const bufferDuration = prev.endTime - buffer[0].startTime;
+              const combinedDuration = current.endTime - buffer[0].startTime;
+              const wordCount = buffer.length;
 
-            processedEvents.push({
-              type: 'dialogue',
-              startTime: start,
-              endTime: end,
-              label: 'speech',
-              details: text
-            });
+              // Deduplication
+              const isDuplicate = current.details.trim().toLowerCase() === prev.details.trim().toLowerCase();
+              const isOverlap = current.startTime < prev.endTime;
+              if (isDuplicate && isOverlap) {
+                prev.endTime = Math.max(prev.endTime, current.endTime);
+                continue;
+              }
 
-            // Start new buffer
-            buffer = [current];
+              if (isContiguous && (bufferDuration < 0.5 || wordCount < 3) && combinedDuration < 1.2) {
+                buffer.push(current);
+              } else {
+                processedEvents.push({ type: 'dialogue', startTime: buffer[0].startTime, endTime: buffer[buffer.length - 1].endTime, label: 'speech', details: buffer.map(e => e.details).join(' ') });
+                buffer = [current];
+              }
+            }
+            if (buffer.length > 0) {
+              processedEvents.push({ type: 'dialogue', startTime: buffer[0].startTime, endTime: buffer[buffer.length - 1].endTime, label: 'speech', details: buffer.map(e => e.details).join(' ') });
+            }
           }
+          console.log(`[Import] Post-processed into ${processedEvents.length} slides.`);
         }
-
-        // Flush remaining
-        if (buffer.length > 0) {
-          const start = buffer[0].startTime;
-          const end = buffer[buffer.length - 1].endTime;
-          const text = buffer.map(e => e.details).join(' ');
-          processedEvents.push({
-            type: 'dialogue',
-            startTime: start,
-            endTime: end,
-            label: 'speech',
-            details: text
-          });
-        }
-      } else {
-        // No events
+      } catch (transcriptErr) {
+        transcriptWarning = transcriptErr instanceof Error ? transcriptErr.message : String(transcriptErr);
+        console.warn('[Import] Transcript fetch failed (continuing without transcript):', transcriptWarning);
       }
-
-      console.log(`[Import] Post-processed into ${processedEvents.length} slides.`);
 
 
       // 2. Handle Media (Download or Upload placeholder)
@@ -1085,7 +1425,7 @@ function App() {
         const blob = await downloadRes.blob();
         console.log('[Import] Blob received size:', blob.size);
 
-        file = new File([blob], `${transcriptData.title}.mp4`, { type: 'video/mp4' });
+        file = new File([blob], `${videoTitle}.mp4`, { type: 'video/mp4' });
         videoUrl = URL.createObjectURL(blob);
       } else if (manualFile) {
         file = manualFile;
@@ -1130,7 +1470,7 @@ function App() {
         file,
         url: videoUrl,
         duration: duration,
-        name: transcriptData.title || "YouTube Video",
+        name: videoTitle,
         analysis: {
           summary: "Imported from YouTube",
           events: processedEvents,
@@ -1146,6 +1486,13 @@ function App() {
 
       setShowYoutubeModal(false);
       console.log('[Import] Import complete!');
+
+      // Show non-blocking warning if transcript failed (video imported successfully)
+      if (transcriptWarning) {
+        setTimeout(() => {
+          alert(`Video imported, but transcript could not be fetched.\n\nReason: ${transcriptWarning}\n\nTip: Try updating yt-dlp ("yt-dlp -U" in terminal), or upload a cookies.txt file in the import dialog's Advanced Options.`);
+        }, 100);
+      }
 
     } catch (e) {
       console.error('[Import] Error:', e);
@@ -1181,12 +1528,478 @@ function App() {
       description: item.name,
       color: `hsl(${Math.random() * 360}, 60%, 40%)`
     };
-    console.log('[App] Adding segment to timeline:', newSeg);
     setProject(prev => ({ ...prev, segments: [...prev.segments, newSeg] }));
     safeSetTimelineZoom(1);
+
+    // Auto-center person at start and end of the clip (if enabled)
+    if (autoCenterOnImport) {
+      setTimeout(() => autoCenterSegment(newSeg.id, newSeg.startTime, newSeg.endTime, newSeg.timelineStart), 0);
+    }
+  };
+
+  const handleInsertBlank = (insertionTime: number) => {
+    const duration = 2; // Default 2 seconds for a blank card
+    let targetTrack = 0;
+    while (true) {
+      const collision = project.segments.some(s =>
+        s.track === targetTrack &&
+        !(s.timelineStart + (s.endTime - s.startTime) <= insertionTime + 0.01 ||
+          s.timelineStart >= insertionTime + duration - 0.01)
+      );
+      if (!collision) break;
+      targetTrack++;
+      if (targetTrack > 10) break; // Arbitrary high limit
+    }
+
+    const newBlankSeg: Segment = {
+      id: Math.random().toString(36).substr(2, 9),
+      type: 'blank',
+      mediaId: '', // Blanks don't have underlying media
+      startTime: 0,
+      endTime: duration,
+      timelineStart: insertionTime,
+      track: targetTrack,
+      description: 'Blank Dialog',
+      customText: '',
+      color: '#444444' // Neutral dark gray for blanks
+    };
+
+    pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
+    setProject(prev => ({ ...prev, segments: [...prev.segments, newBlankSeg] }));
+  };
+
+  const handleInsertTitle = (insertionTime: number = project.currentTime) => {
+    setProject(prev => ({
+      ...prev,
+      titleLayer: prev.titleLayer ? prev.titleLayer : {
+        id: `title-${Date.now()}`,
+        text: 'New Title',
+        startTime: insertionTime,
+        endTime: insertionTime + 3,
+        fadeInDuration: 0.2,
+        fadeOutDuration: 0.2,
+      },
+    }));
+    setIsTitleSelected(true);
+  };
+
+  const handleInsertDialogue = (insertionTime: number = project.currentTime) => {
+    // Find media under playhead
+    const topSeg = project.segments
+      .filter(s => s.timelineStart <= insertionTime && (s.timelineStart + s.endTime - s.startTime) > insertionTime)
+      .sort((a, b) => b.track - a.track)[0];
+
+    if (!topSeg || topSeg.type === 'blank') {
+      alert("Please place the playhead over a valid media clip to insert a dialogue.");
+      return;
+    }
+
+    setProject(prev => {
+      const mediaIndex = prev.library.findIndex(m => m.id === topSeg.mediaId);
+      if (mediaIndex === -1) return prev;
+
+      const sourceTime = topSeg.startTime + (insertionTime - topSeg.timelineStart);
+
+      const newLib = [...prev.library];
+      const currentMedia = newLib[mediaIndex];
+      const newAnalysis = currentMedia.analysis ? { ...currentMedia.analysis } : { events: [], summary: '', generatedAt: new Date() };
+      if (!newAnalysis.events) newAnalysis.events = [];
+
+      const newEvent: AnalysisEvent = {
+        startTime: sourceTime,
+        endTime: sourceTime + 2,
+        type: 'dialogue',
+        label: 'Unknown',
+        details: 'New Dialogue',
+      };
+
+      newAnalysis.events = [...newAnalysis.events, newEvent].sort((a, b) => a.startTime - b.startTime);
+      newLib[mediaIndex] = { ...currentMedia, analysis: newAnalysis as any };
+      return { ...prev, library: newLib };
+    });
+  };
+
+  // ============ TRACKING PANEL HANDLERS ============
+  const TRACKER_COLORS = ['#00ff00', '#00ffff', '#ff00ff', '#ffff00', '#ff9900', '#adff2f', '#00bfff'];
+
+  const handlePlaceTracker = (videoX: number, videoY: number) => {
+    if (!primarySelectedSegment) return;
+    const trackers = primarySelectedSegment.trackers || [];
+    const newTracker: VibeCutTracker = {
+      id: `tracker_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      color: TRACKER_COLORS[trackers.length % TRACKER_COLORS.length],
+      x: videoX,
+      y: videoY,
+      patchSize: 32,
+      searchWindow: 60,
+      sensitivity: 50,
+      type: trackingMode === 'placing-stabilizer' ? 'stabilizer' : 'parent',
+      isActive: true,
+    };
+
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === primarySelectedSegment.id
+          ? { ...s, trackers: [...(s.trackers || []), newTracker] }
+          : s
+      ),
+    }));
+
+    // Capture template from current video frame
+    const videoEl = videoRefs.current.get(primarySelectedSegment.id);
+    if (videoEl) {
+      captureTemplateFromVideo(newTracker, videoEl, trackingTemplatesRef.current);
+    }
+
+    setSelectedTrackerId(newTracker.id);
+    setTrackingMode('reviewing'); // Exit placement mode after placing
+  };
+
+  const handleTrackerDrag = (trackerId: string, newVideoX: number, newVideoY: number) => {
+    if (!primarySelectedSegment) return;
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === primarySelectedSegment.id
+          ? {
+            ...s,
+            trackers: (s.trackers || []).map((t: VibeCutTracker) => t.id === trackerId ? { ...t, x: newVideoX, y: newVideoY } : t),
+            // Clear tracking data when tracker is repositioned — old data is no longer valid
+            trackingData: undefined,
+          }
+          : s
+      ),
+    }));
+    // Re-capture template at new position
+    const videoEl = videoRefs.current.get(primarySelectedSegment.id);
+    const tracker = primarySelectedSegment.trackers?.find(t => t.id === trackerId);
+    if (videoEl && tracker) {
+      captureTemplateFromVideo({ ...tracker, x: newVideoX, y: newVideoY }, videoEl, trackingTemplatesRef.current);
+    }
+  };
+
+  const handleUpdateTracker = (segmentId: string, trackerId: string, updates: Partial<VibeCutTracker>) => {
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === segmentId
+          ? {
+            ...s,
+            trackers: (s.trackers || []).map((t: VibeCutTracker) => t.id === trackerId ? { ...t, ...updates } : t),
+            // Don't clear tracking data when settings change — existing data is still valid
+            // for display/review. Template re-capture handles future tracking runs.
+          }
+          : s
+      ),
+    }));
+    // Re-capture template when patch size changes (for future tracking runs)
+    if (updates.patchSize !== undefined) {
+      const segment = project.segments.find(s => s.id === segmentId);
+      const tracker = segment?.trackers?.find(t => t.id === trackerId);
+      const videoEl = videoRefs.current.get(segmentId);
+      if (tracker && videoEl) {
+        captureTemplateFromVideo({ ...tracker, ...updates }, videoEl, trackingTemplatesRef.current);
+      }
+    }
+  };
+
+  const handleDeleteTracker = (segmentId: string, trackerId: string) => {
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === segmentId
+          ? {
+            ...s,
+            trackers: (s.trackers || []).filter((t: VibeCutTracker) => t.id !== trackerId),
+            trackingData: (s.trackingData || []).map(frame => ({
+              ...frame,
+              trackers: frame.trackers.filter(t => t.id !== trackerId),
+            })),
+          }
+          : s
+      ),
+    }));
+    trackingTemplatesRef.current.delete(trackerId);
+    if (selectedTrackerId === trackerId) setSelectedTrackerId(null);
+  };
+
+  const handleClearTrackingData = (segmentId: string) => {
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === segmentId ? { ...s, trackingData: undefined } : s
+      ),
+    }));
+    setTrackingMode('reviewing');
+  };
+
+  const handleClearTracking = (segmentId: string) => {
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === segmentId ? { ...s, trackers: [], trackingData: undefined } : s
+      ),
+    }));
+    setSelectedTrackerId(null);
+    setTrackingMode('idle');
+    trackingTemplatesRef.current.clear();
+  };
+
+  const handleStartTracking = async (segmentId: string) => {
+    const segment = project.segments.find(s => s.id === segmentId);
+    if (!segment || !segment.trackers?.length) return;
+
+    const videoEl = videoRefs.current.get(segmentId);
+    if (!videoEl) return;
+
+    // Stop playback — tracking service owns the video element
+    setProject(prev => ({ ...prev, isPlaying: false }));
+
+    // Create abort controller
+    const abort = new AbortController();
+    trackingAbortRef.current = abort;
+
+    // Resume support: if we have existing tracking data, continue from last frame
+    // Fresh start: begin from the current viewing time (where the user placed trackers),
+    // NOT segment.startTime — avoids seeking away from the placement frame & using wrong template
+    const existingData = segment.trackingData || [];
+    const isResuming = existingData.length > 0;
+    const currentMediaTime = segment.startTime + (project.currentTime - segment.timelineStart);
+    const resumeTime = isResuming
+      ? existingData[existingData.length - 1].time
+      : Math.max(segment.startTime, Math.min(segment.endTime, currentMediaTime));
+
+    // If resuming, update tracker positions to their last known positions
+    // so the service initializes from the right spot
+    let trackersForService = segment.trackers;
+    if (isResuming) {
+      const lastFrame = existingData[existingData.length - 1];
+      trackersForService = segment.trackers.map((t: VibeCutTracker) => {
+        const lastPos = lastFrame.trackers.find((ft: { id: string; x: number; y: number }) => ft.id === t.id);
+        return lastPos ? { ...t, x: lastPos.x, y: lastPos.y } : t;
+      });
+    }
+
+    setTrackingMode('tracking');
+    setTrackingProgress({ progress: 0, label: isResuming ? 'Resuming...' : 'Starting...' });
+
+    // Accumulate frames locally, flush to state periodically to reduce re-render churn
+    let pendingFrames: typeof existingData = [];
+    let lastFlushTime = 0;
+    const FLUSH_INTERVAL = 300; // ms — flush state every 300ms
+
+    const flushFrames = () => {
+      if (pendingFrames.length === 0) return;
+      const framesToFlush = pendingFrames;
+      pendingFrames = [];
+      const lastFrame = framesToFlush[framesToFlush.length - 1];
+      setProject((prev: ProjectState) => ({
+        ...prev,
+        currentTime: segment.timelineStart + (lastFrame.time - segment.startTime),
+        segments: prev.segments.map(s =>
+          s.id === segmentId
+            ? { ...s, trackingData: [...(s.trackingData || []), ...framesToFlush] }
+            : s
+        ),
+      }));
+    };
+
+    try {
+      const results = await trackManualTrackers(
+        videoEl,
+        { startTime: resumeTime, endTime: segment.endTime },
+        trackersForService,
+        trackingTemplatesRef.current,
+        {
+          onProgress: (p, l) => setTrackingProgress({ progress: p, label: l }),
+          onFrame: (frame) => {
+            pendingFrames.push(frame);
+            const now = performance.now();
+            if (now - lastFlushTime > FLUSH_INTERVAL) {
+              lastFlushTime = now;
+              flushFrames();
+            }
+          },
+          signal: abort.signal,
+        }
+      );
+
+      // Final flush + complete data
+      const allData = [...existingData, ...results.slice(isResuming ? 1 : 0)];
+      setProject(prev => ({
+        ...prev,
+        segments: prev.segments.map(s =>
+          s.id === segmentId ? { ...s, trackingData: allData } : s
+        ),
+      }));
+      setTrackingMode('reviewing');
+    } catch (e) {
+      // Flush any pending frames on abort/error
+      flushFrames();
+      if (abort.signal.aborted) {
+        setTrackingMode('reviewing');
+      } else {
+        console.error('[Tracking] Failed:', e);
+        setTrackingMode('reviewing');
+      }
+    } finally {
+      setTrackingProgress(null);
+      trackingAbortRef.current = null;
+    }
+  };
+
+  const handleStopTracking = () => {
+    trackingAbortRef.current?.abort();
+  };
+
+  // Strip unchecked channels from keyframes: set to defaults, then remove pure-default keyframes
+  const stripUncheckedChannels = (keyframes: ClipKeyframe[], channels: Set<string>): ClipKeyframe[] => {
+    console.log('[StripChannels] Active bake channels:', [...channels], '| Input keyframes:', keyframes.length);
+    const result = keyframes.map(kf => ({
+      ...kf,
+      translateX: channels.has('translateX') ? kf.translateX : 0,
+      translateY: channels.has('translateY') ? kf.translateY : 0,
+      scale: channels.has('scale') ? kf.scale : 1,
+      rotation: channels.has('rotation') ? kf.rotation : 0,
+    })).filter(kf =>
+      kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0
+    );
+    console.log('[StripChannels] Output keyframes:', result.length, '| Sample:', result[0] ? { tX: result[0].translateX.toFixed(3), tY: result[0].translateY.toFixed(3), s: result[0].scale.toFixed(3), r: result[0].rotation.toFixed(3) } : 'none');
+    return result;
+  };
+
+  const handleApplyStabilization = (segmentId: string, channels?: Set<string>) => {
+    const segment = project.segments.find(s => s.id === segmentId);
+    if (!segment?.trackingData || !segment.trackers) return;
+
+    const videoEl = videoRefs.current.get(segmentId);
+    const vw = videoEl?.videoWidth || 1920;
+    const vh = videoEl?.videoHeight || 1080;
+
+    const stabTrackerIds = segment.trackers.filter(t => t.type === 'stabilizer' && t.isActive).map(t => t.id);
+    if (stabTrackerIds.length === 0) return;
+
+    // Step 1: Generate ALL keyframes
+    const allKeyframes = generateStabilizationKeyframes(
+      segment.trackingData, stabTrackerIds,
+      { startTime: segment.startTime, endTime: segment.endTime },
+      vw, vh
+    );
+
+    // Step 2: Strip unchecked channels and remove pure-default keyframes
+    const bake = channels || new Set(['translateX', 'translateY', 'scale', 'rotation']);
+    const keyframes = stripUncheckedChannels(allKeyframes, bake);
+
+    if (keyframes.length > 0) {
+      handleUpdateKeyframes(segmentId, keyframes);
+      handleClearTrackingData(segmentId);
+      setTransformTarget(segmentId);
+      setActiveBottomTab('graph');
+    }
+  };
+
+  const handleApplyToSegment = (segmentId: string, trackerId: string, channels?: Set<string>) => {
+    const segment = project.segments.find(s => s.id === segmentId);
+    if (!segment?.trackingData) return;
+
+    const videoEl = videoRefs.current.get(segmentId);
+    const vw = videoEl?.videoWidth || 1920;
+    const vh = videoEl?.videoHeight || 1080;
+
+    const allKeyframes = generateFollowKeyframes(
+      segment.trackingData, trackerId,
+      { startTime: segment.startTime, endTime: segment.endTime },
+      vw, vh
+    );
+
+    const bake = channels || new Set(['translateX', 'translateY', 'scale', 'rotation']);
+    const keyframes = stripUncheckedChannels(allKeyframes, bake);
+
+    if (keyframes.length > 0) {
+      handleUpdateKeyframes(segmentId, keyframes);
+      handleClearTrackingData(segmentId);
+      setTransformTarget(segmentId);
+      setActiveBottomTab('graph');
+    }
+  };
+
+  const handleApplyToTitle = (segmentId: string, trackerId: string, channels?: Set<string>) => {
+    const segment = project.segments.find(s => s.id === segmentId);
+    if (!segment?.trackingData || !project.titleLayer) return;
+
+    const videoEl = videoRefs.current.get(segmentId);
+    const vw = videoEl?.videoWidth || 1920;
+    const vh = videoEl?.videoHeight || 1080;
+
+    const allKeyframes = generateFollowKeyframes(
+      segment.trackingData, trackerId,
+      { startTime: segment.startTime, endTime: segment.endTime },
+      vw, vh
+    );
+
+    const bake = channels || new Set(['translateX', 'translateY', 'scale', 'rotation']);
+    const keyframes = stripUncheckedChannels(allKeyframes, bake);
+
+    if (keyframes.length > 0) {
+      handleUpdateTitleLayer({ keyframes });
+      handleClearTrackingData(segmentId);
+      setTransformTarget('title_layer');
+      setActiveBottomTab('graph');
+    }
+  };
+
+  // Escape key to cancel placement mode
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && (trackingMode === 'placing-stabilizer' || trackingMode === 'placing-parent')) {
+        setTrackingMode('reviewing');
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [trackingMode]);
+
+  // Clean segment text by removing words at removedWordIndices, and re-index keywords
+  const cleanSegmentText = (text: string, removedIndices?: number[], keywords?: KeywordEmphasis[]): { text: string; keywords: KeywordEmphasis[] } => {
+    if (!removedIndices || removedIndices.length === 0) return { text, keywords: keywords || [] };
+    const words = text.split(/\s+/);
+    const removedSet = new Set(removedIndices);
+    const kept: string[] = [];
+    const indexMap = new Map<number, number>(); // old index -> new index
+    for (let i = 0; i < words.length; i++) {
+      if (!removedSet.has(i)) {
+        indexMap.set(i, kept.length);
+        kept.push(words[i]);
+      }
+    }
+    const reindexed = (keywords || [])
+      .filter(kw => !removedSet.has(kw.wordIndex))
+      .map(kw => ({ ...kw, wordIndex: indexMap.get(kw.wordIndex) ?? kw.wordIndex }));
+    return { text: kept.join(' '), keywords: reindexed };
   };
 
   // Export Short from Content Library to Editor
+  const resolveKeywordsForEvent = (eventText: string, shortSegments: { startTime: number; endTime: number; keywords?: KeywordEmphasis[] }[], clipStartTime: number, clipEndTime: number): KeywordEmphasis[] => {
+    const eventWords = eventText.split(/\s+/);
+    const allKeywords: KeywordEmphasis[] = [];
+    for (const seg of shortSegments) {
+      if (!seg.keywords || seg.endTime <= clipStartTime || seg.startTime >= clipEndTime) continue;
+      for (const kw of seg.keywords) {
+        if (!kw.enabled) continue;
+        const kwNorm = kw.word.toLowerCase().replace(/[.,!?;:'"()]/g, '');
+        const idx = eventWords.findIndex((w, i) =>
+          w.toLowerCase().replace(/[.,!?;:'"()]/g, '') === kwNorm &&
+          !allKeywords.some(ak => ak.wordIndex === i)
+        );
+        if (idx >= 0) {
+          allKeywords.push({ word: kw.word, wordIndex: idx, enabled: true, color: kw.color });
+        }
+      }
+    }
+    return allKeywords;
+  };
+
   const handleExportShort = async (short: GeneratedShort) => {
     console.log('[Export Short] Starting export...', short);
     setStatus(ProcessingStatus.TRANSCRIBING);
@@ -1235,11 +2048,17 @@ function App() {
       console.log('[ExportShort] allVideoSegments from DB:', allVideoSegments.length, allVideoSegments.slice(0, 3));
       console.log('[ExportShort] short.segments (clips):', short.segments);
 
+      // Pre-clean segments: apply word removal before processing
+      const cleanedSegments = short.segments.map(seg => {
+        const cleaned = cleanSegmentText(seg.text, seg.removedWordIndices, seg.keywords);
+        return { ...seg, text: cleaned.text, keywords: cleaned.keywords };
+      });
+
       const analysisEvents: AnalysisEvent[] = [];
       const rawClipEvents: any[] = [];
       const processedSegmentIds = new Set<string>(); // Track processed segments to avoid duplicates
 
-      short.segments.forEach((clipSeg, clipIdx) => {
+      cleanedSegments.forEach((clipSeg, clipIdx) => {
         console.log(`[ExportShort] Processing clip ${clipIdx}: ${clipSeg.startTime}s - ${clipSeg.endTime}s`);
         // Find all granular segments that overlap this clip
         const clipRaw = allVideoSegments.filter(s => {
@@ -1301,7 +2120,8 @@ function App() {
               startTime: start,
               endTime: end,
               label: 'speech',
-              details: text
+              details: text,
+              wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end)
             });
 
             // Start new buffer
@@ -1319,7 +2139,8 @@ function App() {
             startTime: start,
             endTime: end,
             label: 'speech',
-            details: text
+            details: text,
+            wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end)
           });
         }
       }
@@ -1327,14 +2148,15 @@ function App() {
       // Fallback: This usually happens if DB is empty or logic fails
       // Use the short.segments directly with SOURCE VIDEO times
       if (analysisEvents.length === 0) {
-        console.log('[ExportShort] Fallback triggered - using short.segments directly');
-        short.segments.forEach(seg => {
+        console.log('[ExportShort] Fallback triggered - using cleanedSegments directly');
+        cleanedSegments.forEach(seg => {
           analysisEvents.push({
             type: 'dialogue',
             startTime: seg.startTime,
             endTime: seg.endTime,
             label: 'speech',
-            details: seg.text
+            details: seg.text,
+            wordEmphases: seg.keywords?.filter(k => k.enabled) || []
           });
         });
       }
@@ -1380,12 +2202,12 @@ function App() {
         return segment;
       });
 
-      // 8. Add segments to project and create title layer
+      // 7.5. Import into editor FIRST (user sees clips immediately)
       const titleLayer: TitleLayer = {
         id: Math.random().toString(36).substr(2, 9),
         text: short.hookTitle || short.title,
         startTime: 0,
-        endTime: 4, // Default 4 seconds duration for the title
+        endTime: 4,
         fadeInDuration: 0.5,
         fadeOutDuration: 0.5,
         style: INITIAL_TITLE_STYLE,
@@ -1398,11 +2220,21 @@ function App() {
         titleLayer: titleLayer
       }));
 
-      // 9. Switch to editor view
+      // Switch to editor view so user sees the imported clips
       setSelectedMediaId(newMediaItem.id);
       setActiveRightTab('transcript');
       setActivePage('editor');
       safeSetTimelineZoom(1);
+      console.log('[Export Short] Clips imported into editor.');
+
+      // Auto-center person at start and end of each clip (if enabled)
+      if (autoCenterOnImport) {
+        setTimeout(async () => {
+          for (const seg of newSegments) {
+            await autoCenterSegment(seg.id, seg.startTime, seg.endTime, seg.timelineStart);
+          }
+        }, 0);
+      }
 
       console.log('[Export Short] Export complete!');
 
@@ -1414,17 +2246,38 @@ function App() {
     }
   };
 
-  const handleSplit = (time: number) => {
+  const handleSplit = async (time: number) => {
     const segmentsToSplit = project.segments.filter(s =>
       time > s.timelineStart && time < (s.timelineStart + (s.endTime - s.startTime))
     );
     if (segmentsToSplit.length === 0) return;
 
+    // Save undo snapshot before modifying segments
+    pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
+
+    // Pre-compute snapped split points (snap to nearest silence, ±150ms)
+    const snappedPoints = new Map<string, number>();
+    for (const seg of segmentsToSplit) {
+      const rawSplitSource = seg.startTime + (time - seg.timelineStart);
+      const media = project.library.find(m => m.id === seg.mediaId);
+      if (media?.file) {
+        try {
+          const audioBuf = await getAudioBuffer(seg.mediaId, media.file);
+          const result = findNearestSilence(audioBuf, rawSplitSource, 0.15);
+          snappedPoints.set(seg.id, result.time);
+        } catch {
+          snappedPoints.set(seg.id, rawSplitSource);
+        }
+      } else {
+        snappedPoints.set(seg.id, rawSplitSource);
+      }
+    }
+
     setProject(prev => {
       let newSegments = [...prev.segments];
       segmentsToSplit.forEach(seg => {
-        const splitPointSource = seg.startTime + (time - seg.timelineStart);
-        const splitPointTimeline = time;
+        const splitPointSource = snappedPoints.get(seg.id) ?? (seg.startTime + (time - seg.timelineStart));
+        const splitPointTimeline = seg.timelineStart + (splitPointSource - seg.startTime);
         const seg1 = { ...seg, id: Math.random().toString(36).substr(2, 9), endTime: splitPointSource, transitionOut: undefined };
         const seg2 = { ...seg, id: Math.random().toString(36).substr(2, 9), startTime: splitPointSource, timelineStart: splitPointTimeline, transitionIn: undefined };
         newSegments = newSegments.filter(s => s.id !== seg.id);
@@ -1434,11 +2287,14 @@ function App() {
     });
   };
 
-  const handleUpdateSegment = (updated: Segment) => {
-    setProject(prev => ({
-      ...prev,
-      segments: prev.segments.map(s => s.id === updated.id ? updated : s)
-    }));
+  const handleUpdateSegments = (updatedSegments: Segment[]) => {
+    setProject(prev => {
+      let newSegs = [...prev.segments];
+      for (const updated of updatedSegments) {
+        newSegs = newSegs.map(s => s.id === updated.id ? updated : s);
+      }
+      return { ...prev, segments: newSegs };
+    });
   };
 
   const handleUpdateTransition = (segId: string, side: 'in' | 'out', transition: Transition | undefined) => {
@@ -1498,30 +2354,44 @@ function App() {
 
   const handleSegmentSelect = (seg: Segment, isMulti: boolean) => {
     setSelectedTransition(null);
-    setSelectedDialogue(null); // Deselect dialogue
+    setSelectedDialogues([]); // Deselect dialogue
     setIsTitleSelected(false); // Deselect title
     setActiveRightTab('properties');
     if (isMulti) {
       setSelectedSegmentIds(prev => prev.includes(seg.id) ? prev.filter(id => id !== seg.id) : [...prev, seg.id]);
     } else {
       setSelectedSegmentIds([seg.id]);
+      // Auto-select clip as transform target in Graph Editor
+      setTransformTarget(seg.id);
     }
   };
 
   const handleTransitionSelect = (segId: string, side: 'in' | 'out', x: number, y: number) => {
     setSelectedSegmentIds([segId]);
-    setSelectedDialogue(null); // Deselect dialogue
+    setSelectedDialogues([]); // Deselect dialogue
     setIsTitleSelected(false); // Deselect title
     setSelectedTransition({ segId, side });
     setActiveRightTab('properties');
   };
 
-  const handleDialogueSelect = (mediaId: string, index: number) => {
-    console.log('[App] Dialog Selected:', { mediaId, index });
+  const handleDialogueSelect = (mediaId: string, index: number, isShift?: boolean) => {
+    console.log('[App] Dialog Selected:', { mediaId, index, isShift });
     setSelectedSegmentIds([]); // Deselect clips
     setSelectedTransition(null);
     setIsTitleSelected(false); // Deselect title
-    setSelectedDialogue({ mediaId, index });
+    if (isShift && selectedDialogues.length > 0 && selectedDialogues[0].mediaId === mediaId) {
+      // Add to selection (if not already selected), keep sorted by index
+      setSelectedDialogues(prev => {
+        if (prev.some(d => d.index === index)) return prev;
+        return [...prev, { mediaId, index }].sort((a, b) => a.index - b.index);
+      });
+    } else {
+      setSelectedDialogues([{ mediaId, index }]);
+    }
+    // Auto-select subtitle as transform target in Graph Editor
+    if (activeBottomTab === 'graph') {
+      setTransformTarget(`subtitle_${mediaId}_${index}`);
+    }
     setActiveRightTab('properties');
   };
 
@@ -1529,7 +2399,7 @@ function App() {
     console.log('[App] Title Selected:', title);
     setSelectedSegmentIds([]);
     setSelectedTransition(null);
-    setSelectedDialogue(null);
+    setSelectedDialogues([]);
     setIsTitleSelected(true);
     setActiveRightTab('properties');
   };
@@ -1589,15 +2459,82 @@ function App() {
     });
     // Deselect if we deleted the selected one or if selection index invalid
     if (selectedDialogue?.mediaId === mediaId) {
-      setSelectedDialogue(null);
+      setSelectedDialogues([]);
     }
   };
 
   const handleUpdateDialogueText = (newText: string) => {
+    if (selectedDialogue) {
+      const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+      const current = media?.analysis?.events[selectedDialogue.index];
+      if (current) {
+        pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+      }
+    }
     updateSelectedEvent(evt => ({ ...evt, details: newText }));
   };
 
+  const handleToggleSubtitleKeyword = (wordIndex: number, word: string) => {
+    if (!currentTopMedia || !activeSubtitleEvent) return;
+    const evtIndex = currentTopMedia.analysis?.events.indexOf(activeSubtitleEvent) ?? -1;
+    if (evtIndex < 0) return;
+
+    const existing = activeSubtitleEvent.wordEmphases || [];
+    const found = existing.findIndex(k => k.wordIndex === wordIndex);
+
+    let updated: KeywordEmphasis[];
+    if (found >= 0) {
+      // Toggle: if enabled, disable; if disabled, remove entirely
+      if (existing[found].enabled) {
+        updated = existing.map((k, i) => i === found ? { ...k, enabled: false } : k);
+      } else {
+        updated = existing.filter((_, i) => i !== found);
+      }
+    } else {
+      // Add new keyword
+      const cleanWord = word.toLowerCase().replace(/[.,!?;:'"()]/g, '');
+      updated = [...existing, { word: cleanWord, wordIndex, enabled: true }];
+    }
+
+    handleUpdateDialogue(currentTopMedia.id, evtIndex, {
+      ...activeSubtitleEvent,
+      wordEmphases: updated,
+    });
+  };
+
+  const handleUpdateKeywordAnimation = (animation: TextAnimation | null) => {
+    if (isTemplateUnlinked && selectedDialogue) {
+      // Unlinked: update per-event keywordAnimation
+      const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+      const current = media?.analysis?.events[selectedDialogue.index];
+      if (current) {
+        pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+        updateSelectedEvent(evt => ({ ...evt, keywordAnimation: animation || undefined }));
+      }
+    } else {
+      // Linked: update global activeKeywordAnimation
+      pushUndo({ type: 'keywordAnimation', animation: project.activeKeywordAnimation });
+      setProject(p => ({ ...p, activeKeywordAnimation: animation }));
+    }
+  };
+
   const handleUpdateSubtitleStyle = (newStyle: Partial<SubtitleStyle>) => {
+    // Debounced undo: capture state on first change, reset after 500ms idle
+    if (!styleUndoCaptured.current) {
+      styleUndoCaptured.current = true;
+      if (isSubtitleUnlinked && selectedDialogue) {
+        const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+        const current = media?.analysis?.events[selectedDialogue.index];
+        if (current) {
+          pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+        }
+      } else {
+        pushUndo({ type: 'subtitleStyle', style: { ...project.subtitleStyle } });
+      }
+    }
+    if (styleUndoTimer.current) clearTimeout(styleUndoTimer.current);
+    styleUndoTimer.current = setTimeout(() => { styleUndoCaptured.current = false; }, 500);
+
     if (isSubtitleUnlinked) {
       // Update the override on the specific event
       updateSelectedEvent(evt => ({
@@ -1617,15 +2554,23 @@ function App() {
     if (!project.titleLayer) return;
     setProject(prev => {
       if (!prev.titleLayer) return prev;
-      return {
-        ...prev,
-        titleLayer: { ...prev.titleLayer, ...updates }
-      };
+      const updated = { ...prev, titleLayer: { ...prev.titleLayer, ...updates } };
+      // Auto-seek to title start when animation changes so user sees it
+      if ('animation' in updates && prev.titleLayer) {
+        updated.currentTime = Math.max(0, prev.titleLayer.startTime - 0.1);
+        updated.isPlaying = false;
+      }
+      return updated;
     });
   };
 
   const handleToggleSubtitleUnlink = () => {
     if (!selectedDialogue) return;
+    const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+    const current = media?.analysis?.events[selectedDialogue.index];
+    if (current) {
+      pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+    }
 
     if (isSubtitleUnlinked) {
       // Revert to Global (Remove Override)
@@ -1642,7 +2587,145 @@ function App() {
     }
   };
 
+  const handleToggleTemplateUnlink = () => {
+    if (!selectedDialogue) return;
+    const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+    const current = media?.analysis?.events[selectedDialogue.index];
+    if (current) {
+      pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+    }
+
+    if (isTemplateUnlinked) {
+      // Revert to Global (Remove Override)
+      updateSelectedEvent(evt => {
+        const { templateOverride, ...rest } = evt;
+        return rest;
+      });
+    } else {
+      // Unlink (Create Override by copying global template)
+      if (project.activeSubtitleTemplate) {
+        updateSelectedEvent(evt => ({
+          ...evt,
+          templateOverride: { ...project.activeSubtitleTemplate! }
+        }));
+      }
+    }
+  };
+
+  const handleUpdateSubtitleTemplate = (template: SubtitleTemplate) => {
+    if (isTemplateUnlinked) {
+      // Push undo for per-event template change
+      if (selectedDialogue) {
+        const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+        const current = media?.analysis?.events[selectedDialogue.index];
+        if (current) {
+          pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+        }
+      }
+      // Update only the override on this specific event
+      updateSelectedEvent(evt => ({
+        ...evt,
+        templateOverride: template
+      }));
+    } else {
+      // Push undo for global template change
+      pushUndo({ type: 'subtitleTemplate', template: project.activeSubtitleTemplate });
+      // Update global template
+      setProject(p => ({ ...p, activeSubtitleTemplate: template }));
+    }
+
+    // Auto-seek to subtitle start so user can see the animation play
+    const seekTarget = getAnimationSeekTarget();
+    if (seekTarget !== null) {
+      setProject(p => ({ ...p, currentTime: seekTarget, isPlaying: false }));
+    }
+  };
+
+  /** Find the best time to seek to so the user can preview a subtitle animation */
+  const getAnimationSeekTarget = (): number | null => {
+    // If a specific subtitle is selected, seek to its start
+    if (selectedDialogueEvent) {
+      const topSeg = activeSegments[activeSegments.length - 1];
+      if (topSeg) {
+        // Convert source time back to timeline time
+        const timelineTime = topSeg.timelineStart + (selectedDialogueEvent.startTime - topSeg.startTime);
+        return Math.max(0, timelineTime - 0.1); // Slight offset so animation starts fresh
+      }
+    }
+    // If there's an active subtitle on screen, seek to its start
+    if (activeSubtitleEvent) {
+      const topSeg = activeSegments[activeSegments.length - 1];
+      if (topSeg) {
+        const timelineTime = topSeg.timelineStart + (activeSubtitleEvent.startTime - topSeg.startTime);
+        return Math.max(0, timelineTime - 0.1);
+      }
+    }
+    // If there are any subtitle events at all, seek to the first one
+    const firstMedia = project.library.find(m => m.analysis?.events.some(e => e.type === 'dialogue'));
+    if (firstMedia?.analysis) {
+      const firstDialogue = firstMedia.analysis.events.find(e => e.type === 'dialogue');
+      if (firstDialogue) {
+        const seg = project.segments.find(s => s.mediaId === firstMedia.id);
+        if (seg) {
+          const timelineTime = seg.timelineStart + (firstDialogue.startTime - seg.startTime);
+          return Math.max(0, timelineTime - 0.1);
+        }
+      }
+    }
+    return null;
+  };
+
+  const handleMergeDialogues = () => {
+    if (selectedDialogues.length < 2) return;
+    const mediaId = selectedDialogues[0].mediaId;
+    if (!selectedDialogues.every(d => d.mediaId === mediaId)) return;
+
+    const media = project.library.find(m => m.id === mediaId);
+    if (!media?.analysis) return;
+
+    const indices = selectedDialogues.map(d => d.index).sort((a, b) => a - b);
+    const events = indices.map(i => media.analysis!.events[i]);
+
+    // Push full events array for undo
+    pushUndo({ type: 'dialogueEvents', mediaId, events: [...media.analysis.events] });
+
+    const merged: AnalysisEvent = {
+      startTime: events[0].startTime,
+      endTime: events[events.length - 1].endTime,
+      type: 'dialogue',
+      label: events[0].label,
+      details: events.map(e => e.details).join(' '),
+      styleOverride: events[0].styleOverride,
+      templateOverride: events[0].templateOverride,
+      translateX: events[0].translateX,
+      translateY: events[0].translateY,
+    };
+
+    const newEvents = [...media.analysis.events];
+    newEvents[indices[0]] = merged;
+    // Remove remaining merged events in reverse order
+    for (let i = indices.length - 1; i > 0; i--) {
+      newEvents.splice(indices[i], 1);
+    }
+
+    setProject(prev => ({
+      ...prev,
+      library: prev.library.map(m =>
+        m.id === mediaId && m.analysis
+          ? { ...m, analysis: { ...m.analysis, events: newEvents } }
+          : m
+      )
+    }));
+    setSelectedDialogues([{ mediaId, index: indices[0] }]);
+  };
+
   const performDelete = (idsToDelete: string[], ripple: boolean) => {
+    // Save undo snapshot before deleting
+    const segmentsExist = project.segments.some(s => idsToDelete.includes(s.id));
+    if (segmentsExist) {
+      pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
+    }
+
     setProject(prev => {
       const segmentsToDelete = prev.segments.filter(s => idsToDelete.includes(s.id));
       if (segmentsToDelete.length === 0) return prev;
@@ -1720,67 +2803,980 @@ function App() {
     }
   };
 
-  const handleVibeEdit = async () => {
-    const activeMedia = project.library.find(m => m.id === selectedMediaId) || currentTopMedia;
-    if (!activeMedia || !editPrompt) return;
-    setStatus(ProcessingStatus.EDITING);
+  const autoCenterSegment = async (segmentId: string, startTime: number, endTime: number, timelineStart?: number) => {
+    autoCenteringRef.current = true;
+    setStatus(ProcessingStatus.CENTERING);
+    setCenteringProgress('Waiting for video to load...');
+
     try {
-      const newSegs = await generateVibeEdit(activeMedia.file, editPrompt, activeMedia.duration, activeMedia.analysis);
-      let cursor = 0;
-      const mappedSegs = newSegs.map(s => {
-        const seg = { ...s, mediaId: activeMedia.id, timelineStart: cursor, track: 0 };
-        cursor += (s.endTime - s.startTime);
-        return seg;
-      });
-      setProject(prev => ({ ...prev, segments: mappedSegs, currentTime: 0 }));
-    } catch (e) { console.error(e); } finally { setStatus(ProcessingStatus.IDLE); }
+      // Move playhead to this segment so its <video> element gets rendered
+      if (timelineStart !== undefined) {
+        setProject(prev => ({ ...prev, currentTime: timelineStart + 0.01 }));
+        await new Promise(r => setTimeout(r, 50)); // Let React render
+      }
+
+      // Wait for the video element to appear and load (React render + video decode)
+      let videoEl: HTMLVideoElement | null = null;
+      const MAX_WAIT = 10000;
+      const POLL = 100;
+      let waited = 0;
+
+      while (waited < MAX_WAIT) {
+        videoEl = videoRefs.current.get(segmentId) || null;
+        if (videoEl && videoEl.readyState >= 2) break;
+        await new Promise(r => setTimeout(r, POLL));
+        waited += POLL;
+      }
+
+      if (!videoEl || videoEl.readyState < 2) {
+        console.warn('[AutoCenter] Video not ready after timeout, skipping');
+        return;
+      }
+
+      const vw = videoEl.videoWidth;
+      const vh = videoEl.videoHeight;
+      if (vw === 0 || vh === 0) return;
+
+      const clipDuration = endTime - startTime;
+      const MARGIN = 0.1;
+      const keyframes: ClipKeyframe[] = [];
+
+      // Center at start
+      setCenteringProgress('Analyzing start of clip...');
+      const startBlob = await seekAndCaptureFrame(videoEl, startTime + MARGIN);
+      if (startBlob) {
+        const det = await detectPersonPosition(startBlob);
+        if (det.personVisible && det.confidence >= 30) {
+          const t = computeCenterTranslation(det, vw, vh, viewportSettings.previewAspectRatio);
+          keyframes.push({ time: MARGIN, translateX: t.translateX, translateY: t.translateY, scale: 1, rotation: 0 });
+        }
+      }
+
+      // Center at end
+      if (clipDuration > 0.5) {
+        setCenteringProgress('Analyzing end of clip...');
+        const endBlob = await seekAndCaptureFrame(videoEl, endTime - MARGIN);
+        if (endBlob) {
+          const det = await detectPersonPosition(endBlob);
+          if (det.personVisible && det.confidence >= 30) {
+            const t = computeCenterTranslation(det, vw, vh, viewportSettings.previewAspectRatio);
+            keyframes.push({ time: clipDuration - MARGIN, translateX: t.translateX, translateY: t.translateY, scale: 1, rotation: 0 });
+          }
+        }
+      }
+
+      if (keyframes.length > 0) {
+        handleUpdateKeyframes(segmentId, keyframes, true);
+        setTransformTarget(segmentId);
+        setCenteringProgress(`Done! (${keyframes.length} keyframe${keyframes.length > 1 ? 's' : ''} created)`);
+      } else {
+        setCenteringProgress('No person detected');
+      }
+
+      // Seek back to clip start
+      videoEl.currentTime = startTime;
+    } catch (e) {
+      console.error('[AutoCenter] Error:', e);
+    } finally {
+      autoCenteringRef.current = false;
+      await new Promise(r => setTimeout(r, 800));
+      setStatus(ProcessingStatus.IDLE);
+      setCenteringProgress('');
+    }
   };
 
-  const handleChat = async (text: string) => {
-    const userMsg: ChatMessage = {
-      id: Date.now().toString(),
-      role: 'user',
-      text,
-      timestamp: new Date()
-    };
-    setMessages(prev => [...prev, userMsg]);
-    setIsChatLoading(true);
+  const handleCenterPerson = async () => {
+    const currentTime = project.currentTime;
+    const activeSegment = project.segments.find(seg =>
+      currentTime >= seg.timelineStart &&
+      currentTime < seg.timelineStart + (seg.endTime - seg.startTime)
+    );
+
+    if (!activeSegment) {
+      alert('No clip under the playhead. Move the playhead to a clip first.');
+      return;
+    }
+
+    setStatus(ProcessingStatus.CENTERING);
+    setCenteringProgress('Capturing frame...');
 
     try {
-      const historyForModel = messages.map(m => ({
-        role: m.role === 'model' ? 'model' : 'user',
-        parts: [{ text: m.text }]
-      }));
+      const videoEl = videoRefs.current.get(activeSegment.id);
+      if (!videoEl || videoEl.readyState < 2) {
+        alert('Video not ready. Please wait for the clip to load.');
+        setStatus(ProcessingStatus.IDLE);
+        setCenteringProgress('');
+        return;
+      }
 
-      const activeMedia = project.library.find(m => m.id === selectedMediaId) || currentTopMedia;
+      const clipTime = currentTime - activeSegment.timelineStart;
+      const frameBlob = await seekAndCaptureFrame(videoEl, activeSegment.startTime + clipTime);
+      if (!frameBlob) throw new Error('Frame capture failed');
 
-      const responseText = await chatWithVideoContext(historyForModel, text, activeMedia?.file || null);
+      setCenteringProgress('Analyzing person position...');
+      const detection = await detectPersonPosition(frameBlob);
 
-      const modelMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        text: responseText,
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, modelMsg]);
+      if (!detection.personVisible || detection.confidence < 30) {
+        alert(`No person detected (confidence: ${detection.confidence}%). Try a different frame.`);
+        setStatus(ProcessingStatus.IDLE);
+        setCenteringProgress('');
+        return;
+      }
 
+      const translation = computeCenterTranslation(
+        detection, videoEl.videoWidth, videoEl.videoHeight, viewportSettings.previewAspectRatio
+      );
+
+      // Insert/update keyframe at the CURRENT clip time
+      const existing = activeSegment.keyframes ? [...activeSegment.keyframes] : [];
+      const undoKeyframes = [...existing];
+      const KF_SNAP = 0.05;
+      const existingIdx = existing.findIndex(kf => Math.abs(kf.time - clipTime) < KF_SNAP);
+
+      if (existingIdx >= 0) {
+        existing[existingIdx] = { ...existing[existingIdx], time: clipTime, ...translation };
+      } else {
+        existing.push({ time: clipTime, ...translation, scale: 1, rotation: 0 });
+        existing.sort((a, b) => a.time - b.time);
+      }
+
+      handleUpdateKeyframes(activeSegment.id, existing, true);
+      pushUndo({ type: 'keyframes', segmentId: activeSegment.id, keyframes: undoKeyframes });
+      setCenteringProgress('Done!');
     } catch (e) {
-      console.error("Chat error", e);
-      const errorMsg: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        text: "Sorry, I encountered an error. Please try again.",
-        timestamp: new Date()
-      };
-      setMessages(prev => [...prev, errorMsg]);
+      console.error('[CenterPerson] Error:', e);
+      alert(`Center Person failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
     } finally {
-      setIsChatLoading(false);
+      setStatus(ProcessingStatus.IDLE);
+      setCenteringProgress('');
     }
+  };
+
+  // ── Gaussian smoothing for scan-generated keyframes ──────────────
+  const smoothScannedKeyframes = (kfs: ClipKeyframe[], amount: number): ClipKeyframe[] => {
+    const n = kfs.length;
+    if (n < 3 || amount === 0) return kfs;
+    const maxRadius = Math.max(2, Math.floor(n / 3));
+    const radius = Math.max(1, Math.round((amount / 100) * maxRadius));
+    const sigma = radius / 2.0;
+    return kfs.map((kf, i) => {
+      let wSum = 0, wTotal = 0;
+      for (let j = Math.max(0, i - radius); j <= Math.min(n - 1, i + radius); j++) {
+        const w = Math.exp(-(Math.abs(i - j) ** 2) / (2 * sigma * sigma));
+        wSum += kfs[j].translateX * w;
+        wTotal += w;
+      }
+      return { ...kf, translateX: wTotal > 0 ? wSum / wTotal : kf.translateX };
+    });
+  };
+
+  // ── Scan & Center (template-based, zero tokens) ──────────────────
+
+  /**
+   * Scan a single clip through all frames using template matching (no AI, no tokens).
+   * Generates keyframes when the person is more than `outOfZoneThreshold` percent
+   * away from center (0 = always follow, 28 = only at the 9:16 zone boundary).
+   */
+  const scanAndCenterClip = async (segmentId: string) => {
+    const seg = project.segments.find(s => s.id === segmentId);
+    if (!seg) return;
+
+    setStatus(ProcessingStatus.SCANNING);
+    setScanProgress('Waiting for video...');
+
+    try {
+      // Move playhead to clip so its <video> element gets rendered
+      setProject(prev => ({ ...prev, currentTime: seg.timelineStart + 0.01 }));
+      await new Promise(r => setTimeout(r, 80));
+
+      let videoEl: HTMLVideoElement | null = null;
+      const MAX_WAIT = 10000;
+      const POLL = 100;
+      let waited = 0;
+      while (waited < MAX_WAIT) {
+        videoEl = videoRefs.current.get(segmentId) || null;
+        if (videoEl && videoEl.readyState >= 2) break;
+        await new Promise(r => setTimeout(r, POLL));
+        waited += POLL;
+      }
+
+      if (!videoEl || videoEl.readyState < 2) {
+        alert('Video not ready. Please wait for the clip to load.');
+        return;
+      }
+
+      const vw = videoEl.videoWidth;
+      const vh = videoEl.videoHeight;
+      const segment: TrackingSegment = { startTime: seg.startTime, endTime: seg.endTime };
+
+      // --- 1 Gemini call to anchor person position at frame 0 ---
+      setScanProgress('Detecting person in first frame...');
+      const firstFrameBlob = await seekAndCaptureFrame(videoEl, seg.startTime + 0.05);
+      if (!firstFrameBlob) {
+        alert('Could not capture first frame. Try again.');
+        return;
+      }
+
+      const detection = await detectPersonPosition(firstFrameBlob);
+      console.log(`[ScanCenter] Gemini result:`, JSON.stringify(detection));
+
+      if (!detection.personVisible) {
+        alert(`No person detected in this clip.\n\nGemini returned: visible=false, confidence=${detection.confidence}%\n\nTry moving the playhead to a frame where the person is clearly visible, then scan again.`);
+        return;
+      }
+
+      // Convert % → pixel coords for the template tracker
+      const personPixelX = (detection.centerX / 100) * vw;
+      const personPixelY = (detection.centerY / 100) * vh;
+      setScanProgress(`Person at ${detection.centerX.toFixed(0)}% x (${detection.confidence}% conf) — template tracking...`);
+      console.log(`[ScanCenter] Person at ${detection.centerX.toFixed(1)}%x ${detection.centerY.toFixed(1)}%y conf=${detection.confidence} → pixel (${personPixelX.toFixed(0)},${personPixelY.toFixed(0)}) in ${vw}x${vh} video`);
+
+      // --- Template-track the person through every frame (0 tokens) ---
+      const { keyframes, triggerCount, frameCount } = await scanAndGenerateThresholdKeyframes(
+        videoEl,
+        segment,
+        personPixelX,
+        personPixelY,
+        outOfZoneThreshold,
+        (progress, label) => setScanProgress(`${label} (${Math.round(progress * 100)}%)`)
+      );
+
+      if (keyframes.length === 0) {
+        alert('Scan complete — no trackable positions found. Try a different clip.');
+        return;
+      }
+
+      const finalKeyframes = scanSmooth ? smoothScannedKeyframes(keyframes, scanSmoothAmount) : keyframes;
+      handleUpdateKeyframes(segmentId, finalKeyframes, true);
+      setTransformTarget(segmentId);
+      const smoothNote = scanSmooth ? `\n• Smoothed at ${scanSmoothAmount}%` : '';
+      const msg = `✅ Scan complete!\n\n• ${finalKeyframes.length} keyframes added\n• ${triggerCount} centering event${triggerCount !== 1 ? 's' : ''}\n• ${frameCount} frames scanned${smoothNote}\n\nCheck the clip's keyframe track on the timeline.`;
+      setScanProgress(`Done — ${keyframes.length} keyframes, ${triggerCount} centering events`);
+      alert(msg);
+    } catch (e) {
+      console.error('[ScanCenter] Error:', e);
+      alert(`Scan & Center failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    } finally {
+      setStatus(ProcessingStatus.IDLE);
+      setScanProgress('');
+    }
+  };
+
+  /**
+   * Scan all clips on the timeline sequentially.
+   */
+  const scanAndCenterAllClips = async () => {
+    const videoSegs = project.segments.filter(s => s.type === 'video' || !s.type);
+    if (videoSegs.length === 0) return;
+
+    setStatus(ProcessingStatus.SCANNING);
+    for (let i = 0; i < videoSegs.length; i++) {
+      setScanProgress(`Scanning clip ${i + 1}/${videoSegs.length}...`);
+      const seg = videoSegs[i];
+
+      // Bring video into view
+      setProject(prev => ({ ...prev, currentTime: seg.timelineStart + 0.01 }));
+      await new Promise(r => setTimeout(r, 100));
+
+      let videoEl: HTMLVideoElement | null = null;
+      let waited = 0;
+      while (waited < 10000) {
+        videoEl = videoRefs.current.get(seg.id) || null;
+        if (videoEl && videoEl.readyState >= 2) break;
+        await new Promise(r => setTimeout(r, 100));
+        waited += 100;
+      }
+      if (!videoEl || videoEl.readyState < 2) continue;
+
+      const vw = videoEl.videoWidth;
+      const vh = videoEl.videoHeight;
+      const segment: TrackingSegment = { startTime: seg.startTime, endTime: seg.endTime };
+      try {
+        // 1 Gemini call per clip to find person
+        setScanProgress(`Clip ${i + 1}/${videoSegs.length}: detecting person...`);
+        const firstBlob = await seekAndCaptureFrame(videoEl, seg.startTime + 0.05);
+        if (!firstBlob) { console.warn(`[ScanAll] Clip ${i + 1}: frame capture failed`); continue; }
+
+        const det = await detectPersonPosition(firstBlob);
+        if (!det.personVisible || det.confidence < 25) {
+          console.log(`[ScanAll] Clip ${i + 1}: no person detected, skipping`);
+          continue;
+        }
+
+        const pixelX = (det.centerX / 100) * vw;
+        const pixelY = (det.centerY / 100) * vh;
+
+        const { keyframes, triggerCount } = await scanAndGenerateThresholdKeyframes(
+          videoEl,
+          segment,
+          pixelX,
+          pixelY,
+          outOfZoneThreshold,
+          (progress, label) => setScanProgress(`Clip ${i + 1}/${videoSegs.length}: ${label}`)
+        );
+        if (keyframes.length > 0) {
+          const finalKfs = scanSmooth ? smoothScannedKeyframes(keyframes, scanSmoothAmount) : keyframes;
+          handleUpdateKeyframes(seg.id, finalKfs, true);
+        }
+        console.log(`[ScanAll] Clip ${i + 1}: ${triggerCount} centering events, ${keyframes.length} keyframes${scanSmooth ? ` (smoothed ${scanSmoothAmount}%)` : ''}`);
+      } catch (e) {
+        console.error(`[ScanAll] Clip ${i + 1} failed:`, e);
+      }
+    }
+
+    setScanProgress(`All ${videoSegs.length} clips scanned`);
+    await new Promise(r => setTimeout(r, 1500));
+    setStatus(ProcessingStatus.IDLE);
+    setScanProgress('');
+  };
+
+  // ── Filler Word Removal ──────────────────────────────────────────
+
+  /** Merge overlapping filler ranges so removeSourceRange doesn't double-cut */
+  const mergeOverlappingFillers = (fillers: FillerDetectionWithMedia[]): FillerDetectionWithMedia[] => {
+    const sorted = [...fillers].sort((a, b) => a.startTime - b.startTime);
+    const merged: FillerDetectionWithMedia[] = [];
+    for (const f of sorted) {
+      const last = merged[merged.length - 1];
+      if (last && last.mediaId === f.mediaId && f.startTime <= last.endTime) {
+        last.endTime = Math.max(last.endTime, f.endTime);
+        last.text += ' + ' + f.text;
+      } else {
+        merged.push({ ...f });
+      }
+    }
+    return merged;
+  };
+
+  /** Filter and re-zero keyframes to a sub-range of the original clip */
+  const filterKeyframesForRange = (
+    keyframes: ClipKeyframe[] | undefined,
+    newStartInClip: number,
+    newEndInClip: number
+  ): ClipKeyframe[] | undefined => {
+    if (!keyframes || keyframes.length === 0) return undefined;
+    const filtered = keyframes
+      .filter(kf => kf.time >= newStartInClip && kf.time <= newEndInClip)
+      .map(kf => ({ ...kf, time: kf.time - newStartInClip }));
+    return filtered.length > 0 ? filtered : undefined;
+  };
+
+  /**
+   * Remove a source-time range from all segments of a given media.
+   * Handles: filler at start, end, middle (split), or covering entire segment.
+   */
+  const removeSourceRange = (
+    segments: Segment[],
+    mediaId: string,
+    fillerStart: number,
+    fillerEnd: number
+  ): Segment[] => {
+    const result: Segment[] = [];
+    const MIN_DURATION = 0.05; // ~1.5 frames at 30fps
+
+    for (const seg of segments) {
+      if (seg.mediaId !== mediaId) {
+        result.push(seg);
+        continue;
+      }
+
+      const overlapStart = Math.max(seg.startTime, fillerStart);
+      const overlapEnd = Math.min(seg.endTime, fillerEnd);
+
+      if (overlapStart >= overlapEnd) {
+        // No overlap with this segment
+        result.push(seg);
+        continue;
+      }
+
+      // Filler covers entire segment → remove it
+      if (fillerStart <= seg.startTime && fillerEnd >= seg.endTime) {
+        continue;
+      }
+
+      // Filler at the START of segment
+      if (fillerStart <= seg.startTime && fillerEnd < seg.endTime) {
+        const newDur = seg.endTime - fillerEnd;
+        if (newDur < MIN_DURATION) continue;
+        result.push({
+          ...seg,
+          id: Math.random().toString(36).substr(2, 9),
+          startTime: fillerEnd,
+          keyframes: filterKeyframesForRange(seg.keyframes, fillerEnd - seg.startTime, seg.endTime - seg.startTime),
+          trackingData: undefined,
+        });
+        continue;
+      }
+
+      // Filler at the END of segment
+      if (fillerStart > seg.startTime && fillerEnd >= seg.endTime) {
+        const newDur = fillerStart - seg.startTime;
+        if (newDur < MIN_DURATION) continue;
+        result.push({
+          ...seg,
+          id: Math.random().toString(36).substr(2, 9),
+          endTime: fillerStart,
+          keyframes: filterKeyframesForRange(seg.keyframes, 0, fillerStart - seg.startTime),
+          trackingData: undefined,
+        });
+        continue;
+      }
+
+      // Filler in the MIDDLE → split into two
+      const dur1 = fillerStart - seg.startTime;
+      const dur2 = seg.endTime - fillerEnd;
+
+      if (dur1 >= MIN_DURATION) {
+        result.push({
+          ...seg,
+          id: Math.random().toString(36).substr(2, 9),
+          endTime: fillerStart,
+          transitionOut: undefined,
+          keyframes: filterKeyframesForRange(seg.keyframes, 0, fillerStart - seg.startTime),
+          trackingData: undefined,
+        });
+      }
+      if (dur2 >= MIN_DURATION) {
+        result.push({
+          ...seg,
+          id: Math.random().toString(36).substr(2, 9),
+          startTime: fillerEnd,
+          transitionIn: undefined,
+          keyframes: filterKeyframesForRange(seg.keyframes, fillerEnd - seg.startTime, seg.endTime - seg.startTime),
+          trackingData: undefined,
+        });
+      }
+    }
+
+    return result;
+  };
+
+  /** Pack segments sequentially per track with no gaps */
+  const rippleCloseGaps = (segments: Segment[]): Segment[] => {
+    const tracks = new Map<number, Segment[]>();
+    for (const seg of segments) {
+      const list = tracks.get(seg.track) || [];
+      list.push(seg);
+      tracks.set(seg.track, list);
+    }
+
+    const result: Segment[] = [];
+    for (const [, trackSegments] of tracks) {
+      const sorted = [...trackSegments].sort((a, b) => a.timelineStart - b.timelineStart);
+      let cursor = 0;
+      for (const seg of sorted) {
+        const duration = seg.endTime - seg.startTime;
+        result.push({ ...seg, timelineStart: cursor });
+        cursor += duration;
+      }
+    }
+    return result;
+  };
+
+  /** Remove or trim subtitle events that overlap filler regions */
+  const updateSubtitleEvents = (
+    library: MediaItem[],
+    mediaId: string,
+    fillers: FillerDetectionWithMedia[]
+  ): MediaItem[] => {
+    return library.map(media => {
+      if (media.id !== mediaId || !media.analysis) return media;
+
+      const sorted = [...fillers].sort((a, b) => a.startTime - b.startTime);
+
+      let events = media.analysis.events.filter(evt => {
+        if (evt.type !== 'dialogue') return true;
+        // Remove events entirely contained within a filler
+        return !sorted.some(f => f.startTime <= evt.startTime && f.endTime >= evt.endTime);
+      });
+
+      events = events.map(evt => {
+        if (evt.type !== 'dialogue') return evt;
+
+        let { startTime, endTime } = evt;
+        let modified = false;
+
+        for (const filler of sorted) {
+          // Filler overlaps start of event
+          if (filler.startTime <= startTime && filler.endTime > startTime && filler.endTime < endTime) {
+            startTime = filler.endTime;
+            modified = true;
+          }
+          // Filler overlaps end of event
+          if (filler.startTime > startTime && filler.startTime < endTime && filler.endTime >= endTime) {
+            endTime = filler.startTime;
+            modified = true;
+          }
+          // Filler entirely within event → shrink duration
+          if (filler.startTime > startTime && filler.endTime < endTime) {
+            endTime -= (filler.endTime - filler.startTime);
+            modified = true;
+          }
+        }
+
+        if (!modified) return evt;
+        if (endTime <= startTime) return null; // collapsed to nothing
+        return { ...evt, startTime, endTime };
+      }).filter(Boolean) as AnalysisEvent[];
+
+      return { ...media, analysis: { ...media.analysis, events } };
+    });
+  };
+
+  /** Save filler detections to MediaItem cache in the library */
+  const cacheFillerDetections = (mediaId: string, detections: FillerDetection[]) => {
+    setProject(prev => ({
+      ...prev,
+      library: prev.library.map(m =>
+        m.id === mediaId ? { ...m, fillerDetections: detections.map(d => ({ startTime: d.startTime, endTime: d.endTime, text: d.text, type: d.type })) } : m
+      )
+    }));
+  };
+
+  /** Step 1: Detect fillers via AI (uses cache if available), then show confirmation modal */
+  const handleCleanFillers = async () => {
+    const mediaIdsOnTimeline = [...new Set(project.segments.map(s => s.mediaId))];
+    const mediaItems = mediaIdsOnTimeline
+      .map(id => project.library.find(m => m.id === id))
+      .filter(Boolean) as MediaItem[];
+
+    if (mediaItems.length === 0) return;
+
+    setStatus(ProcessingStatus.CLEANING_FILLERS);
+    setFillerProgress('Starting...');
+
+    try {
+      const allDetections: FillerDetectionWithMedia[] = [];
+
+      for (let i = 0; i < mediaItems.length; i++) {
+        const media = mediaItems[i];
+        const prefix = mediaItems.length > 1 ? `[${i + 1}/${mediaItems.length}] ` : '';
+
+        // Check cache first
+        if (media.fillerDetections && media.fillerDetections.length > 0) {
+          setFillerProgress(`${prefix}Loaded ${media.fillerDetections.length} cached fillers for "${media.name}"`);
+          for (const d of media.fillerDetections) {
+            allDetections.push({ ...d, mediaId: media.id, mediaName: media.name });
+          }
+          continue;
+        }
+
+        // Prefer transcript-based detection (~35x cheaper than video upload)
+        const dialogueEvents = media.analysis?.events?.filter(e => e.type === 'dialogue') || [];
+        let detections: FillerDetection[];
+
+        if (dialogueEvents.length > 0) {
+          setFillerProgress(`${prefix}Analyzing transcript for "${media.name}"...`);
+          detections = await detectFillersFromTranscript(
+            dialogueEvents.map(e => ({ startTime: e.startTime, endTime: e.endTime, text: e.details })),
+            (msg) => setFillerProgress(`${prefix}${msg}`)
+          );
+        } else {
+          // No transcript available — fall back to video upload
+          setFillerProgress(`${prefix}Uploading "${media.name}" (no transcript)...`);
+          detections = await detectFillerWords(media.file, media.duration, (msg) => {
+            setFillerProgress(`${prefix}${msg}`);
+          });
+        }
+
+        // Cache results on the MediaItem
+        cacheFillerDetections(media.id, detections);
+
+        setFillerProgress(`${prefix}Found ${detections.length} fillers`);
+        for (const d of detections) {
+          allDetections.push({ ...d, mediaId: media.id, mediaName: media.name });
+        }
+      }
+
+      if (allDetections.length === 0) {
+        alert('No filler words detected in any clip.');
+        return;
+      }
+
+      setFillerDetections(allDetections);
+      setShowFillerModal(true);
+    } catch (e) {
+      console.error('[CleanFillers] Detection failed:', e);
+      alert(`Filler detection failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    } finally {
+      setStatus(ProcessingStatus.IDLE);
+      setFillerProgress('');
+    }
+  };
+
+  /** Re-detect: run a second-pass AI analysis looking for missed fillers (prefers transcript) */
+  const handleRedetectFillers = async () => {
+    setShowFillerModal(false);
+
+    const mediaIdsOnTimeline = [...new Set(project.segments.map(s => s.mediaId))];
+    const mediaItems = mediaIdsOnTimeline
+      .map(id => project.library.find(m => m.id === id))
+      .filter(Boolean) as MediaItem[];
+
+    if (mediaItems.length === 0) return;
+
+    setStatus(ProcessingStatus.CLEANING_FILLERS);
+    setFillerProgress('Re-analyzing for missed fillers...');
+
+    try {
+      const allDetections: FillerDetectionWithMedia[] = [];
+
+      for (let i = 0; i < mediaItems.length; i++) {
+        const media = mediaItems[i];
+        const prefix = mediaItems.length > 1 ? `[${i + 1}/${mediaItems.length}] ` : '';
+        const existing = media.fillerDetections || [];
+
+        setFillerProgress(`${prefix}Re-analyzing "${media.name}"...`);
+
+        // Prefer transcript-based re-detection (~35x cheaper than video upload)
+        const dialogueEvents = media.analysis?.events?.filter(e => e.type === 'dialogue') || [];
+        let newDetections: FillerDetection[];
+
+        if (dialogueEvents.length > 0) {
+          newDetections = await redetectFillersFromTranscript(
+            dialogueEvents.map(e => ({ startTime: e.startTime, endTime: e.endTime, text: e.details })),
+            existing,
+            (msg) => setFillerProgress(`${prefix}${msg}`)
+          );
+        } else {
+          // No transcript — fall back to video upload re-detection
+          newDetections = await redetectFillerWords(media.file, media.duration, existing, (msg) => {
+            setFillerProgress(`${prefix}${msg}`);
+          });
+        }
+
+        // Merge with existing and update cache
+        const merged = [...existing, ...newDetections].sort((a, b) => a.startTime - b.startTime);
+        cacheFillerDetections(media.id, merged);
+
+        setFillerProgress(`${prefix}Found ${newDetections.length} additional fillers`);
+        for (const d of merged) {
+          allDetections.push({ ...d, mediaId: media.id, mediaName: media.name });
+        }
+      }
+
+      if (allDetections.length === 0) {
+        alert('No filler words detected (including re-analysis).');
+        return;
+      }
+
+      setFillerDetections(allDetections);
+      setShowFillerModal(true);
+    } catch (e) {
+      console.error('[RedetectFillers] Failed:', e);
+      alert(`Re-detection failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+    } finally {
+      setStatus(ProcessingStatus.IDLE);
+      setFillerProgress('');
+    }
+  };
+
+  /** Step 2: Apply filler removal after user confirms in modal */
+  const handleConfirmFillerClean = async (selectedFillers: FillerDetectionWithMedia[]) => {
+    setShowFillerModal(false);
+    setFillerDetections([]);
+
+    if (selectedFillers.length === 0) return;
+
+    // Save undo snapshot
+    pushUndo({
+      type: 'fillerClean',
+      segments: project.segments.map(s => ({ ...s })),
+      library: project.library.map(m => ({
+        ...m,
+        analysis: m.analysis ? { ...m.analysis, events: m.analysis.events.map(e => ({ ...e })) } : null
+      }))
+    });
+
+    // Merge overlapping fillers per media
+    const merged = mergeOverlappingFillers(selectedFillers);
+
+    // Group by mediaId
+    const fillersByMedia = new Map<string, FillerDetectionWithMedia[]>();
+    for (const f of merged) {
+      const list = fillersByMedia.get(f.mediaId) || [];
+      list.push(f);
+      fillersByMedia.set(f.mediaId, list);
+    }
+
+    // Pre-decode audio buffers for snap-to-silence
+    const audioBuffers = new Map<string, AudioBuffer>();
+    for (const [mediaId] of fillersByMedia) {
+      const media = project.library.find(m => m.id === mediaId);
+      if (media?.file) {
+        try {
+          audioBuffers.set(mediaId, await getAudioBuffer(mediaId, media.file));
+        } catch (e) {
+          console.warn(`[SnapToSilence] Failed to decode audio for ${mediaId}:`, e);
+        }
+      }
+    }
+
+    setProject(prev => {
+      let newSegments = [...prev.segments];
+
+      // Process each media's fillers (descending so indices stay stable)
+      for (const [mediaId, fillers] of fillersByMedia) {
+        const audioBuf = audioBuffers.get(mediaId);
+        const sortedDesc = [...fillers].sort((a, b) => b.startTime - a.startTime);
+        for (const filler of sortedDesc) {
+          let start = filler.startTime;
+          let end = filler.endTime;
+
+          // For repeated words ("the the"), only remove the second occurrence
+          // The AI marks the full range covering both words — keep the first half
+          if (filler.type === 'repeated') {
+            start = (start + end) / 2;
+          }
+
+          // Snap cut points to silence boundaries
+          if (audioBuf) {
+            const snapped = snapFillerRange(audioBuf, start, end);
+            start = snapped.startTime;
+            end = snapped.endTime;
+          }
+
+          newSegments = removeSourceRange(newSegments, mediaId, start, end);
+        }
+      }
+
+      // Ripple-close all gaps
+      newSegments = rippleCloseGaps(newSegments);
+
+      // Update subtitle events
+      let newLibrary = [...prev.library];
+      for (const [mediaId, fillers] of fillersByMedia) {
+        newLibrary = updateSubtitleEvents(newLibrary, mediaId, fillers);
+      }
+
+      return { ...prev, segments: newSegments, library: newLibrary, currentTime: 0 };
+    });
+
+    setSelectedSegmentIds([]);
+    setSelectedDialogues([]);
+  };
+
+  const handleRemoveTranscriptWords = async (words: RemovedWord[]) => {
+    if (words.length === 0) return;
+
+    pushUndo({
+      type: 'transcriptEdit',
+      segments: project.segments.map(s => ({ ...s })),
+      removedWords: project.removedWords ? [...project.removedWords] : [],
+      library: project.library.map(m => ({
+        ...m,
+        analysis: m.analysis ? { ...m.analysis, events: m.analysis.events.map(e => ({ ...e })) } : null
+      }))
+    });
+
+    // Pre-decode audio buffers for snap-to-silence
+    const mediaIdsToProcess = [...new Set(words.map(w => w.mediaId))];
+    const audioBuffers = new Map<string, AudioBuffer>();
+    for (const mediaId of mediaIdsToProcess) {
+      const media = project.library.find(m => m.id === mediaId);
+      if (media?.file) {
+        try {
+          audioBuffers.set(mediaId, await getAudioBuffer(mediaId, media.file));
+        } catch (e) {
+          console.warn(`[SnapToSilence] Failed to decode audio for ${mediaId}:`, e);
+        }
+      }
+    }
+
+    setProject(prev => {
+      let newSegments = [...prev.segments];
+
+      // Remove overlapping segments backwards
+      const sortedWords = [...words].sort((a, b) => b.startTime - a.startTime);
+      for (const word of sortedWords) {
+        let start = word.startTime;
+        let end = word.endTime;
+
+        const audioBuf = audioBuffers.get(word.mediaId);
+        if (audioBuf) {
+          const snapped = snapFillerRange(audioBuf, start, end);
+          start = snapped.startTime;
+          end = snapped.endTime;
+        }
+
+        newSegments = removeSourceRange(newSegments, word.mediaId, start, end);
+      }
+
+      newSegments = rippleCloseGaps(newSegments);
+
+      // Create fake 'filler' detections out of these words to update the subtitle events
+      let newLibrary = [...prev.library];
+      const itemsByMedia = new Map<string, FillerDetectionWithMedia[]>();
+      for (const word of sortedWords) {
+        const list = itemsByMedia.get(word.mediaId) || [];
+        const mediaName = prev.library.find(m => m.id === word.mediaId)?.name || '';
+        list.push({
+          startTime: word.startTime,
+          endTime: word.endTime,
+          text: word.text,
+          type: 'filler',
+          mediaId: word.mediaId,
+          mediaName
+        });
+        itemsByMedia.set(word.mediaId, list);
+      }
+
+      for (const [mediaId, fillers] of itemsByMedia) {
+        newLibrary = updateSubtitleEvents(newLibrary, mediaId, fillers);
+      }
+
+      return {
+        ...prev,
+        segments: newSegments,
+        library: newLibrary,
+        removedWords: [...(prev.removedWords || []), ...words]
+      };
+    });
+  };
+
+  const handleRestoreTranscriptWord = (wordId: string) => {
+    const word = project.removedWords?.find(w => w.id === wordId);
+    if (!word) return;
+
+    pushUndo({
+      type: 'transcriptRestore',
+      segments: project.segments.map(s => ({ ...s })),
+      removedWords: project.removedWords ? [...project.removedWords] : [],
+      library: project.library.map(m => ({
+        ...m,
+        analysis: m.analysis ? { ...m.analysis, events: m.analysis.events.map(e => ({ ...e })) } : null
+      }))
+    });
+
+    setProject(prev => {
+      const newSeg: Segment = {
+        id: Math.random().toString(36).substr(2, 9),
+        mediaId: word.mediaId,
+        startTime: word.startTime,
+        endTime: word.endTime,
+        timelineStart: prev.currentTime,
+        track: 0,
+        description: `Restored: ${word.text}`,
+        color: '#8b5cf6'
+      };
+
+      let newSegments = [...prev.segments, newSeg];
+      newSegments.sort((a, b) => a.timelineStart - b.timelineStart);
+      newSegments = rippleCloseGaps(newSegments);
+
+      return {
+        ...prev,
+        segments: newSegments,
+        removedWords: prev.removedWords.filter(w => w.id !== wordId)
+      };
+    });
+  };
+
+  // Helper to build text-shadow CSS from style effects
+  // Returns main effects for the text element plus separate blend-mode layers
+  const buildTextEffects = (s: SubtitleStyle | TitleStyle) => {
+    // Build individual effect strings
+    const textDropShadow = (s.textShadowBlur && s.textShadowBlur > 0 || s.textShadowOffsetX || s.textShadowOffsetY)
+      ? `${s.textShadowOffsetX || 0}px ${s.textShadowOffsetY || 0}px ${s.textShadowBlur || 0}px ${s.textShadowColor || '#000000'}`
+      : null;
+
+    const textGlow = (s.glowBlur && s.glowBlur > 0)
+      ? `0 0 ${s.glowBlur}px ${s.glowColor || '#00ff00'}, 0 0 ${s.glowBlur * 1.5}px ${s.glowColor || '#00ff00'}`
+      : null;
+
+    const backdropDropShadow = (s.backdropShadowBlur && s.backdropShadowBlur > 0 || s.backdropShadowOffsetX || s.backdropShadowOffsetY)
+      ? `${s.backdropShadowOffsetX || 0}px ${s.backdropShadowOffsetY || 0}px ${s.backdropShadowBlur || 0}px ${s.backdropShadowColor || '#000000'}`
+      : null;
+
+    const backdropGlow = (s.backdropGlowBlur && s.backdropGlowBlur > 0)
+      ? `0 0 ${s.backdropGlowBlur}px ${s.backdropGlowColor || '#00ff00'}, 0 0 ${s.backdropGlowBlur * 1.5}px ${s.backdropGlowColor || '#00ff00'}`
+      : null;
+
+    const innerGlowShadow = (s.innerGlowBlur && s.innerGlowBlur > 0)
+      ? `inset 0 0 ${s.innerGlowBlur}px ${s.innerGlowColor || '#ffffff'}`
+      : null;
+
+    // Text gradient — pass as CSS variable so AnimatedText applies it to child spans only
+    let gradientProps: Record<string, any> = {};
+    if (s.gradientType && s.gradientType !== 'none') {
+      const stops = resolveGradientStops(s);
+      if (stops) {
+        gradientProps = {
+          '--text-gradient': buildGradientCSS(s.gradientType as 'linear' | 'radial', stops, s.gradientAngle),
+        };
+      }
+    }
+
+    // Text outline/stroke
+    let strokeProps: React.CSSProperties = {};
+    if (s.outlineWidth && s.outlineWidth > 0) {
+      strokeProps = {
+        WebkitTextStrokeWidth: `${s.outlineWidth}px`,
+        WebkitTextStrokeColor: s.outlineColor || '#000000',
+      } as React.CSSProperties;
+    }
+
+    // Split effects: normal blend → main element, non-normal blend → separate layers
+    const mainTextShadows: string[] = [];
+    const mainBoxShadows: string[] = [];
+    const layers: Array<{
+      type: 'text-shadow' | 'box-shadow';
+      value: string;
+      blendMode: string;
+    }> = [];
+
+    if (textDropShadow) {
+      if (s.shadowBlendMode && s.shadowBlendMode !== 'normal') {
+        layers.push({ type: 'text-shadow', value: textDropShadow, blendMode: s.shadowBlendMode });
+      } else {
+        mainTextShadows.push(textDropShadow);
+      }
+    }
+
+    if (textGlow) {
+      if (s.glowBlendMode && s.glowBlendMode !== 'normal') {
+        layers.push({ type: 'text-shadow', value: textGlow, blendMode: s.glowBlendMode });
+      } else {
+        mainTextShadows.push(textGlow);
+      }
+    }
+
+    if (backdropDropShadow) {
+      if (s.backdropShadowBlendMode && s.backdropShadowBlendMode !== 'normal') {
+        layers.push({ type: 'box-shadow', value: backdropDropShadow, blendMode: s.backdropShadowBlendMode });
+      } else {
+        mainBoxShadows.push(backdropDropShadow);
+      }
+    }
+
+    if (backdropGlow) {
+      if (s.backdropGlowBlendMode && s.backdropGlowBlendMode !== 'normal') {
+        layers.push({ type: 'box-shadow', value: backdropGlow, blendMode: s.backdropGlowBlendMode });
+      } else {
+        mainBoxShadows.push(backdropGlow);
+      }
+    }
+
+    if (innerGlowShadow) {
+      if (s.innerGlowBlendMode && s.innerGlowBlendMode !== 'normal') {
+        layers.push({ type: 'box-shadow', value: innerGlowShadow, blendMode: s.innerGlowBlendMode });
+      } else {
+        mainBoxShadows.push(innerGlowShadow);
+      }
+    }
+
+    return {
+      textShadow: mainTextShadows.length > 0 ? mainTextShadows.join(', ') : undefined,
+      boxShadow: mainBoxShadows.length > 0 ? mainBoxShadows.join(', ') : undefined,
+      ...gradientProps,
+      ...strokeProps,
+      layers,
+    };
   };
 
   // Helper to generate dynamic styles for subtitle
   const getSubtitleStyles = (s: SubtitleStyle | undefined) => {
-    if (!s) return { container: {}, text: {} };
+    if (!s) return { container: {} as React.CSSProperties, text: {} as React.CSSProperties, blendLayers: [] as React.CSSProperties[] };
 
     const base: React.CSSProperties = {
       position: 'absolute',
@@ -1793,8 +3789,12 @@ function App() {
       display: 'flex',
       justifyContent: s.textAlign === 'left' ? 'flex-start' : s.textAlign === 'right' ? 'flex-end' : 'center',
       paddingLeft: '5%',
-      paddingRight: '5%'
+      paddingRight: '5%',
+      isolation: 'isolate' as any,
     };
+
+    const effects = buildTextEffects(s);
+    const { layers: effectLayers, ...mainEffects } = effects;
 
     const textStyle: React.CSSProperties = {
       fontFamily: s.fontFamily,
@@ -1805,6 +3805,7 @@ function App() {
       lineHeight: 1.4,
       padding: '8px 16px',
       whiteSpace: 'pre-wrap',
+      ...mainEffects,
     };
 
     if (s.backgroundType === 'box') {
@@ -1816,7 +3817,6 @@ function App() {
       textStyle.borderRadius = `${s.boxBorderRadius}px`;
       textStyle.border = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
     } else if (s.backgroundType === 'stripe') {
-      // Stripe is handled by parent width 100% usually, but for simple text, let's just make it full width background
       textStyle.backgroundColor = hexToRgba(s.backgroundColor, s.backgroundOpacity);
       textStyle.width = '100%';
       textStyle.borderTop = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
@@ -1824,20 +3824,58 @@ function App() {
       base.paddingLeft = 0;
       base.paddingRight = 0;
     } else if (s.backgroundType === 'outline') {
-      textStyle.textShadow = `
-             -1px -1px 0 ${s.backgroundColor},  
-              1px -1px 0 ${s.backgroundColor},
-             -1px  1px 0 ${s.backgroundColor},
-              1px  1px 0 ${s.backgroundColor}`;
-    } else {
-      textStyle.textShadow = '0px 2px 4px rgba(0,0,0,0.5)';
+      // Text outline via stroke (already in effects), plus fallback shadow outline
+      if (!s.outlineWidth || s.outlineWidth === 0) {
+        const outlineColor = s.backgroundColor || '#000000';
+        const existingShadows = textStyle.textShadow ? textStyle.textShadow + ', ' : '';
+        textStyle.textShadow = existingShadows +
+          `-1px -1px 0 ${outlineColor}, 1px -1px 0 ${outlineColor}, -1px 1px 0 ${outlineColor}, 1px 1px 0 ${outlineColor}`;
+      }
+    } else if (s.backgroundType === 'none') {
+      // No background - keep any user-set effects, add default shadow only if no effects set
+      if (!mainEffects.textShadow) {
+        textStyle.textShadow = '0px 2px 4px rgba(0,0,0,0.5)';
+      }
     }
 
-    return { container: base, text: textStyle };
+    // Apply blend mode to backdrop if set
+    if (s.backdropBlendMode && s.backdropBlendMode !== 'normal') {
+      textStyle.mixBlendMode = s.backdropBlendMode as any;
+    }
+
+    // Build blend-mode layers: each is an absolutely-positioned copy that renders
+    // only one effect with its own mixBlendMode
+    const blendLayers: React.CSSProperties[] = effectLayers.map((layer) => ({
+      ...textStyle,
+      // Reset all shadows, then set only this layer's effect
+      textShadow: layer.type === 'text-shadow' ? layer.value : 'none',
+      boxShadow: layer.type === 'box-shadow' ? layer.value : 'none',
+      // For text-shadow layers: make text invisible (shadow-only)
+      ...(layer.type === 'text-shadow' ? {
+        color: 'transparent',
+        WebkitTextFillColor: 'transparent',
+        WebkitTextStrokeWidth: '0px',
+        backgroundImage: 'none',
+        '--text-gradient': undefined,
+      } as any : {}),
+      // For box-shadow layers: hide text but keep box shape
+      ...(layer.type === 'box-shadow' ? {
+        color: 'transparent',
+        WebkitTextFillColor: 'transparent',
+        WebkitTextStrokeWidth: '0px',
+        backgroundImage: 'none',
+        '--text-gradient': undefined,
+      } as any : {}),
+      mixBlendMode: layer.blendMode as any,
+      gridArea: '1 / 1 / 2 / 2' as const,
+      pointerEvents: 'none' as const,
+    }));
+
+    return { container: base, text: textStyle, blendLayers };
   };
 
   const getTitleStyles = (s: TitleStyle | undefined, opacity: number) => {
-    if (!s) return { container: {}, text: {} };
+    if (!s) return { container: {} as React.CSSProperties, text: {} as React.CSSProperties, blendLayers: [] as React.CSSProperties[] };
 
     const base: React.CSSProperties = {
       position: 'absolute',
@@ -1846,13 +3884,17 @@ function App() {
       right: 0,
       textAlign: s.textAlign,
       pointerEvents: 'none',
-      zIndex: 10000, // Higher than subtitles
+      zIndex: 10000,
       display: 'flex',
       justifyContent: s.textAlign === 'left' ? 'flex-start' : s.textAlign === 'right' ? 'flex-end' : 'center',
       paddingLeft: '5%',
       paddingRight: '5%',
-      opacity: opacity
+      opacity: opacity,
+      isolation: 'isolate' as any,
     };
+
+    const effects = buildTextEffects(s);
+    const { layers: effectLayers, ...mainEffects } = effects;
 
     const textStyle: React.CSSProperties = {
       fontFamily: s.fontFamily,
@@ -1863,6 +3905,7 @@ function App() {
       lineHeight: 1.4,
       padding: '12px 24px',
       whiteSpace: 'pre-wrap',
+      ...mainEffects,
     };
 
     if (s.backgroundType === 'box') {
@@ -1881,16 +3924,46 @@ function App() {
       base.paddingLeft = 0;
       base.paddingRight = 0;
     } else if (s.backgroundType === 'outline') {
-      textStyle.textShadow = `
-             -1px -1px 0 ${s.backgroundColor},  
-              1px -1px 0 ${s.backgroundColor},
-             -1px  1px 0 ${s.backgroundColor},
-              1px  1px 0 ${s.backgroundColor}`;
-    } else {
-      textStyle.textShadow = '0px 4px 8px rgba(0,0,0,0.6)';
+      if (!s.outlineWidth || s.outlineWidth === 0) {
+        const outlineColor = s.backgroundColor || '#000000';
+        const existingShadows = textStyle.textShadow ? textStyle.textShadow + ', ' : '';
+        textStyle.textShadow = existingShadows +
+          `-1px -1px 0 ${outlineColor}, 1px -1px 0 ${outlineColor}, -1px 1px 0 ${outlineColor}, 1px 1px 0 ${outlineColor}`;
+      }
+    } else if (s.backgroundType === 'none') {
+      if (!mainEffects.textShadow) {
+        textStyle.textShadow = '0px 4px 8px rgba(0,0,0,0.6)';
+      }
     }
 
-    return { container: base, text: textStyle };
+    if (s.backdropBlendMode && s.backdropBlendMode !== 'normal') {
+      textStyle.mixBlendMode = s.backdropBlendMode as any;
+    }
+
+    const blendLayers: React.CSSProperties[] = effectLayers.map((layer) => ({
+      ...textStyle,
+      textShadow: layer.type === 'text-shadow' ? layer.value : 'none',
+      boxShadow: layer.type === 'box-shadow' ? layer.value : 'none',
+      ...(layer.type === 'text-shadow' ? {
+        color: 'transparent',
+        WebkitTextFillColor: 'transparent',
+        WebkitTextStrokeWidth: '0px',
+        backgroundImage: 'none',
+        '--text-gradient': undefined,
+      } as any : {}),
+      ...(layer.type === 'box-shadow' ? {
+        color: 'transparent',
+        WebkitTextFillColor: 'transparent',
+        WebkitTextStrokeWidth: '0px',
+        backgroundImage: 'none',
+        '--text-gradient': undefined,
+      } as any : {}),
+      mixBlendMode: layer.blendMode as any,
+      gridArea: '1 / 1 / 2 / 2' as const,
+      pointerEvents: 'none' as const,
+    }));
+
+    return { container: base, text: textStyle, blendLayers };
   };
 
   const hexToRgba = (hex: string, alpha: number) => {
@@ -1909,56 +3982,251 @@ function App() {
     return <ContentLibraryPage
       onNavigateToEditor={() => setActivePage('editor')}
       onExportShort={handleExportShort}
+      autoCenterOnImport={autoCenterOnImport}
+      onToggleAutoCenter={setAutoCenterOnImport}
     />;
   }
 
   return (
     <div className="flex h-screen w-screen bg-[#121212] text-gray-200 overflow-hidden relative font-sans">
+
+      {/* Scan & Center progress banner — always visible while scanning */}
+      {status === ProcessingStatus.SCANNING && (
+        <div className="fixed bottom-0 left-0 right-0 z-[500] bg-cyan-900/95 border-t border-cyan-500 px-4 py-2 flex items-center gap-3">
+          <svg className="w-4 h-4 text-cyan-300 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+          </svg>
+          <span className="text-cyan-200 text-sm font-medium">Scan & Center:</span>
+          <span className="text-white text-sm flex-1">{scanProgress || 'Scanning...'}</span>
+          <span className="text-cyan-400 text-xs">0 AI tokens used for tracking</span>
+        </div>
+      )}
+
       {/* Top Navigation Bar */}
-      <div className="absolute top-0 right-0 z-50 flex gap-2 p-2 bg-[#1a1a1a]/90 rounded-bl-lg border-l border-b border-[#333]">
-        <button
-          onClick={async () => {
-            setIsSaving(true);
-            try {
-              await contentDB.saveProject(project);
-              setTimeout(() => setIsSaving(false), 1000);
-            } catch (e) {
-              console.error(e);
-              setIsSaving(false);
-              alert('Save failed');
-            }
-          }}
-          disabled={isSaving}
-          className={`px-3 py-1 text-xs rounded font-medium flex items-center gap-1 ${isSaving ? 'bg-green-600 text-white' : 'bg-[#333] text-gray-300 hover:text-white hover:bg-[#444]'}`}
-        >
-          {isSaving ? '💾 Saving...' : '💾 Save Project'}
-        </button>
-        <div className="w-px h-6 bg-[#444] mx-1"></div>
-        <button
-          onClick={() => setActivePage('editor')}
-          className={`px-3 py-1 text-xs rounded font-medium ${activePage === 'editor' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
-            }`}
-        >
-          Video Editor
-        </button>
-        <button
-          onClick={() => setActivePage('library')}
-          className={`px-3 py-1 text-xs rounded font-medium ${activePage === 'library' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'
-            }`}
-        >
-          Content Library
-        </button>
+
+
+      {/* LEFT: Media Bin / Properties Panel */}
+      <div className={`${activeLeftTab === 'properties' ? 'w-80' : 'w-64'} flex-shrink-0 flex flex-col border-r border-[#333] bg-[#1e1e1e]`}>
+        {/* Tab bar */}
+        <div className="flex border-b border-[#333] bg-[#252525]">
+          <button onClick={() => setActiveLeftTab('media')} className={`flex-1 py-2 text-xs font-bold ${activeLeftTab === 'media' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-white'}`}>MEDIA</button>
+          <button onClick={() => setActiveLeftTab('properties')} className={`flex-1 py-2 text-xs font-bold ${activeLeftTab === 'properties' ? 'bg-[#333] text-orange-400 border-b-2 border-orange-400' : 'text-gray-400 hover:text-white'}`}>PROPERTIES</button>
+        </div>
+        {/* Content */}
+        <div className="flex-1 overflow-hidden">
+          {activeLeftTab === 'media' && (
+            <MediaBin
+              items={project.library}
+              onUpload={handleUpload}
+              onAddToTimeline={handleAddToTimeline}
+              onSelect={m => setSelectedMediaId(m.id)}
+              onYoutubeClick={() => setShowYoutubeModal(true)}
+            />
+          )}
+          {activeLeftTab === 'properties' && (
+            <PropertiesPanel
+              selectedSegment={primarySelectedSegment}
+              selectedTransition={selectedTransition}
+              selectedDialogue={selectedDialogue}
+              selectedDialogueText={selectedDialogueEvent?.details || ""}
+              subtitleStyle={isSubtitleUnlinked ? (selectedDialogueEvent?.styleOverride || project.subtitleStyle) : project.subtitleStyle}
+              isSubtitleUnlinked={isSubtitleUnlinked}
+              mediaAnalysis={selectedMediaAnalysis}
+              onUpdateSegment={(s: Segment) => handleUpdateSegments([s])}
+              onUpdateTransition={handleUpdateTransition}
+              onUpdateDialogueText={handleUpdateDialogueText}
+              onUpdateSubtitleStyle={handleUpdateSubtitleStyle}
+              onToggleSubtitleUnlink={handleToggleSubtitleUnlink}
+              onAnalyze={performDeepAnalysis}
+              isProcessing={status !== ProcessingStatus.IDLE}
+              isTitleSelected={isTitleSelected}
+              titleLayer={project.titleLayer}
+              onUpdateTitleLayer={handleUpdateTitleLayer}
+              activeSubtitleTemplate={effectiveSubtitleTemplate}
+              isTemplateUnlinked={isTemplateUnlinked}
+              onUpdateSubtitleTemplate={handleUpdateSubtitleTemplate}
+              onToggleTemplateUnlink={handleToggleTemplateUnlink}
+              activeKeywordAnimation={isTemplateUnlinked ? (selectedDialogueEvent?.keywordAnimation || project.activeKeywordAnimation) : project.activeKeywordAnimation}
+              onUpdateKeywordAnimation={handleUpdateKeywordAnimation}
+              wordEmphases={selectedDialogueEvent?.wordEmphases}
+              onUpdateWordEmphases={selectedDialogue ? (emphases: KeywordEmphasis[]) => {
+                const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+                const evt = media?.analysis?.events[selectedDialogue.index];
+                if (evt) {
+                  handleUpdateDialogue(selectedDialogue.mediaId, selectedDialogue.index, {
+                    ...evt,
+                    wordEmphases: emphases,
+                  });
+                }
+              } : undefined}
+            />
+          )}
+        </div>
       </div>
 
-      {/* LEFT: Media Bin */}
-      <div className="w-64 flex-shrink-0">
-        <MediaBin
-          items={project.library}
-          onUpload={handleUpload}
-          onAddToTimeline={handleAddToTimeline}
-          onSelect={m => setSelectedMediaId(m.id)}
-          onYoutubeClick={() => setShowYoutubeModal(true)}
-        />
+      {/* VERTICAL TOOLBAR */}
+      <div className="w-12 flex-shrink-0 bg-[#1e1e1e] border-r border-[#333] flex flex-col items-center py-4 gap-3 z-50 overflow-y-auto">
+
+        {/* Basic Tools */}
+        <button title="Selection Tool (V)" className={`p-2 rounded hover:text-white bg-[#333] text-blue-400`}>
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M7 2l12 11.2-5.8.5 3.3 7.3-2.25 1-3.2-7.4-4.4 5V2z" /></svg>
+        </button>
+        <button title="Razor Tool (C)" onClick={() => handleSplit(project.currentTime)} className="p-2 rounded text-gray-400 hover:text-white hover:bg-[#333]">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.121 15.536c-1.171 1.952-3.07 1.952-4.242 0-1.172-1.953-1.172-5.119 0-7.072 1.171-1.952 3.07-1.952 4.242 0M8 10.5h4m-4 3h4m9-1.5a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        </button>
+
+        <div className="w-8 h-px bg-[#444] my-1" />
+
+        {/* Insert Options */}
+        <button title="Insert Blank Video Clip" onClick={() => handleInsertBlank(project.currentTime)} className="p-2 rounded text-gray-400 hover:text-white hover:bg-[#333]">
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10h-4v4h-2v-4H7v-2h4V7h2v4h4v2z" /></svg>
+        </button>
+        <button title="Insert Blank Title" onClick={() => handleInsertTitle(project.currentTime)} className="p-2 rounded text-gray-400 hover:text-white hover:bg-[#333]">
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M5 4v3h5.5v12h3V7H19V4z" /></svg>
+        </button>
+        <button title="Insert Blank Dialogue" onClick={() => handleInsertDialogue(project.currentTime)} className="p-2 rounded text-gray-400 hover:text-white hover:bg-[#333]">
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M21 6h-2v9H6v2c0 .55.45 1 1 1h11l4 4V7c0-.55-.45-1-1-1zm-4 6V3c0-.55-.45-1-1-1H3c-.55 0-1 .45-1 1v14l4-4h10c.55 0 1-.45 1-1z" /></svg>
+        </button>
+
+        <div className="w-8 h-px bg-[#444] my-1" />
+
+        {/* AI Tools */}
+        <button
+          title={status === ProcessingStatus.CENTERING ? (centeringProgress || 'Centering...') : 'Center Person (AI – current frame)'}
+          onClick={handleCenterPerson}
+          disabled={project.segments.length === 0 || status !== ProcessingStatus.IDLE}
+          className="p-2 rounded text-teal-400 hover:text-white hover:bg-[#333] disabled:opacity-50">
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z" /></svg>
+        </button>
+
+        {/* Scan & Center — zero-token template tracking */}
+        <button
+          ref={scanButtonRef}
+          title={status === ProcessingStatus.SCANNING ? (scanProgress || 'Scanning...') : `Scan & Center (${outOfZoneThreshold}% threshold) — click to configure`}
+          onClick={() => {
+            if (status !== ProcessingStatus.SCANNING) {
+              setShowScanPanel(p => !p);
+            }
+          }}
+          disabled={project.segments.length === 0 || status === ProcessingStatus.SCANNING}
+          className={`p-2 rounded hover:text-white hover:bg-[#333] disabled:opacity-40 ${status === ProcessingStatus.SCANNING ? 'text-cyan-300 animate-pulse' : 'text-cyan-500'}`}>
+          {/* Scan / radar icon */}
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="2" fill="currentColor" />
+            <path strokeLinecap="round" d="M12 12 L19.5 4.5" opacity="0.5"/>
+            <path strokeLinecap="round" d="M12 3a9 9 0 100 18A9 9 0 0012 3z" />
+            <path strokeLinecap="round" d="M12 7a5 5 0 100 10A5 5 0 0012 7z" opacity="0.5" />
+          </svg>
+        </button>
+
+        {/* Scan settings popover — fixed-position to escape toolbar overflow clipping */}
+        {showScanPanel && (() => {
+          const rect = scanButtonRef.current?.getBoundingClientRect();
+          const top = rect ? rect.top : 200;
+          return (
+            <div
+              style={{ position: 'fixed', left: 60, top: Math.max(8, Math.min(top, window.innerHeight - 300)), zIndex: 300 }}
+              className="w-64 bg-[#1e1e1e] border border-[#444] rounded-lg shadow-2xl p-3 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-white">Scan & Auto-Center</span>
+                <button onClick={() => setShowScanPanel(false)} className="text-gray-500 hover:text-white text-xs">✕</button>
+              </div>
+              <p className="text-[10px] text-gray-400 leading-tight">
+                Uses template tracking — <span className="text-green-400 font-semibold">0 AI tokens</span>. Scans every 100ms and generates keyframes only when the person exits the 9:16 zone past the threshold.
+              </p>
+
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-gray-300">Deadband from center</label>
+                  <span className="text-xs font-mono text-cyan-400">{outOfZoneThreshold}%</span>
+                </div>
+                <input
+                  type="range" min={0} max={28} step={1}
+                  value={outOfZoneThreshold}
+                  onChange={e => setOutOfZoneThreshold(Number(e.target.value))}
+                  className="w-full accent-cyan-500 h-1.5 cursor-pointer"
+                />
+                <div className="flex justify-between text-[9px] text-gray-500">
+                  <span>0% — always follow</span>
+                  <span>28% — at boundary</span>
+                </div>
+              </div>
+
+              {/* Smooth keyframes toggle */}
+              <div className="flex flex-col gap-1 pt-1">
+                <div className="flex items-center justify-between">
+                  <label className="flex items-center gap-1.5 cursor-pointer select-none" onClick={() => setScanSmooth(v => !v)}>
+                    <div className={`w-7 h-4 rounded-full transition-colors relative flex-shrink-0 ${scanSmooth ? 'bg-emerald-600' : 'bg-[#444]'}`}>
+                      <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${scanSmooth ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                    </div>
+                    <span className="text-xs text-gray-300">Smooth keyframes</span>
+                  </label>
+                  {scanSmooth && <span className="text-xs font-mono text-emerald-400">{scanSmoothAmount}%</span>}
+                </div>
+                {scanSmooth && (
+                  <>
+                    <input
+                      type="range" min={1} max={100} step={1}
+                      value={scanSmoothAmount}
+                      onChange={e => setScanSmoothAmount(Number(e.target.value))}
+                      className="w-full h-1.5 cursor-pointer"
+                      style={{ accentColor: '#34d399' }}
+                    />
+                    <div className="flex justify-between text-[9px] text-gray-500">
+                      <span>1% — subtle</span>
+                      <span>50% — natural</span>
+                      <span>100% — heavy</span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="border-t border-[#333] pt-2 flex flex-col gap-1.5">
+                <button
+                  onClick={async () => {
+                    setShowScanPanel(false);
+                    const seg = project.segments.find(s =>
+                      project.currentTime >= s.timelineStart &&
+                      project.currentTime < s.timelineStart + (s.endTime - s.startTime)
+                    ) || primarySelectedSegment;
+                    if (!seg) { alert('No clip selected or under playhead.'); return; }
+                    await scanAndCenterClip(seg.id);
+                  }}
+                  disabled={project.segments.length === 0}
+                  className="w-full py-1.5 px-2 bg-cyan-700 hover:bg-cyan-600 text-white text-xs rounded disabled:opacity-50 flex items-center gap-1.5">
+                  <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                  Scan Current Clip
+                </button>
+                <button
+                  onClick={async () => {
+                    setShowScanPanel(false);
+                    await scanAndCenterAllClips();
+                  }}
+                  disabled={project.segments.length === 0}
+                  className="w-full py-1.5 px-2 bg-[#2a3a3a] hover:bg-[#334] border border-cyan-800 text-cyan-300 text-xs rounded disabled:opacity-50 flex items-center gap-1.5">
+                  <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
+                  Scan All Clips
+                </button>
+              </div>
+
+              {scanProgress && (
+                <div className="text-[10px] text-cyan-300 bg-[#0a1a1a] rounded px-2 py-1 mt-1">
+                  {scanProgress}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
+        <button
+          title={status === ProcessingStatus.CLEANING_FILLERS ? (fillerProgress || 'Detecting fillers...') : 'Clean Fillers'}
+          onClick={handleCleanFillers}
+          disabled={project.segments.length === 0 || status !== ProcessingStatus.IDLE}
+          className="p-2 rounded text-amber-400 hover:text-white hover:bg-[#333] disabled:opacity-50">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
+        </button>
+
       </div>
 
       {/* MIDDLE: Editor */}
@@ -1967,93 +4235,509 @@ function App() {
 
           {/* Program Monitor */}
           <div className="flex-1 bg-black flex flex-col relative overflow-hidden">
-            <div
-              ref={viewportContainerRef}
-              className="flex-1 relative overflow-hidden group flex items-center justify-center"
-              style={{ cursor: (transformTarget === 'global' || primarySelectedSegment) ? (isViewportDragging ? 'grabbing' : 'grab') : 'default' }}
-              onMouseDown={handleViewportMouseDown}
-              onMouseMove={handleViewportMouseMove}
-              onMouseUp={handleViewportMouseUp}
-              onMouseLeave={handleViewportMouseUp}
-            >
-              {renderedSegments.length > 0 ? (
-                renderedSegments.map((seg, index) => {
-                  // Get combined transform (global + clip)
-                  const clipTime = project.currentTime - seg.timelineStart;
-                  const transform = getCombinedTransform(seg.keyframes, clipTime, project.currentTime);
-                  const cssTransform = transformToCss(transform);
-
-                  return (
-                    <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: seg.track * 10 }}>
-                      <video
-                        ref={el => { if (el) videoRefs.current.set(seg.id, el); }}
-                        src={project.library.find(m => m.id === seg.mediaId)?.url}
-                        className="w-full h-full object-contain pointer-events-none"
-                        style={{ transform: cssTransform, transformOrigin: 'center center' }}
-                        muted={false}
-                      />
-                      {/* Dynamic Wash Overlay */}
-                      <div
-                        ref={el => { if (el) overlayRefs.current.set(seg.id, el); }}
-                        className="absolute inset-0 pointer-events-none opacity-0"
-                        style={{ backgroundColor: 'white' }}
-                      />
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="text-gray-600 text-sm">No Active Clip</div>
-              )}
-
-              {/* Viewport Aspect Ratio Overlay */}
-              <ViewportOverlay
-                containerWidth={viewportSize.width}
-                containerHeight={viewportSize.height}
-                aspectRatio={viewportSettings.previewAspectRatio}
-                opacity={viewportSettings.overlayOpacity}
-                visible={viewportSettings.showOverlay}
-              />
-
-              {activeSubtitleEvent && (
-                <div style={styles.container}>
-                  <div style={styles.text}>
-                    {activeSubtitleEvent.details}
+            {/* Top Navigation Bar */}
+            <div className="absolute top-0 right-0 z-50 flex gap-2 p-2 bg-[#1a1a1a]/90 rounded-bl-lg border-l border-b border-[#333]">
+              <button
+                onClick={async () => {
+                  setIsSaving(true);
+                  try {
+                    await contentDB.saveProject(project);
+                    setTimeout(() => setIsSaving(false), 1000);
+                  } catch (e) {
+                    console.error(e);
+                    setIsSaving(false);
+                    alert('Save failed');
+                  }
+                }}
+                disabled={isSaving}
+                className={`px-3 py-1 text-xs rounded font-medium flex items-center gap-1 ${isSaving ? 'bg-green-600 text-white' : 'bg-[#333] text-gray-300 hover:text-white hover:bg-[#444]'}`}
+              >
+                {isSaving ? '💾 Saving...' : '💾 Save Project'}
+              </button>
+              <button
+                onClick={async () => {
+                  if (!confirm('Start a new project? This will clear all clips, segments, and settings.')) return;
+                  // Revoke existing blob URLs to free memory
+                  project.library.forEach(item => { if (item.url) URL.revokeObjectURL(item.url); });
+                  await contentDB.clearProject();
+                  const prefs = await contentDB.getPreferences();
+                  setProject(prefs ? {
+                    ...INITIAL_STATE,
+                    subtitleStyle: prefs.subtitleStyle,
+                    titleStyle: prefs.titleStyle,
+                    activeSubtitleTemplate: prefs.activeSubtitleTemplate,
+                    activeTitleTemplate: prefs.activeTitleTemplate,
+                    activeKeywordAnimation: prefs.activeKeywordAnimation,
+                  } : INITIAL_STATE);
+                }}
+                className="px-3 py-1 text-xs rounded font-medium text-gray-400 hover:text-white hover:bg-red-600/30 border border-transparent hover:border-red-500/50"
+              >
+                New Project
+              </button>
+              <div className="w-px h-6 bg-[#444] mx-1"></div>
+              <button
+                onClick={() => setActivePage('editor')}
+                className={`px-3 py-1 text-xs rounded font-medium ${activePage === 'editor' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+                  }`}
+              >
+                Video Editor
+              </button>
+              <button
+                onClick={() => setActivePage('library')}
+                className={`px-3 py-1 text-xs rounded font-medium ${activePage === 'library' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'
+                  }`}
+              >
+                Content Library
+              </button>
+            </div>
+            {/* Tracking Progress Overlay — only show for auto-tracking, not manual (viewport stays visible during manual) */}
+            {trackingProgress && trackingMode !== 'tracking' && (
+              <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+                <div className="bg-[#1a1a1a] border border-[#444] rounded-xl p-6 w-80 shadow-2xl">
+                  <div className="text-center mb-4">
+                    <div className="text-2xl mb-2">🎯</div>
+                    <h3 className="text-white font-bold text-sm">Auto-Tracking Speaker</h3>
+                    <p className="text-gray-400 text-xs mt-1">{trackingProgress.label}</p>
+                  </div>
+                  <div className="w-full bg-[#333] rounded-full h-3 overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-indigo-500 to-blue-500 rounded-full transition-all duration-200"
+                      style={{ width: `${Math.round(trackingProgress.progress * 100)}%` }}
+                    />
+                  </div>
+                  <div className="text-center mt-2 text-xs text-gray-500 font-mono">
+                    {Math.round(trackingProgress.progress * 100)}%
                   </div>
                 </div>
-              )}
+              </div>
+            )}
+            {viewportMode === 'standard' ? (
+              <div
+                ref={viewportContainerRef}
+                className="flex-1 relative overflow-hidden group flex items-center justify-center"
+                style={{ cursor: (trackingMode === 'placing-stabilizer' || trackingMode === 'placing-parent') ? 'crosshair' : (transformTarget === 'global' || primarySelectedSegment) ? (isViewportDragging ? 'grabbing' : 'grab') : 'default' }}
+                onMouseDown={(e: React.MouseEvent) => { handleTrackingPanStart(e); handleViewportMouseDown(e); }}
+                onMouseMove={handleViewportMouseMove}
+                onMouseUp={handleViewportMouseUp}
+                onMouseLeave={handleViewportMouseUp}
+                onWheel={handleTrackingWheel}
+              >
+                {/* Zoom wrapper — scales video + tracker overlay together when in tracking tab */}
+                <div
+                  className="absolute inset-0"
+                  style={{
+                    transform: activeRightTab === 'tracking' && trackingZoom !== 1
+                      ? `translate(${trackingPan.x}px, ${trackingPan.y}px) scale(${trackingZoom})`
+                      : undefined,
+                    transformOrigin: '0 0',
+                    width: '100%',
+                    height: '100%',
+                  }}
+                >
+                  {renderedSegments.length > 0 ? (
+                    renderedSegments.map((seg, index) => {
+                      // Get combined transform (global + clip)
+                      const clipTime = project.currentTime - seg.timelineStart;
+                      const transform = getCombinedTransform(seg.keyframes, clipTime, project.currentTime);
 
-              {/* Title Layer Overlay */}
-              {project.titleLayer && project.currentTime >= project.titleLayer.startTime && project.currentTime <= project.titleLayer.endTime && (() => {
-                const t = project.currentTime - project.titleLayer.startTime;
-                const duration = project.titleLayer.endTime - project.titleLayer.startTime;
+                      // Convert translate percentages to pixels using object-contain display area
+                      // (keyframes store % of video native dims; CSS translate(%) uses element dims which differ with letterbox/pillarbox)
+                      const videoEl = videoRefs.current.get(seg.id);
+                      const vw = videoEl?.videoWidth || 1920;
+                      const vh = videoEl?.videoHeight || 1080;
+                      const videoAR = vw / vh;
+                      const containerAR = viewportSize.width / (viewportSize.height || 1);
+                      const displayW = containerAR > videoAR ? viewportSize.height * videoAR : viewportSize.width;
+                      const displayH = containerAR > videoAR ? viewportSize.height : viewportSize.width / videoAR;
 
-                // Calculate opacity for fade in/out
-                let opacity = 1;
-                if (t < project.titleLayer.fadeInDuration) {
-                  opacity = t / project.titleLayer.fadeInDuration;
-                } else if (t > duration - project.titleLayer.fadeOutDuration) {
-                  opacity = (duration - t) / project.titleLayer.fadeOutDuration;
-                }
+                      const txParts: string[] = [];
+                      if (transform.translateX !== 0 || transform.translateY !== 0) {
+                        txParts.push(`translate(${transform.translateX * displayW / 100}px, ${transform.translateY * displayH / 100}px)`);
+                      }
+                      if (transform.scale !== 1) txParts.push(`scale(${transform.scale})`);
+                      if (transform.rotation !== 0) txParts.push(`rotate(${transform.rotation}deg)`);
+                      const cssTransform = txParts.length > 0 ? txParts.join(' ') : 'none';
 
-                const titleStyle = project.titleLayer.style || project.titleStyle;
-                const computedStyles = getTitleStyles(titleStyle, opacity);
+                      return (
+                        <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: seg.track * 10 }}>
+                          {seg.type === 'blank' ? (
+                            <div
+                              className="w-full h-full flex items-center justify-center p-8 text-center"
+                              style={{
+                                backgroundColor: seg.color || '#444444',
+                                color: '#ffffff',
+                                fontSize: '48px',
+                                fontWeight: 'bold',
+                                fontFamily: 'system-ui, -apple-system, sans-serif'
+                              }}
+                            >
+                              <div style={{ transform: cssTransform, transformOrigin: 'center center' }}>
+                                {seg.customText || ''}
+                              </div>
+                            </div>
+                          ) : (
+                            <video
+                              ref={el => { if (el) videoRefs.current.set(seg.id, el); }}
+                              src={project.library.find(m => m.id === seg.mediaId)?.url}
+                              className="w-full h-full object-contain pointer-events-none"
+                              style={{ transform: cssTransform, transformOrigin: 'center center' }}
+                              muted={false}
+                            />
+                          )}
+                          {/* Dynamic Wash Overlay */}
+                          <div
+                            ref={el => { if (el) overlayRefs.current.set(seg.id, el); }}
+                            className="absolute inset-0 pointer-events-none opacity-0"
+                            style={{ backgroundColor: 'white' }}
+                          />
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-sm">No Active Clip</div>
+                  )}
 
-                // Apply transforms if keyframes exist
-                let transform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
-                if (project.titleLayer.keyframes && project.titleLayer.keyframes.length > 0) {
-                  transform = getCombinedTransform(project.titleLayer.keyframes, t, project.currentTime);
-                }
-                const cssTransform = transformToCss(transform);
+                  {/* Tracker Overlay — interactive tracker placement & visualization */}
+                  {primarySelectedSegment && (primarySelectedSegment.trackers?.length || trackingMode === 'placing-stabilizer' || trackingMode === 'placing-parent') ? (
+                    <TrackerOverlay
+                      trackers={primarySelectedSegment.trackers || []}
+                      trackingData={primarySelectedSegment.trackingData}
+                      currentTime={project.currentTime}
+                      segmentStartTime={primarySelectedSegment.startTime}
+                      segmentTimelineStart={primarySelectedSegment.timelineStart}
+                      videoWidth={videoRefs.current.get(primarySelectedSegment.id)?.videoWidth || 1920}
+                      videoHeight={videoRefs.current.get(primarySelectedSegment.id)?.videoHeight || 1080}
+                      viewportSize={viewportSize}
+                      selectedTrackerId={selectedTrackerId}
+                      trackingMode={trackingMode}
+                      onTrackerClick={setSelectedTrackerId}
+                      onTrackerDrag={handleTrackerDrag}
+                      onPlaceTracker={handlePlaceTracker}
+                      zoom={trackingZoom}
+                    />
+                  ) : null}
+                </div>
 
-                return (
-                  <div style={{ ...computedStyles.container, transform: cssTransform, transformOrigin: 'center center' }}>
-                    <div style={computedStyles.text}>
-                      {project.titleLayer.text}
+                {/* Viewport Aspect Ratio Overlay — stays outside zoom wrapper */}
+                <ViewportOverlay
+                  containerWidth={viewportSize.width}
+                  containerHeight={viewportSize.height}
+                  aspectRatio={viewportSettings.previewAspectRatio}
+                  opacity={viewportSettings.overlayOpacity}
+                  visible={viewportSettings.showOverlay}
+                />
+
+                {/* Safe zone wrapper — constrains subtitles & titles to aspect ratio */}
+                {(() => {
+                  const arPreset = viewportSettings.previewAspectRatio !== 'custom'
+                    ? ASPECT_RATIO_PRESETS[viewportSettings.previewAspectRatio]
+                    : null;
+                  let sz = { x: 0, y: 0, w: viewportSize.width, h: viewportSize.height };
+                  if (arPreset && viewportSize.width > 0 && viewportSize.height > 0) {
+                    const cr = viewportSize.width / viewportSize.height;
+                    if (cr > arPreset.ratio) {
+                      sz.h = viewportSize.height;
+                      sz.w = viewportSize.height * arPreset.ratio;
+                      sz.x = (viewportSize.width - sz.w) / 2;
+                    } else {
+                      sz.w = viewportSize.width;
+                      sz.h = viewportSize.width / arPreset.ratio;
+                      sz.y = (viewportSize.height - sz.h) / 2;
+                    }
+                  }
+                  return (
+                    <div style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none' }}>
+
+                      {/* Animated Subtitle Overlay */}
+                      {activeSubtitleEvent && (() => {
+                        const subTemplate = activeSubtitleEvent.templateOverride || project.activeSubtitleTemplate;
+                        const subAnim = subTemplate?.animation;
+                        const subTx = activeSubtitleEvent.translateX || 0;
+                        const subTy = activeSubtitleEvent.translateY || 0;
+                        // Use pixel-based transform (percentage of crop region) for 1:1 drag mapping
+                        const subTransform = (subTx !== 0 || subTy !== 0) ? `translate(${subTx * sz.w / 100}px, ${subTy * sz.h / 100}px)` : undefined;
+
+                        // Find event index for drag
+                        const subEvtIndex = currentTopMedia?.analysis?.events.indexOf(activeSubtitleEvent) ?? -1;
+
+                        const handleSubtitleMouseDown = (e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          if (!currentTopMedia || subEvtIndex < 0) return;
+                          // Select this subtitle so Properties Panel shows it
+                          setSelectedDialogues([{ mediaId: currentTopMedia.id, index: subEvtIndex }]);
+                          pushUndo({ type: 'dialogueEvent', mediaId: currentTopMedia.id, index: subEvtIndex, event: { ...activeSubtitleEvent } });
+                          setSubtitleDragState({
+                            mediaId: currentTopMedia.id, index: subEvtIndex,
+                            startX: e.clientX, startY: e.clientY,
+                            origTx: subTx, origTy: subTy,
+                          });
+                        };
+
+                        // Viewport click handler for selecting segments
+                        const handleViewportMouseDown = (e: React.MouseEvent) => {
+                          // Only handle if left click and not dragging subtitle/title
+                          if (e.button !== 0 || subtitleDragState || titleDragState) return;
+
+                          // If clicking on subtitle/title, their handlers stopPropagation, so we only get here if clicking "background" video
+                          if (activeSegments.length > 0) {
+                            const topSeg = activeSegments[activeSegments.length - 1];
+                            if (!selectedSegmentIds.includes(topSeg.id)) {
+                              handleSegmentSelect({ metaKey: e.metaKey || e.ctrlKey, shiftKey: e.shiftKey } as any, topSeg.id);
+                            }
+                          }
+                        };
+
+                        // Attach this handler to the safe zone container
+                        // We need to attach it to the parent or ensuring the parent has it
+
+
+                        // Apply keyframe-based transforms on top of drag offset
+                        let subKfTransform = '';
+                        if (activeSubtitleEvent.keyframes && activeSubtitleEvent.keyframes.length > 0) {
+                          const topSeg = activeSegments[activeSegments.length - 1];
+                          const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
+                          const subTime = sourceTime - activeSubtitleEvent.startTime;
+                          const kfTransform = getInterpolatedTransform(activeSubtitleEvent.keyframes, subTime);
+                          const kfParts: string[] = [];
+                          if (kfTransform.translateX !== 0 || kfTransform.translateY !== 0) {
+                            kfParts.push(`translate(${kfTransform.translateX * sz.w / 100}px, ${kfTransform.translateY * sz.h / 100}px)`);
+                          }
+                          if (kfTransform.scale !== 1) kfParts.push(`scale(${kfTransform.scale})`);
+                          if (kfTransform.rotation !== 0) kfParts.push(`rotate(${kfTransform.rotation}deg)`);
+                          subKfTransform = kfParts.join(' ');
+                        }
+
+                        const fullSubTransform = [subTransform, subKfTransform].filter(Boolean).join(' ') || undefined;
+
+                        const containerStyle = {
+                          ...styles.container,
+                          transform: fullSubTransform,
+                          pointerEvents: 'auto' as const,
+                          cursor: subtitleDragState ? 'grabbing' : 'grab',
+                        };
+
+                        // Resolve keyword animation cascade
+                        const kwAnim = activeSubtitleEvent.keywordAnimation || subTemplate?.keywordAnimation || project.activeKeywordAnimation || null;
+
+                        if (subAnim && subAnim.effects.length > 0) {
+                          const topSeg = activeSegments[activeSegments.length - 1];
+                          const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
+                          const localFrame = Math.round((sourceTime - activeSubtitleEvent.startTime) * REMOTION_FPS);
+                          const { fontSize: _tfs, ...tplStyleNoSize } = subTemplate?.style || {};
+                          const mergedStyle = subTemplate ? { ...tplStyleNoSize, ...styles.text } : styles.text;
+                          return (
+                            <div style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
+                              <div style={{ display: 'grid' }}>
+                                {styles.blendLayers.map((layerStyle, i) => (
+                                  <AnimatedText
+                                    key={`blend-${i}`}
+                                    text={activeSubtitleEvent.details}
+                                    animation={subAnim}
+                                    style={layerStyle}
+                                    frame={localFrame}
+                                    fps={REMOTION_FPS}
+                                    wordEmphases={activeSubtitleEvent.wordEmphases}
+                                    keywordAnimation={kwAnim || undefined}
+                                  />
+                                ))}
+                                <AnimatedText
+                                  text={activeSubtitleEvent.details}
+                                  animation={subAnim}
+                                  style={{ ...mergedStyle, gridArea: '1 / 1 / 2 / 2' }}
+                                  frame={localFrame}
+                                  fps={REMOTION_FPS}
+                                  wordEmphases={activeSubtitleEvent.wordEmphases}
+                                  keywordAnimation={kwAnim || undefined}
+                                  onWordClick={handleToggleSubtitleKeyword}
+                                />
+                              </div>
+                            </div>
+                          );
+                        }
+                        // Fallback: plain text (no template applied)
+                        // Extract gradient for per-word application (can't use backgroundClip on box element)
+                        const textGradientVal = (styles.text as any)['--text-gradient'] as string | undefined;
+                        const gradientFill: React.CSSProperties = textGradientVal ? {
+                          backgroundImage: textGradientVal,
+                          WebkitBackgroundClip: 'text',
+                          backgroundClip: 'text',
+                          WebkitTextFillColor: 'transparent',
+                          color: 'transparent',
+                        } as React.CSSProperties : {};
+                        return (
+                          <div style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
+                            <div style={{ display: 'grid' }}>
+                              {styles.blendLayers.map((layerStyle, i) => (
+                                <div key={`blend-${i}`} style={layerStyle}>
+                                  {activeSubtitleEvent.details.split(/(\s+)/).map((token, k) => (
+                                    <span key={k}>{token}</span>
+                                  ))}
+                                </div>
+                              ))}
+                              <div style={{ ...styles.text, gridArea: '1 / 1 / 2 / 2' }}>
+                                {activeSubtitleEvent.details.split(/(\s+)/).map((token, i) => {
+                                  if (/^\s+$/.test(token)) return <span key={i}>{token}</span>;
+                                  const wordIdx = activeSubtitleEvent.details.split(/(\s+)/)
+                                    .slice(0, i).filter(t => !/^\s+$/.test(t)).length;
+                                  const kw = activeSubtitleEvent.wordEmphases?.find(k => k.wordIndex === wordIdx && k.enabled);
+                                  return (
+                                    <span key={i}
+                                      onClick={(e) => { e.stopPropagation(); handleToggleSubtitleKeyword(wordIdx, token); }}
+                                      style={{
+                                        cursor: 'pointer',
+                                        color: kw ? (kw.color || '#FFD700') : undefined,
+                                        textDecoration: kw ? 'underline' : undefined,
+                                        textDecorationColor: kw ? 'rgba(255,215,0,0.4)' : undefined,
+                                        ...(!kw ? gradientFill : {}),
+                                      }}
+                                    >{token}</span>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Animated Title Layer Overlay */}
+                      {project.titleLayer && project.currentTime >= project.titleLayer.startTime && project.currentTime <= project.titleLayer.endTime && (() => {
+                        const t = project.currentTime - project.titleLayer.startTime;
+                        const duration = project.titleLayer.endTime - project.titleLayer.startTime;
+
+                        // Calculate opacity for fade in/out
+                        let fadeOpacity = 1;
+                        if (t < project.titleLayer.fadeInDuration) {
+                          fadeOpacity = t / project.titleLayer.fadeInDuration;
+                        } else if (t > duration - project.titleLayer.fadeOutDuration) {
+                          fadeOpacity = (duration - t) / project.titleLayer.fadeOutDuration;
+                        }
+
+                        const titleStyle = project.titleLayer.style || project.titleStyle;
+                        const computedStyles = getTitleStyles(titleStyle, fadeOpacity);
+
+                        // Apply transforms if keyframes exist — use pixel values for crop-region-relative positioning
+                        let transform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+                        if (project.titleLayer.keyframes && project.titleLayer.keyframes.length > 0) {
+                          transform = getCombinedTransform(project.titleLayer.keyframes, t, project.currentTime);
+                        }
+                        const titleTransformParts: string[] = [];
+                        if (transform.translateX !== 0 || transform.translateY !== 0) {
+                          titleTransformParts.push(`translate(${transform.translateX * sz.w / 100}px, ${transform.translateY * sz.h / 100}px)`);
+                        }
+                        if (transform.scale !== 1) titleTransformParts.push(`scale(${transform.scale})`);
+                        if (transform.rotation !== 0) titleTransformParts.push(`rotate(${transform.rotation}deg)`);
+                        const cssTransform = titleTransformParts.length > 0 ? titleTransformParts.join(' ') : 'none';
+
+                        // Drag handler for title movement
+                        const handleTitleMouseDown = (e: React.MouseEvent) => {
+                          e.stopPropagation();
+                          setTitleDragState({
+                            startX: e.clientX, startY: e.clientY,
+                            origTx: transform.translateX, origTy: transform.translateY,
+                          });
+                        };
+
+                        const titleContainerStyle = {
+                          ...computedStyles.container,
+                          transform: cssTransform,
+                          transformOrigin: 'center center',
+                          pointerEvents: 'auto' as const,
+                          cursor: titleDragState ? 'grabbing' : 'grab',
+                        };
+
+                        // Use AnimatedText if the title has an animation with effects
+                        const titleAnim = project.titleLayer.animation ?? project.activeTitleTemplate?.animation;
+                        if (titleAnim && titleAnim.effects.length > 0) {
+                          const localFrame = Math.round(t * REMOTION_FPS);
+                          return (
+                            <div style={titleContainerStyle} onMouseDown={handleTitleMouseDown}>
+                              <div style={{ display: 'grid' }}>
+                                {computedStyles.blendLayers?.map((layerStyle, i) => (
+                                  <AnimatedText
+                                    key={`blend-title-${i}`}
+                                    text={project.titleLayer!.text}
+                                    animation={titleAnim}
+                                    style={layerStyle}
+                                    frame={localFrame}
+                                    fps={REMOTION_FPS}
+                                  />
+                                ))}
+                                <AnimatedText
+                                  text={project.titleLayer.text}
+                                  animation={titleAnim}
+                                  style={{ ...computedStyles.text, gridArea: '1 / 1 / 2 / 2' }}
+                                  frame={localFrame}
+                                  fps={REMOTION_FPS}
+                                />
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        // Fallback: plain text (no animation set)
+                        const titleGradientVal = (computedStyles.text as any)['--text-gradient'] as string | undefined;
+                        const titleGradientFill: React.CSSProperties = titleGradientVal ? {
+                          backgroundImage: titleGradientVal,
+                          WebkitBackgroundClip: 'text',
+                          backgroundClip: 'text',
+                          WebkitTextFillColor: 'transparent',
+                          color: 'transparent',
+                        } as React.CSSProperties : {};
+                        return (
+                          <div style={titleContainerStyle} onMouseDown={handleTitleMouseDown}>
+                            <div style={{ display: 'grid' }}>
+                              {computedStyles.blendLayers?.map((layerStyle, i) => (
+                                <div key={`blend-title-${i}`} style={layerStyle}>
+                                  <span>{project.titleLayer!.text}</span>
+                                </div>
+                              ))}
+                              <div style={{ ...computedStyles.text, gridArea: '1 / 1 / 2 / 2' }}>
+                                <span style={titleGradientFill}>{project.titleLayer.text}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Active template indicator */}
+                      {project.activeSubtitleTemplate && (
+                        <div style={{
+                          position: 'absolute', top: 6, right: 6, zIndex: 10001,
+                          background: 'rgba(79,70,229,0.85)', borderRadius: 4,
+                          padding: '2px 8px', pointerEvents: 'none',
+                          fontSize: 9, color: '#e5e7eb', fontWeight: 600,
+                          backdropFilter: 'blur(4px)',
+                        }}>
+                          FX: {project.activeSubtitleTemplate.name}
+                        </div>
+                      )}
+
                     </div>
-                  </div>
-                );
-              })()}
-            </div>
+                  );
+                })()}
+              </div>
+            ) : (
+              <div ref={viewportContainerRef} className="flex-1 relative overflow-hidden flex items-center justify-center">
+                <RemotionPreview
+                  width={viewportSize.width || 640}
+                  height={viewportSize.height || 360}
+                  durationInSeconds={contentDuration || 10}
+                  compositionWidth={viewportSettings.previewAspectRatio === '9:16' ? 1080 : 1920}
+                  compositionHeight={viewportSettings.previewAspectRatio === '9:16' ? 1920 : 1080}
+                  videoProps={{
+                    segments: project.segments,
+                    events: currentTopMedia?.analysis?.events || [],
+                    subtitleStyle: project.subtitleStyle,
+                    titleStyle: project.titleStyle,
+                    titleLayer: project.titleLayer,
+                    activeSubtitleTemplate: project.activeSubtitleTemplate,
+                    activeTitleTemplate: project.activeTitleTemplate,
+                    activeKeywordAnimation: project.activeKeywordAnimation,
+                    fps: REMOTION_FPS,
+                  }}
+                />
+              </div>
+            )}
 
             {/* TRANSPORT CONTROLS */}
             <div className="h-14 border-t border-[#333] bg-[#1e1e1e] flex items-center justify-between px-4 gap-4 z-[1000]">
@@ -2119,8 +4803,15 @@ function App() {
                 </div>
               </div>
 
-              {/* Right: Export & Graph Editor */}
+              {/* Right: Export, Graph Editor & Remotion Toggle */}
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setViewportMode(prev => prev === 'standard' ? 'remotion' : 'standard')}
+                  className={`px-2 py-1 text-xs rounded ${viewportMode === 'remotion' ? 'bg-purple-600 text-white' : 'bg-[#333] text-gray-400 hover:text-white'}`}
+                  title="Toggle Remotion Preview"
+                >
+                  Remotion
+                </button>
                 <button
                   onClick={() => setActiveBottomTab(prev => prev === 'graph' ? 'timeline' : 'graph')}
                   className={`px-2 py-1 text-xs rounded ${activeBottomTab === 'graph' ? 'bg-orange-600 text-white' : 'bg-[#333] text-gray-400 hover:text-white'}`}
@@ -2138,52 +4829,104 @@ function App() {
             </div>
           </div>
 
-          {/* Right Panels (Split view: Top = Properties, Bottom = Tabs) */}
+          {/* Right Panels (Tabs) */}
           <div className="w-80 border-l border-[#333] flex flex-col bg-[#1e1e1e]">
-            {/* Top Half: Properties Panel */}
-            <div className="h-1/2 border-b border-[#333] overflow-hidden">
-              <PropertiesPanel
-                selectedSegment={primarySelectedSegment}
-                selectedTransition={selectedTransition}
-                selectedDialogue={selectedDialogue}
-                selectedDialogueText={selectedDialogueEvent?.details || ""}
-                subtitleStyle={effectiveSubtitleStyle}
-                isSubtitleUnlinked={isSubtitleUnlinked}
-                mediaAnalysis={selectedMediaAnalysis}
-                onUpdateSegment={handleUpdateSegment}
-                onUpdateTransition={handleUpdateTransition}
-                onUpdateDialogueText={handleUpdateDialogueText}
-                onUpdateSubtitleStyle={handleUpdateSubtitleStyle}
-                onToggleSubtitleUnlink={handleToggleSubtitleUnlink}
-                onAnalyze={handleDeepAnalyze}
-                isProcessing={status === ProcessingStatus.DEEP_ANALYZING}
-                isTitleSelected={isTitleSelected}
-                titleLayer={project.titleLayer}
-                onUpdateTitleLayer={handleUpdateTitleLayer}
-              />
-            </div>
-
-            {/* Bottom Half: Tabs */}
             <div className="flex-1 flex flex-col min-h-0">
               <div className="flex border-b border-[#333] bg-[#252525]">
-                <button onClick={() => setActiveRightTab('chat')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'chat' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>CHAT</button>
                 <button onClick={() => setActiveRightTab('transcript')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'transcript' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>TRANSCRIPT</button>
+                <button onClick={() => setActiveRightTab('templates')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'templates' ? 'bg-[#333] text-purple-400 border-b-2 border-purple-400' : 'text-gray-400'}`}>TEMPLATES</button>
+                <button onClick={() => setActiveRightTab('tracking')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'tracking' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400'}`}>TRACKING</button>
               </div>
               <div className="flex-1 overflow-hidden">
-                {activeRightTab === 'chat' && <ChatPanel messages={messages} onSendMessage={handleChat} isLoading={isChatLoading} />}
-                {activeRightTab === 'chat' && <ChatPanel messages={messages} onSendMessage={handleChat} isLoading={isChatLoading} />}
+                {activeRightTab === 'templates' && (
+                  <TemplateManager
+                    currentSubtitleStyle={project.subtitleStyle}
+                    activeTemplate={effectiveSubtitleTemplate}
+                    activeKeywordAnimation={isTemplateUnlinked ? (selectedDialogueEvent?.keywordAnimation || project.activeKeywordAnimation) : project.activeKeywordAnimation}
+                    onApplyToKeywords={(anim: TextAnimation) => handleUpdateKeywordAnimation({ ...anim, scope: 'word' })}
+                    onClearKeywordAnimation={() => handleUpdateKeywordAnimation(null)}
+                    onApply={handleUpdateSubtitleTemplate}
+                    onClear={() => {
+                      if (isTemplateUnlinked) {
+                        if (selectedDialogue) {
+                          const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+                          const current = media?.analysis?.events[selectedDialogue.index];
+                          if (current) {
+                            pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+                          }
+                        }
+                        updateSelectedEvent(evt => {
+                          const { templateOverride, ...rest } = evt;
+                          return rest;
+                        });
+                      } else {
+                        pushUndo({ type: 'subtitleTemplate', template: project.activeSubtitleTemplate });
+                        setProject(p => ({ ...p, activeSubtitleTemplate: null }));
+                      }
+                    }}
+                  />
+                )}
                 {activeRightTab === 'transcript' && (() => {
                   const transcriptMedia = currentTopMedia || project.library.find(m => m.id === selectedMediaId);
+
+                  // Calculate the source time corresponding to the current timeline time for highlighting
+                  let sourceTime = project.currentTime;
+                  if (activeSegments.length > 0) {
+                    const topSeg = activeSegments[activeSegments.length - 1];
+                    if (topSeg.mediaId === transcriptMedia?.id) {
+                      sourceTime = topSeg.startTime + (project.currentTime - topSeg.timelineStart);
+                    }
+                  }
+
                   return (
                     <TranscriptPanel
                       analysis={transcriptMedia?.analysis || null}
-                      currentTime={project.currentTime}
-                      onSeek={(t) => setProject(p => ({ ...p, currentTime: t }))}
+                      mediaId={transcriptMedia?.id}
+                      currentTime={sourceTime}
+                      onSeek={(t) => {
+                        if (transcriptMedia) {
+                          const segs = project.segments.filter(s => s.mediaId === transcriptMedia.id);
+                          if (segs.length > 0) {
+                            let target = segs.find(s => t >= s.startTime && t < s.endTime);
+                            if (!target) {
+                              target = [...segs].sort((a, b) => Math.abs(a.startTime - t) - Math.abs(b.startTime - t))[0];
+                            }
+                            if (target) {
+                              const timelineTime = (t - target.startTime) + target.timelineStart;
+                              setProject(p => ({ ...p, currentTime: Math.max(0, timelineTime) }));
+                              return;
+                            }
+                          }
+                        }
+                        setProject(p => ({ ...p, currentTime: t }));
+                      }}
                       onSelect={(idx) => transcriptMedia && handleDialogueSelect(transcriptMedia.id, idx)}
-                      selectedIndex={selectedDialogue?.mediaId === transcriptMedia?.id ? selectedDialogue.index : null}
+                      selectedIndex={selectedDialogue && transcriptMedia && selectedDialogue.mediaId === transcriptMedia.id ? selectedDialogue.index : null}
+                      removedWords={project.removedWords}
+                      onRemoveWords={(words) => handleRemoveTranscriptWords(words)}
+                      onRestoreWord={handleRestoreTranscriptWord}
                     />
                   );
                 })()}
+                {activeRightTab === 'tracking' && (
+                  <TrackingPanel
+                    selectedSegment={primarySelectedSegment}
+                    trackingMode={trackingMode}
+                    onSetTrackingMode={setTrackingMode}
+                    selectedTrackerId={selectedTrackerId}
+                    onSelectTracker={setSelectedTrackerId}
+                    onUpdateTracker={handleUpdateTracker}
+                    onDeleteTracker={handleDeleteTracker}
+                    onStartTracking={handleStartTracking}
+                    onStopTracking={handleStopTracking}
+                    onApplyStabilization={handleApplyStabilization}
+                    onApplyToSegment={handleApplyToSegment}
+                    onApplyToTitle={handleApplyToTitle}
+                    onClearTracking={handleClearTracking}
+                    onClearTrackingData={handleClearTrackingData}
+                    trackingProgress={trackingProgress}
+                  />
+                )}
               </div>
             </div>
           </div>
@@ -2209,9 +4952,51 @@ function App() {
             </div>
             {activeBottomTab === 'timeline' && (
               <>
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">AI Vibe Editor</div>
-                <input value={editPrompt} onChange={e => setEditPrompt(e.target.value)} placeholder="E.g. 'Shorten the video to highlights'" className="flex-1 bg-[#121212] border border-[#333] rounded px-3 py-1 text-xs text-white focus:border-blue-500 outline-none" />
-                <button onClick={handleVibeEdit} disabled={status !== ProcessingStatus.IDLE} className="px-3 py-1 bg-blue-600 rounded text-xs font-bold hover:bg-blue-500 disabled:opacity-50">Generate Sequence</button>
+                {selectedDialogues.length >= 2 && (
+                  <button onClick={handleMergeDialogues} className="px-2 py-1 text-xs font-bold bg-purple-600 text-white rounded hover:bg-purple-500">
+                    Merge {selectedDialogues.length} Subtitles
+                  </button>
+                )}
+                {/* AI Cost Tracker Badge */}
+                <div className="relative ml-auto">
+                  <button
+                    onClick={() => setShowCostPanel(p => !p)}
+                    className={`px-2 py-1 rounded text-xs font-mono font-bold border ${costTotal >= 2 ? 'border-red-500 text-red-400 bg-red-500/10' :
+                      costTotal >= 0.50 ? 'border-yellow-500 text-yellow-400 bg-yellow-500/10' :
+                        'border-green-600 text-green-400 bg-green-500/10'
+                      }`}
+                    title="AI cost this session (estimated)"
+                  >
+                    ${costTotal.toFixed(4)}
+                  </button>
+                  {showCostPanel && (
+                    <div className="absolute bottom-full right-0 mb-1 w-80 max-h-64 overflow-y-auto bg-[#1a1a1a] border border-[#444] rounded-lg shadow-xl z-50 text-xs">
+                      <div className="sticky top-0 bg-[#1a1a1a] p-2 border-b border-[#333] flex items-center justify-between">
+                        <span className="font-bold text-white">AI Cost Log</span>
+                        <button onClick={() => { clearSession().then(() => { setCostTotal(0); setCostLog([]); }); }} className="text-gray-400 hover:text-red-400 text-[10px]">Clear</button>
+                      </div>
+                      {costLog.length === 0 ? (
+                        <div className="p-3 text-gray-500 text-center">No AI calls yet</div>
+                      ) : (
+                        <div className="divide-y divide-[#333]">
+                          {[...costLog].reverse().map(e => (
+                            <div key={e.id} className="px-2 py-1.5 flex items-center gap-2">
+                              <div className="flex-1 min-w-0">
+                                <div className="font-bold text-white truncate">{e.operation}</div>
+                                <div className="text-gray-500">{e.model} &middot; {e.inputTokens.toLocaleString()} in / {e.outputTokens.toLocaleString()} out</div>
+                              </div>
+                              <div className="font-mono text-green-400 whitespace-nowrap">${e.estimatedCost.toFixed(4)}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="sticky bottom-0 bg-[#1a1a1a] p-2 border-t border-[#333] flex justify-between font-bold">
+                        <span className="text-white">Session Total</span>
+                        <span className={`font-mono ${costTotal >= 2 ? 'text-red-400' : costTotal >= 0.50 ? 'text-yellow-400' : 'text-green-400'}`}>${costTotal.toFixed(4)}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             )}
             {activeBottomTab === 'graph' && primarySelectedSegment && (
@@ -2236,17 +5021,22 @@ function App() {
                 onSeek={t => setProject(p => ({ ...p, currentTime: t }))}
                 onSegmentSelect={handleSegmentSelect}
                 onSplit={handleSplit}
-                onUpdateSegment={handleUpdateSegment}
+                onUpdateSegments={handleUpdateSegments}
                 onDeleteSegment={id => performDelete([id], rippleMode)}
                 onToggleRipple={() => setRippleMode(!rippleMode)}
                 onToggleSnapping={() => setSnappingEnabled(!snappingEnabled)}
                 onEditTransition={handleTransitionSelect}
                 onDialogueSelect={handleDialogueSelect}
-                selectedDialogue={selectedDialogue}
+                selectedDialogues={selectedDialogues}
                 onUpdateDialogue={handleUpdateDialogue}
                 onDeleteDialogue={handleDeleteDialogue}
+                onDialogueDragStart={(mediaId, index, originalEvent) => {
+                  pushUndo({ type: 'dialogueEvent', mediaId, index, event: { ...originalEvent } });
+                }}
                 titleLayer={project.titleLayer}
                 onTitleSelect={handleTitleSelect}
+                onUpdateTitle={handleUpdateTitleLayer}
+                onInsertBlank={handleInsertBlank}
                 zoom={timelineZoom}
                 onZoomChange={safeSetTimelineZoom}
               />
@@ -2265,24 +5055,43 @@ function App() {
                     {project.titleLayer && (
                       <option value="title_layer">Title Layer</option>
                     )}
-                    {project.segments.map(seg => (
-                      <option key={seg.id} value={seg.id}>
-                        📹 Clip: {project.library.find(m => m.id === seg.mediaId)?.name?.slice(0, 20) || seg.id.slice(0, 8)}
+                    {selectedDialogueEvent && selectedDialogue && (
+                      <option value={`subtitle_${selectedDialogue.mediaId}_${selectedDialogue.index}`}>
+                        💬 Subtitle: {selectedDialogueEvent.details.slice(0, 25)}{selectedDialogueEvent.details.length > 25 ? '…' : ''}
                       </option>
-                    ))}
+                    )}
+                    {project.segments
+                      .slice()
+                      .sort((a, b) => a.timelineStart - b.timelineStart)
+                      .map((seg, idx) => (
+                        <option key={seg.id} value={seg.id}>
+                          {idx + 1} Clip: {project.library.find(m => m.id === seg.mediaId)?.name?.slice(0, 20) || seg.id.slice(0, 8)}
+                        </option>
+                      ))}
                   </select>
                   {transformTarget === 'global' && (
                     <span className="text-xs text-yellow-400 ml-2">⚡ Affects all clips</span>
+                  )}
+                  {transformTarget.startsWith('subtitle_') && (
+                    <span className="text-xs text-purple-400 ml-2">💬 Subtitle transform</span>
                   )}
                 </div>
                 <div className="flex-1">
                   <GraphEditor
                     visible={true}
                     onClose={() => setActiveBottomTab('timeline')}
-                    segment={transformTarget === 'global' || transformTarget === 'title_layer' ? null : project.segments.find(s => s.id === transformTarget) || primarySelectedSegment}
+                    segment={transformTarget === 'global' || transformTarget === 'title_layer' || transformTarget.startsWith('subtitle_') ? null : project.segments.find(s => s.id === transformTarget) || primarySelectedSegment}
                     segmentDuration={(() => {
                       if (transformTarget === 'global') return contentDuration;
                       if (transformTarget === 'title_layer' && project.titleLayer) return project.titleLayer.endTime - project.titleLayer.startTime;
+                      if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        const evt = media?.analysis?.events[idx];
+                        if (evt) return evt.endTime - evt.startTime;
+                      }
                       const seg = project.segments.find(s => s.id === transformTarget);
                       if (seg) return seg.endTime - seg.startTime;
                       return graphEditorSegmentDuration;
@@ -2290,21 +5099,58 @@ function App() {
                     currentTime={(() => {
                       if (transformTarget === 'global') return project.currentTime;
                       if (transformTarget === 'title_layer' && project.titleLayer) return Math.max(0, project.currentTime - project.titleLayer.startTime);
+                      if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        const evt = media?.analysis?.events[idx];
+                        if (evt) {
+                          // Find source time based on active segment
+                          const topSeg = project.segments.find(s => {
+                            const m = project.library.find(lib => lib.id === s.mediaId);
+                            return m?.id === mediaId;
+                          });
+                          const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : project.currentTime;
+                          return Math.max(0, sourceTime - evt.startTime);
+                        }
+                      }
                       const seg = project.segments.find(s => s.id === transformTarget);
                       if (seg) return Math.max(0, project.currentTime - seg.timelineStart);
                       return graphEditorClipTime;
                     })()}
-                    keyframes={
-                      transformTarget === 'global' ? globalKeyframes :
-                        transformTarget === 'title_layer' ? (project.titleLayer?.keyframes || []) :
-                          (project.segments.find(s => s.id === transformTarget)?.keyframes || primarySelectedSegment?.keyframes)
-                    }
-                    isGlobalMode={transformTarget === 'global' || transformTarget === 'title_layer'}
+                    keyframes={(() => {
+                      if (transformTarget === 'global') return globalKeyframes;
+                      if (transformTarget === 'title_layer') return project.titleLayer?.keyframes || [];
+                      if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        return media?.analysis?.events[idx]?.keyframes || [];
+                      }
+                      return project.segments.find(s => s.id === transformTarget)?.keyframes || primarySelectedSegment?.keyframes;
+                    })()}
+                    isGlobalMode={transformTarget === 'global' || transformTarget === 'title_layer' || transformTarget.startsWith('subtitle_')}
                     onSeek={(time) => {
                       if (transformTarget === 'global') {
                         setProject(p => ({ ...p, currentTime: time }));
                       } else if (transformTarget === 'title_layer' && project.titleLayer) {
                         setProject(p => ({ ...p, currentTime: (p.titleLayer?.startTime || 0) + time }));
+                      } else if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        const evt = media?.analysis?.events[idx];
+                        if (evt) {
+                          const topSeg = project.segments.find(s => project.library.find(lib => lib.id === s.mediaId)?.id === mediaId);
+                          if (topSeg) {
+                            const sourceTime = evt.startTime + time;
+                            const timelineTime = topSeg.timelineStart + (sourceTime - topSeg.startTime);
+                            setProject(p => ({ ...p, currentTime: timelineTime }));
+                          }
+                        }
                       } else {
                         const seg = project.segments.find(s => s.id === transformTarget) || primarySelectedSegment;
                         if (seg) {
@@ -2318,6 +5164,15 @@ function App() {
                         handleUpdateKeyframes('global', keyframes);
                       } else if (transformTarget === 'title_layer') {
                         handleUpdateTitleLayer({ keyframes });
+                      } else if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        const evt = media?.analysis?.events[idx];
+                        if (evt) {
+                          handleUpdateDialogue(mediaId, idx, { ...evt, keyframes });
+                        }
                       } else {
                         const segId = transformTarget !== 'global' ? transformTarget : primarySelectedSegment?.id;
                         if (segId) {
@@ -2346,6 +5201,16 @@ function App() {
           onImport={handleYoutubeImport}
           onCancel={() => setShowYoutubeModal(false)}
           status={status}
+        />
+      )}
+
+      {showFillerModal && fillerDetections.length > 0 && (
+        <FillerConfirmModal
+          detections={fillerDetections}
+          onConfirm={handleConfirmFillerClean}
+          onRedetect={handleRedetectFillers}
+          onCancel={() => { setShowFillerModal(false); setFillerDetections([]); }}
+          hasCachedData={project.library.some(m => (m.fillerDetections?.length ?? 0) > 0)}
         />
       )}
     </div>
