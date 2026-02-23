@@ -3,8 +3,8 @@ services:
     name: vibecut-pro
     runtime: node
     plan: free
-    buildCommand: npm install --production=false && npm run build
-    startCommand: NODE_ENV=production node server/server.cjs
+    buildCommand: npm install --production=false && npm run build && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o yt-dlp && chmod +x yt-dlp
+    startCommand: PATH=$PATH:/opt/render/project/src NODE_ENV=production node server/server.cjs
     envVars:
       - key: GEMINI_API_KEY
         sync: false
