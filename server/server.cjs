@@ -170,7 +170,7 @@ app.get('/api/download', async (req, res) => {
         // Get video info first using global yt-dlp
         console.log(`Getting info for: ${videoId}`);
         const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';
-        const infoCmd = `yt-dlp --dump-single-json --no-warnings --remote-components ejs:github ${cookiesArg} ${uaArgs} "${youtubeUrl}"`;
+        const infoCmd = `"${YTDLP_BIN}" --dump-single-json --no-warnings --remote-components ejs:github ${cookiesArg} ${uaArgs} "${youtubeUrl}"`;
         console.log('Running:', infoCmd);
 
         const infoJson = execSync(infoCmd, {
@@ -189,7 +189,7 @@ app.get('/api/download', async (req, res) => {
         // Download using global yt-dlp
         console.log('Downloading to temp file:', tempFile);
 
-        const downloadCmd = `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 --remote-components ejs:github ${cookiesArg} ${uaArgs} -o "${tempFile}" "${youtubeUrl}"`;
+        const downloadCmd = `"${YTDLP_BIN}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 --remote-components ejs:github ${cookiesArg} ${uaArgs} -o "${tempFile}" "${youtubeUrl}"`;
         console.log('Running:', downloadCmd);
 
         execSync(downloadCmd, {
@@ -277,7 +277,7 @@ app.get('/api/video-info', async (req, res) => {
         }
 
         // Get video info using yt-dlp
-        const cmd = `yt-dlp --dump-single-json --no-warnings ${cookiesArg} "${youtubeUrl}"`;
+        const cmd = `"${YTDLP_BIN}" --dump-single-json --no-warnings ${cookiesArg} "${youtubeUrl}"`;
         console.log('Fetching video info:', cmd);
 
         const infoJson = execSync(cmd, {
@@ -391,6 +391,11 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const KIMI_API_KEY = process.env.KIMI_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
+
+// Resolve yt-dlp binary: check project root first (Render deploy), then global PATH
+const LOCAL_YTDLP = path.join(__dirname, '..', 'yt-dlp');
+const YTDLP_BIN = fs.existsSync(LOCAL_YTDLP) ? LOCAL_YTDLP : 'yt-dlp';
+console.log(`Using yt-dlp: ${YTDLP_BIN}`);
 
 console.log(`Using Gemini Model: ${GEMINI_MODEL}`);
 console.log(`Using Gemini API Key: ${GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : 'Not Set'}`);

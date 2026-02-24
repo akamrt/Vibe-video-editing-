@@ -21,6 +21,10 @@ function extractVideoId(url) {
 
 const COOKIE_FILE = path.join(__dirname, '..', 'www.youtube.com_cookies.txt');
 
+// Resolve yt-dlp binary: check project root first (Render deploy), then global PATH
+const LOCAL_YTDLP = path.join(__dirname, '..', 'yt-dlp');
+const YTDLP_BIN = fs.existsSync(LOCAL_YTDLP) ? LOCAL_YTDLP : 'yt-dlp';
+
 // ─── HTML entity decoder ───────────────────────────────────────────────────
 function decodeHtml(str) {
     return str
@@ -228,7 +232,7 @@ async function getTranscriptViaYtDlp(videoId) {
     }
 
     const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';
-    const cmd = `yt-dlp --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings ${cookiesArg} ${uaArgs} --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
+    const cmd = `"${YTDLP_BIN}" --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings ${cookiesArg} ${uaArgs} --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
 
     try {
         console.log('[Transcript] Running yt-dlp...');
