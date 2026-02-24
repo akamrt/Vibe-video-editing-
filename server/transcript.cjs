@@ -232,7 +232,7 @@ async function getTranscriptViaYtDlp(videoId) {
     }
 
     const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';
-    const cmd = `"${YTDLP_BIN}" --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings ${cookiesArg} ${uaArgs} --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
+    const cmd = `"${YTDLP_BIN}" --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-check-formats --no-warnings ${cookiesArg} ${uaArgs} --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
 
     try {
         console.log('[Transcript] Running yt-dlp...');
