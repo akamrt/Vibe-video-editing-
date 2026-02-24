@@ -186,67 +186,8 @@ async function fetchVideoTitle(videoId) {
     return null;
 }
 
-// ─── Strategy 0: YouTube innertube API (no scraping, no yt-dlp) ─────────
-async function getTranscriptViaInnertube(videoId) {
-    console.log('[Transcript] Trying innertube API for', videoId);
-
-    // Call YouTube's internal player endpoint — a JSON API that returns
-    // video metadata including caption track URLs. Much less likely to be
-    // blocked by YouTube's bot detection than page scraping or yt-dlp.
-    const playerRes = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            videoId,
-            context: {
-                client: {
-                    clientName: 'WEB',
-                    clientVersion: '2.20240101.00.00',
-                    hl: 'en',
-                },
-            },
-        }),
-    });
-
-    if (!playerRes.ok) {
-        throw new TranscriptError(`Innertube API HTTP ${playerRes.status}`, 'INNERTUBE_ERROR');
-    }
-
-    const playerData = await playerRes.json();
-
-    // Check for playability errors
-    if (playerData?.playabilityStatus?.status !== 'OK') {
-        const reason = playerData?.playabilityStatus?.reason || 'Unknown';
-        throw new TranscriptError(`Video not playable: ${reason}`, 'NOT_PLAYABLE');
-    }
-
-    const captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    if (!captionTracks || captionTracks.length === 0) {
-        throw new TranscriptError('No caption tracks in innertube response', 'NO_CAPTIONS');
-    }
-
-    // Prefer English, fall back to first available
-    const enTrack = captionTracks.find(t =>
-        t.languageCode === 'en' || (t.languageCode && t.languageCode.startsWith('en'))
-    );
-    const track = enTrack || captionTracks[0];
-
-    console.log('[Transcript] Innertube: using track', track.languageCode, track.name?.simpleText);
-
-    // Fetch the timedtext XML
-    let captionUrl = track.baseUrl;
-    if (!captionUrl.includes('fmt=')) {
-        captionUrl += '&fmt=srv3';
-    }
-
-    const captionRes = await fetch(captionUrl);
-    if (!captionRes.ok) {
-        throw new TranscriptError(`Caption XML fetch failed: HTTP ${captionRes.status}`, 'CAPTION_FETCH_ERROR');
-    }
-
-    const xml = await captionRes.text();
-
-    // Parse <text start="..." dur="...">...</text> elements
+// ─── Parse timedtext XML (srv3 format) into segments ────────────────────
+function parseTimedTextXml(xml) {
     const segments = [];
     const textRegex = /<text start="([\d.]+)" dur="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g;
     let match;
@@ -260,13 +201,169 @@ async function getTranscriptViaInnertube(videoId) {
             segments.push({ start, duration, text, isKaraoke: false });
         }
     }
+    return segments;
+}
 
-    if (segments.length === 0) {
-        throw new TranscriptError('Innertube: parsed 0 segments from caption XML', 'EMPTY_TRANSCRIPT');
+// ─── Innertube helper: try a specific client config ─────────────────────
+async function tryInnertubeClient(videoId, clientConfig) {
+    const playerRes = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': clientConfig.userAgent || 'Mozilla/5.0',
+        },
+        body: JSON.stringify({
+            videoId,
+            context: {
+                client: clientConfig.client,
+            },
+        }),
+    });
+
+    if (!playerRes.ok) {
+        throw new Error(`HTTP ${playerRes.status}`);
     }
 
-    console.log(`[Transcript] Innertube: ${segments.length} segments`);
-    return segments;
+    const playerData = await playerRes.json();
+    const status = playerData?.playabilityStatus?.status;
+
+    if (status !== 'OK') {
+        const reason = playerData?.playabilityStatus?.reason || status || 'Unknown';
+        throw new Error(`Playability: ${reason}`);
+    }
+
+    const captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!captionTracks || captionTracks.length === 0) {
+        throw new Error('No caption tracks');
+    }
+
+    return { captionTracks, playerData };
+}
+
+// ─── Strategy 0: YouTube innertube API with multiple client types ────────
+async function getTranscriptViaInnertube(videoId) {
+    console.log('[Transcript] Trying innertube API for', videoId);
+
+    // Try multiple YouTube client types — some are less likely to be
+    // blocked from datacenter IPs. Order: embedded player → Android → iOS → Web
+    const clients = [
+        {
+            name: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+            client: {
+                clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+                clientVersion: '2.0',
+                hl: 'en',
+            },
+            userAgent: 'Mozilla/5.0',
+        },
+        {
+            name: 'ANDROID',
+            client: {
+                clientName: 'ANDROID',
+                clientVersion: '19.09.37',
+                androidSdkVersion: 30,
+                hl: 'en',
+            },
+            userAgent: 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+        },
+        {
+            name: 'IOS',
+            client: {
+                clientName: 'IOS',
+                clientVersion: '19.09.3',
+                deviceModel: 'iPhone14,3',
+                hl: 'en',
+            },
+            userAgent: 'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)',
+        },
+        {
+            name: 'WEB',
+            client: {
+                clientName: 'WEB',
+                clientVersion: '2.20240101.00.00',
+                hl: 'en',
+            },
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        },
+    ];
+
+    for (const clientConfig of clients) {
+        try {
+            console.log(`[Transcript] Innertube: trying ${clientConfig.name} client...`);
+            const { captionTracks } = await tryInnertubeClient(videoId, clientConfig);
+
+            // Prefer English, fall back to first available
+            const enTrack = captionTracks.find(t =>
+                t.languageCode === 'en' || (t.languageCode && t.languageCode.startsWith('en'))
+            );
+            const track = enTrack || captionTracks[0];
+
+            console.log(`[Transcript] Innertube ${clientConfig.name}: using track`, track.languageCode);
+
+            // Fetch the timedtext XML
+            let captionUrl = track.baseUrl;
+            if (!captionUrl.includes('fmt=')) {
+                captionUrl += '&fmt=srv3';
+            }
+
+            const captionRes = await fetch(captionUrl);
+            if (!captionRes.ok) {
+                console.warn(`[Transcript] Innertube ${clientConfig.name}: caption XML HTTP ${captionRes.status}`);
+                continue;
+            }
+
+            const xml = await captionRes.text();
+            const segments = parseTimedTextXml(xml);
+
+            if (segments.length === 0) {
+                console.warn(`[Transcript] Innertube ${clientConfig.name}: parsed 0 segments`);
+                continue;
+            }
+
+            console.log(`[Transcript] Innertube ${clientConfig.name}: ${segments.length} segments ✓`);
+            return segments;
+        } catch (err) {
+            console.warn(`[Transcript] Innertube ${clientConfig.name} failed: ${err.message}`);
+        }
+    }
+
+    throw new TranscriptError('All innertube client types failed', 'INNERTUBE_ERROR');
+}
+
+// ─── Strategy 0b: Direct timedtext endpoint (no innertube needed) ───────
+async function getTranscriptViaDirectTimedText(videoId) {
+    console.log('[Transcript] Trying direct timedtext API for', videoId);
+
+    // Try fetching captions directly without needing innertube API first
+    const urls = [
+        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&fmt=srv3`,
+        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&kind=asr&fmt=srv3`,
+        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&fmt=srv3&tlang=en`,
+    ];
+
+    for (const url of urls) {
+        try {
+            const res = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                },
+            });
+            if (!res.ok) continue;
+
+            const xml = await res.text();
+            if (!xml || xml.length < 50) continue;
+
+            const segments = parseTimedTextXml(xml);
+            if (segments.length === 0) continue;
+
+            console.log(`[Transcript] Direct timedtext: ${segments.length} segments ✓`);
+            return segments;
+        } catch (err) {
+            console.warn(`[Transcript] Direct timedtext failed for ${url}: ${err.message}`);
+        }
+    }
+
+    throw new TranscriptError('Direct timedtext API returned no captions', 'DIRECT_TIMEDTEXT_ERROR');
 }
 
 // ─── Strategy 1: youtube-transcript npm package ────────────────────────────
@@ -360,21 +457,35 @@ async function getTranscript(videoId) {
 
     let segments = null;
     let method = '';
+    const failures = []; // Collect all strategy failure reasons for debugging
 
-    // Strategy 0: innertube API (JSON API, least likely to be blocked)
+    // Strategy 0: innertube API with multiple client types
     try {
         segments = await getTranscriptViaInnertube(videoId);
         method = 'innertube';
     } catch (err) {
+        failures.push(`innertube: ${err.message}`);
         console.warn(`[Transcript] Strategy 0 (innertube) failed: ${err.message}`);
     }
 
-    // Strategy 1: youtube-transcript package (fast, no VTT parsing)
+    // Strategy 0b: direct timedtext endpoint
+    if (!segments || segments.length === 0) {
+        try {
+            segments = await getTranscriptViaDirectTimedText(videoId);
+            method = 'direct-timedtext';
+        } catch (err) {
+            failures.push(`direct-timedtext: ${err.message}`);
+            console.warn(`[Transcript] Strategy 0b (direct timedtext) failed: ${err.message}`);
+        }
+    }
+
+    // Strategy 1: youtube-transcript package
     if (!segments || segments.length === 0) {
         try {
             segments = await getTranscriptViaPackage(videoId);
             method = 'youtube-transcript';
         } catch (err) {
+            failures.push(`youtube-transcript: ${err.message}`);
             console.warn(`[Transcript] Strategy 1 failed: ${err.message}`);
         }
     }
@@ -385,8 +496,13 @@ async function getTranscript(videoId) {
             segments = await getTranscriptViaYtDlp(videoId);
             method = 'yt-dlp';
         } catch (err) {
+            failures.push(`yt-dlp: ${err.message}`);
             console.error(`[Transcript] Strategy 2 failed: ${err.message}`);
-            throw err; // Re-throw — all strategies failed
+            // All strategies failed — throw with aggregated info
+            throw new TranscriptError(
+                `All transcript strategies failed for ${videoId}. Tried: ${failures.join(' | ')}`,
+                'ALL_STRATEGIES_FAILED'
+            );
         }
     }
 
