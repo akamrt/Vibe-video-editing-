@@ -224,11 +224,12 @@ async function getTranscriptViaYtDlp(videoId) {
     // Use cookies.txt if available; otherwise run anonymously (NOT --cookies-from-browser
     // because Chrome locks its cookie DB while it's running, causing yt-dlp to fail)
     let cookiesArg = '';
-    if (fs.existsSync(COOKIE_FILE)) {
+    // Only use cookies in development — on Render/production the file is stale or absent
+    if (process.env.NODE_ENV !== 'production' && fs.existsSync(COOKIE_FILE)) {
         console.log('[Transcript] Using cookies.txt for yt-dlp auth');
         cookiesArg = `--cookies "${COOKIE_FILE}"`;
     } else {
-        console.log('[Transcript] No cookies.txt — running yt-dlp anonymously');
+        console.log('[Transcript] Running yt-dlp anonymously (no cookies)');
     }
 
     const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';

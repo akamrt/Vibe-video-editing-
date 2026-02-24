@@ -12,6 +12,7 @@ import RemotionPreview from './components/remotion/RemotionPreview';
 import TemplateManager from './components/remotion/TemplateManager';
 import AnimatedText from './components/remotion/AnimatedText';
 import { analyzeVideoContent, transcribeAudio, performDeepAnalysis, detectPersonPosition, detectFillerWords, detectFillersFromTranscript, redetectFillerWords, redetectFillersFromTranscript, FillerDetection } from './services/geminiService';
+import { fetchTranscriptClientSide } from './services/clientTranscript';
 import FillerConfirmModal from './components/FillerConfirmModal';
 import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
 import { YoutubeImportModal } from './components/YoutubeImportModal';
@@ -1326,16 +1327,23 @@ function App() {
       let transcriptWarning = '';
 
       try {
-        console.log('[Import] Fetching transcript...');
-        const transcriptRes = await fetch(`/api/transcript?url=${encodeURIComponent(url)}&_t=${Date.now()}`);
-        console.log('[Import] Transcript response status:', transcriptRes.status);
+        // Strategy A: Fetch transcript from the user's browser (bypasses datacenter IP blocks)
+        console.log('[Import] Trying client-side transcript fetch...');
+        let transcriptData = await fetchTranscriptClientSide(url);
 
-        const transcriptData = await transcriptRes.json();
+        // Strategy B: Fall back to server-side fetch (works locally, may fail on deployed servers)
+        if (!transcriptData) {
+          console.log('[Import] Client-side failed, trying server-side...');
+          const transcriptRes = await fetch(`/api/transcript?url=${encodeURIComponent(url)}&_t=${Date.now()}`);
+          console.log('[Import] Transcript response status:', transcriptRes.status);
+          transcriptData = await transcriptRes.json();
+        }
+
         console.log('[Import] Transcript data received:', transcriptData);
 
-        if (transcriptData.error) {
-          transcriptWarning = transcriptData.error;
-          console.warn('[Import] Transcript warning from server:', transcriptData.error);
+        if ((transcriptData as any).error) {
+          transcriptWarning = (transcriptData as any).error;
+          console.warn('[Import] Transcript warning from server:', (transcriptData as any).error);
         } else {
           videoTitle = transcriptData.title || "YouTube Video";
 
