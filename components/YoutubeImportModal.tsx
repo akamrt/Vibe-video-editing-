@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ProcessingStatus } from '../types';
 
 interface YoutubeImportModalProps {
-  onImport: (url: string, download: boolean, file?: File) => void;
+  onImport: (url: string, download: boolean, file?: File, pastedTranscript?: string) => void;
   onCancel: () => void;
   status: ProcessingStatus;
 }
@@ -11,6 +11,8 @@ export const YoutubeImportModal: React.FC<YoutubeImportModalProps> = ({ onImport
   const [url, setUrl] = useState('');
   const [mode, setMode] = useState<'download' | 'manual'>('download');
   const [manualFile, setManualFile] = useState<File | null>(null);
+  const [pastedTranscript, setPastedTranscript] = useState('');
+  const [showTranscriptPaste, setShowTranscriptPaste] = useState(false);
 
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -41,7 +43,7 @@ export const YoutubeImportModal: React.FC<YoutubeImportModalProps> = ({ onImport
 
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm">
-      <div className="bg-[#1e1e1e] border border-[#333] rounded-xl p-6 w-[500px] shadow-2xl">
+      <div className="bg-[#1e1e1e] border border-[#333] rounded-xl p-6 w-[500px] shadow-2xl max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-bold mb-4 text-white">Import from YouTube</h2>
 
         <div className="mb-4">
@@ -78,7 +80,7 @@ export const YoutubeImportModal: React.FC<YoutubeImportModalProps> = ({ onImport
 
         {mode === 'download' && (
           <div className="mb-6 p-3 bg-blue-900/20 border border-blue-800 rounded text-sm text-blue-200">
-            <p>⚠️ Requires local Transcribe.io server running on port 3000.</p>
+            <p>Downloads the video from YouTube servers.</p>
             <button
               onClick={() => setShowAdvanced(!showAdvanced)}
               className="text-xs text-blue-400 underline mt-2 hover:text-blue-300"
@@ -115,6 +117,38 @@ export const YoutubeImportModal: React.FC<YoutubeImportModalProps> = ({ onImport
           </div>
         )}
 
+        {/* Paste Transcript Section */}
+        <div className="mb-4">
+          <button
+            onClick={() => setShowTranscriptPaste(!showTranscriptPaste)}
+            className="text-sm text-gray-400 hover:text-white flex items-center gap-1"
+          >
+            <span>{showTranscriptPaste ? '\u25BC' : '\u25B6'}</span>
+            <span>Paste transcript (recommended for deployed version)</span>
+          </button>
+
+          {showTranscriptPaste && (
+            <div className="mt-3 p-3 bg-[#121212] border border-[#333] rounded">
+              <p className="text-xs text-gray-500 mb-2">
+                On the YouTube video page, click <strong>"...More"</strong> below the description, then <strong>"Show transcript"</strong>.
+                Select all the transcript text and paste it here.
+              </p>
+              <textarea
+                className="w-full bg-[#0a0a0a] border border-[#333] rounded p-2 text-white text-sm font-mono focus:border-blue-500 outline-none resize-y"
+                rows={6}
+                placeholder={"0:00\nHello everyone welcome to my channel\n0:03\nToday we're going to talk about..."}
+                value={pastedTranscript}
+                onChange={e => setPastedTranscript(e.target.value)}
+              />
+              {pastedTranscript && (
+                <p className="text-xs text-green-400 mt-1">
+                  Transcript pasted ({pastedTranscript.split('\n').filter(l => l.trim()).length} lines)
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
         <div className="flex justify-end gap-3">
           <button
             onClick={onCancel}
@@ -124,7 +158,7 @@ export const YoutubeImportModal: React.FC<YoutubeImportModalProps> = ({ onImport
             Cancel
           </button>
           <button
-            onClick={() => onImport(url, mode === 'download', manualFile || undefined)}
+            onClick={() => onImport(url, mode === 'download', manualFile || undefined, pastedTranscript || undefined)}
             disabled={isDisabled}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed rounded text-white font-medium"
           >

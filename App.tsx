@@ -1317,8 +1317,68 @@ function App() {
     setProject(prev => ({ ...prev, library: [...prev.library, ...newItems] }));
   };
 
-  const handleYoutubeImport = async (url: string, download: boolean, manualFile?: File) => {
-    console.log('[Import] Starting import...', { url, download, manualFile });
+  /**
+   * Parse transcript text pasted from YouTube's "Show transcript" panel.
+   * Format: alternating timestamp lines ("0:00" or "0:00:00") and text lines.
+   */
+  const parsePastedTranscript = (text: string, videoUrl: string) => {
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    const segments: { start: number; duration: number; text: string; isKaraoke: boolean }[] = [];
+
+    // Parse timestamps: "0:00", "1:23", "1:02:30"
+    const parseTs = (ts: string): number => {
+      const parts = ts.split(':').map(Number);
+      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      if (parts.length === 2) return parts[0] * 60 + parts[1];
+      return parts[0];
+    };
+
+    const tsRegex = /^(\d{1,2}:\d{2}(?::\d{2})?)$/;
+
+    // Collect timestamp-text pairs
+    const entries: { time: number; text: string }[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const tsMatch = lines[i].match(tsRegex);
+      if (tsMatch) {
+        // Collect all text lines until the next timestamp
+        const textParts: string[] = [];
+        let j = i + 1;
+        while (j < lines.length && !lines[j].match(tsRegex)) {
+          textParts.push(lines[j]);
+          j++;
+        }
+        if (textParts.length > 0) {
+          entries.push({ time: parseTs(tsMatch[1]), text: textParts.join(' ') });
+        }
+        i = j - 1; // skip consumed lines
+      }
+    }
+
+    // Convert to segments with durations
+    for (let i = 0; i < entries.length; i++) {
+      const start = entries[i].time;
+      const nextStart = i + 1 < entries.length ? entries[i + 1].time : start + 5;
+      const duration = nextStart - start;
+      segments.push({ start, duration: Math.max(duration, 0.5), text: entries[i].text, isKaraoke: false });
+    }
+
+    if (segments.length === 0) return null;
+
+    // Extract video ID for the result
+    const vidMatch = videoUrl.match(/(?:v=|youtu\.be\/)([^"&?\/\s]{11})/);
+    console.log(`[Import] Parsed ${segments.length} segments from pasted transcript`);
+
+    return {
+      videoId: vidMatch ? vidMatch[1] : 'unknown',
+      title: 'YouTube Video',
+      trackName: 'Pasted',
+      language: 'en',
+      segments,
+    };
+  };
+
+  const handleYoutubeImport = async (url: string, download: boolean, manualFile?: File, pastedTranscript?: string) => {
+    console.log('[Import] Starting import...', { url, download, manualFile, hasPastedTranscript: !!pastedTranscript });
     setStatus(ProcessingStatus.TRANSCRIBING);
     try {
       // 1. Fetch Transcript (NON-FATAL — video still imports even if transcript fails)
@@ -1327,9 +1387,19 @@ function App() {
       let transcriptWarning = '';
 
       try {
+        let transcriptData: any = null;
+
+        // Strategy 0: Use pasted transcript if provided (most reliable — no API calls)
+        if (pastedTranscript && pastedTranscript.trim().length > 10) {
+          console.log('[Import] Using pasted transcript');
+          transcriptData = parsePastedTranscript(pastedTranscript, url);
+        }
+
         // Strategy A: Fetch transcript from the user's browser (bypasses datacenter IP blocks)
-        console.log('[Import] Trying client-side transcript fetch...');
-        let transcriptData = await fetchTranscriptClientSide(url);
+        if (!transcriptData) {
+          console.log('[Import] Trying client-side transcript fetch...');
+          transcriptData = await fetchTranscriptClientSide(url);
+        }
 
         // Strategy B: Fall back to server-side fetch (works locally, may fail on deployed servers)
         if (!transcriptData) {
