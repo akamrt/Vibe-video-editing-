@@ -1,20 +1,39 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# VibeCut AI
 
-# Run and deploy your AI Studio app
+AI-powered video editing tool that creates short-form content from YouTube videos.
 
-This contains everything you need to run your app locally.
+## 🚀 First Time? Start Here!
 
-View your app in AI Studio: https://ai.studio/apps/drive/1TDIr_iNrcPJHWkoUD1CyjjW3_aijCZlu
+**Open `SETUP_GUIDE.html`** in your browser for a visual step-by-step guide with pictures.
 
-## Run Locally
+### Quick Version:
 
-**Prerequisites:**  Node.js
+| | Windows | Mac |
+|---|---------|-----|
+| **Install** | Double-click `INSTALL.bat` | `chmod +x INSTALL.sh && ./INSTALL.sh` |
+| **Run** | Double-click `START.bat` | `./START.sh` |
 
+> **Just want to run it?** Double-click `START.bat` — it will auto-install on first run.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## 🔑 API Keys
+
+You need at least one AI API key. Get a free Gemini key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+
+Edit `.env.local` and paste your key. See `.env.example` for the format.
+
+## 📋 What This App Does
+
+1. **Import** — Paste a YouTube URL to download video + transcript
+2. **AI Shorts** — AI picks the best moments for short-form content
+3. **Edit** — Fine-tune timing, add subtitles, style effects
+4. **Export** — Export finished videos from the browser
+
+## 🔧 Troubleshooting
+
+See the **Troubleshooting** section in `SETUP_GUIDE.html`, or:
+
+| Problem | Solution |
+|---------|----------|
+| Video won't download | Export cookies from Chrome to `www.youtube.com_cookies.txt` |
+| Can't see `.env.local` | Show hidden files (Windows: View → Hidden items) |
+| "Port in use" | Close all terminal windows and retry |

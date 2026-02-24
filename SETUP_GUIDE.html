@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VibeCut AI - Setup Guide</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e8;
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        .hero {
+            background: linear-gradient(135deg, #0f0c29 0%, #1a1040 40%, #24243e 100%);
+            padding: 60px 20px;
+            text-align: center;
+            border-bottom: 1px solid rgba(130, 100, 255, 0.2);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: -50%; left: -50%;
+            width: 200%; height: 200%;
+            background: radial-gradient(circle at 50% 50%, rgba(130, 100, 255, 0.05) 0%, transparent 50%);
+            animation: pulse 8s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 1; }
+        }
+
+        .hero h1 {
+            font-size: 3rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #a78bfa, #818cf8, #67e8f9);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            position: relative;
+            margin-bottom: 10px;
+        }
+
+        .hero p {
+            font-size: 1.2rem;
+            color: #a0a0b8;
+            position: relative;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px 80px;
+        }
+
+        .os-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 40px;
+            justify-content: center;
+        }
+
+        .os-tab {
+            padding: 12px 30px;
+            border-radius: 12px;
+            border: 2px solid rgba(130, 100, 255, 0.3);
+            background: rgba(20, 20, 35, 0.8);
+            color: #a0a0b8;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .os-tab:hover {
+            border-color: rgba(130, 100, 255, 0.6);
+            background: rgba(130, 100, 255, 0.1);
+        }
+
+        .os-tab.active {
+            border-color: #818cf8;
+            background: rgba(130, 100, 255, 0.15);
+            color: #c4b5fd;
+        }
+
+        .os-content { display: none; }
+        .os-content.active { display: block; }
+
+        .step {
+            background: rgba(20, 20, 35, 0.6);
+            border: 1px solid rgba(130, 100, 255, 0.15);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 24px;
+            position: relative;
+            backdrop-filter: blur(10px);
+        }
+
+        .step-number {
+            position: absolute;
+            top: -14px;
+            left: 24px;
+            background: linear-gradient(135deg, #7c3aed, #6366f1);
+            color: white;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.9rem;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+        }
+
+        .step h3 {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 12px;
+            color: #c4b5fd;
+        }
+
+        .step p {
+            color: #b0b0c4;
+            margin-bottom: 12px;
+        }
+
+        .highlight-box {
+            background: rgba(130, 100, 255, 0.08);
+            border: 1px solid rgba(130, 100, 255, 0.2);
+            border-radius: 10px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 1.1rem;
+            color: #67e8f9;
+            text-align: center;
+            letter-spacing: 0.5px;
+        }
+
+        .note {
+            background: rgba(250, 204, 21, 0.06);
+            border: 1px solid rgba(250, 204, 21, 0.2);
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-top: 16px;
+            font-size: 0.9rem;
+            color: #fcd34d;
+        }
+
+        .note::before {
+            content: '💡 ';
+        }
+
+        .success-box {
+            background: rgba(52, 211, 153, 0.06);
+            border: 1px solid rgba(52, 211, 153, 0.2);
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-top: 16px;
+            font-size: 0.9rem;
+            color: #6ee7b7;
+        }
+
+        .success-box::before {
+            content: '✅ ';
+        }
+
+        .warning-box {
+            background: rgba(251, 146, 60, 0.06);
+            border: 1px solid rgba(251, 146, 60, 0.2);
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-top: 16px;
+            font-size: 0.9rem;
+            color: #fdba74;
+        }
+
+        .warning-box::before {
+            content: '⚠️ ';
+        }
+
+        .emoji { font-size: 1.4em; margin-right: 8px; }
+
+        h2 {
+            font-size: 1.6rem;
+            font-weight: 700;
+            margin-bottom: 24px;
+            color: #e0e0f0;
+            text-align: center;
+        }
+
+        .api-section {
+            background: rgba(20, 20, 35, 0.6);
+            border: 1px solid rgba(130, 100, 255, 0.15);
+            border-radius: 16px;
+            padding: 30px;
+            margin: 40px 0;
+        }
+
+        .api-section h3 {
+            color: #c4b5fd;
+            font-size: 1.2rem;
+            margin-bottom: 16px;
+        }
+
+        ol {
+            padding-left: 20px;
+            color: #b0b0c4;
+        }
+
+        ol li {
+            margin-bottom: 10px;
+        }
+
+        a {
+            color: #818cf8;
+            text-decoration: none;
+            border-bottom: 1px solid rgba(130, 100, 255, 0.3);
+            transition: all 0.2s;
+        }
+
+        a:hover {
+            color: #a78bfa;
+            border-bottom-color: #a78bfa;
+        }
+
+        .quick-start {
+            background: linear-gradient(135deg, rgba(52, 211, 153, 0.08), rgba(130, 100, 255, 0.08));
+            border: 2px solid rgba(52, 211, 153, 0.2);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 40px;
+            text-align: center;
+        }
+
+        .quick-start h2 {
+            color: #6ee7b7;
+            margin-bottom: 12px;
+        }
+
+        .quick-start p {
+            color: #b0b0c4;
+            font-size: 1.1rem;
+        }
+
+        .quick-start .highlight-box {
+            font-size: 1.3rem;
+            border-color: rgba(52, 211, 153, 0.3);
+            background: rgba(52, 211, 153, 0.08);
+            color: #6ee7b7;
+        }
+
+        .troubleshooting {
+            margin-top: 40px;
+        }
+
+        .troubleshooting h2 {
+            margin-bottom: 20px;
+        }
+
+        .faq {
+            background: rgba(20, 20, 35, 0.4);
+            border: 1px solid rgba(130, 100, 255, 0.1);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .faq:hover {
+            border-color: rgba(130, 100, 255, 0.3);
+        }
+
+        .faq-q {
+            font-weight: 600;
+            color: #c4b5fd;
+            margin-bottom: 8px;
+        }
+
+        .faq-a {
+            color: #a0a0b8;
+            font-size: 0.95rem;
+            display: none;
+        }
+
+        .faq.open .faq-a {
+            display: block;
+        }
+
+        .faq-q::before {
+            content: '▸ ';
+            transition: transform 0.2s;
+        }
+
+        .faq.open .faq-q::before {
+            content: '▾ ';
+        }
+
+        footer {
+            text-align: center;
+            padding: 40px 20px;
+            color: #505068;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+
+<div class="hero">
+    <h1>VibeCut AI</h1>
+    <p>Setup Guide — Get running in 2 minutes</p>
+</div>
+
+<div class="container">
+
+    <!-- QUICK START -->
+    <div class="quick-start">
+        <h2>⚡ The Short Version</h2>
+        <p>If you just want to get going, double-click this file:</p>
+        <div class="highlight-box">START.bat (Windows) &nbsp;or&nbsp; ./START.sh (Mac)</div>
+        <p style="margin-top: 12px; font-size: 0.95rem; color: #808098;">
+            It will automatically install everything needed on first run.
+        </p>
+    </div>
+
+    <!-- OS TABS -->
+    <div class="os-tabs">
+        <button class="os-tab active" onclick="showOS('windows')">🪟 Windows</button>
+        <button class="os-tab" onclick="showOS('mac')">🍎 Mac</button>
+    </div>
+
+    <!-- WINDOWS INSTRUCTIONS -->
+    <div id="windows" class="os-content active">
+        <h2>Windows Setup</h2>
+
+        <div class="step">
+            <div class="step-number">1</div>
+            <h3><span class="emoji">📁</span>Get the Files</h3>
+            <p>Download or copy the VibeCut AI folder to your computer. It doesn't matter where — your Desktop, Documents, or Downloads folder all work fine.</p>
+        </div>
+
+        <div class="step">
+            <div class="step-number">2</div>
+            <h3><span class="emoji">📦</span>Install Everything</h3>
+            <p>Open the VibeCut AI folder and find the file called:</p>
+            <div class="highlight-box">INSTALL.bat</div>
+            <p><strong>Double-click it.</strong> A black window will open and start installing things automatically.</p>
+            <div class="note">If Windows shows a blue "Windows protected your PC" popup, click <strong>"More info"</strong> then <strong>"Run anyway"</strong>. This is normal for scripts downloaded from the internet.</div>
+            <div class="note">If Node.js isn't installed, the script will try to install it for you. You may need to click "Yes" on a popup asking for permission. After Node.js installs, <strong>close the window and double-click INSTALL.bat again</strong>.</div>
+            <div class="success-box">When you see "INSTALLATION COMPLETE!", you're done with this step.</div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">3</div>
+            <h3><span class="emoji">🔑</span>Add Your API Key</h3>
+            <p>The AI features need an API key. Here's how to get one for free:</p>
+            <ol>
+                <li>Go to <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a></li>
+                <li>Sign in with your Google account</li>
+                <li>Click <strong>"Create API Key"</strong></li>
+                <li>Copy the key (it looks like a long string of letters and numbers)</li>
+                <li>In the VibeCut folder, find the file called <strong>.env.local</strong></li>
+                <li>Right-click it → <strong>Open with</strong> → <strong>Notepad</strong></li>
+                <li>Replace <code>your_gemini_api_key_here</code> with your actual key</li>
+                <li>Save the file (Ctrl + S) and close Notepad</li>
+            </ol>
+            <div class="note">Can't see the <strong>.env.local</strong> file? In File Explorer, click <strong>View</strong> at the top, then check <strong>"Hidden items"</strong>. Files starting with a dot are hidden by default.</div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">4</div>
+            <h3><span class="emoji">🚀</span>Run the App!</h3>
+            <p>Double-click this file to start VibeCut AI:</p>
+            <div class="highlight-box">START.bat</div>
+            <p>A browser window will open automatically with the app. That's it — you're ready to go!</p>
+            <div class="warning-box">To stop the app, close both command prompt windows that appeared (the main one and the minimized "VibeCut Backend" in your taskbar).</div>
+        </div>
+    </div>
+
+    <!-- MAC INSTRUCTIONS -->
+    <div id="mac" class="os-content">
+        <h2>Mac Setup</h2>
+
+        <div class="step">
+            <div class="step-number">1</div>
+            <h3><span class="emoji">📁</span>Get the Files</h3>
+            <p>Download or copy the VibeCut AI folder to your computer. Your Desktop or Documents folder works fine.</p>
+        </div>
+
+        <div class="step">
+            <div class="step-number">2</div>
+            <h3><span class="emoji">💻</span>Open Terminal</h3>
+            <p>We need to use Terminal (Mac's command line) for the next steps:</p>
+            <ol>
+                <li>Press <strong>Cmd + Space</strong> to open Spotlight Search</li>
+                <li>Type <strong>Terminal</strong></li>
+                <li>Press <strong>Enter</strong> to open it</li>
+            </ol>
+            <p>A window with a black (or white) background and a blinking cursor will appear.</p>
+        </div>
+
+        <div class="step">
+            <div class="step-number">3</div>
+            <h3><span class="emoji">📂</span>Navigate to the Folder</h3>
+            <p>In Terminal, type the following and press Enter:</p>
+            <div class="highlight-box">cd ~/Desktop/Vibe-video-editing-</div>
+            <div class="note">If you put the folder somewhere else, replace <code>~/Desktop/Vibe-video-editing-</code> with the actual path. You can also type <code>cd </code> (with a space) then <strong>drag and drop</strong> the folder into Terminal.</div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">4</div>
+            <h3><span class="emoji">📦</span>Install Everything</h3>
+            <p>Type these two commands, pressing Enter after each:</p>
+            <div class="highlight-box">chmod +x INSTALL.sh START.sh</div>
+            <div class="highlight-box">./INSTALL.sh</div>
+            <p>This will install everything automatically. It may ask for your Mac password — this is normal.</p>
+            <div class="success-box">When you see "INSTALLATION COMPLETE!", you're done with this step.</div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">5</div>
+            <h3><span class="emoji">🔑</span>Add Your API Key</h3>
+            <p>Same as Windows — get a free key from <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>.</p>
+            <p>Then in Terminal, type:</p>
+            <div class="highlight-box">nano .env.local</div>
+            <p>Replace <code>your_gemini_api_key_here</code> with your key.<br>
+            Press <strong>Ctrl + O</strong> (to save), then <strong>Enter</strong>, then <strong>Ctrl + X</strong> (to exit).</p>
+            <div class="note">Alternatively, you can open .env.local with TextEdit: <code>open -a TextEdit .env.local</code></div>
+        </div>
+
+        <div class="step">
+            <div class="step-number">6</div>
+            <h3><span class="emoji">🚀</span>Run the App!</h3>
+            <p>In Terminal, type:</p>
+            <div class="highlight-box">./START.sh</div>
+            <p>A browser window will open with the app. To stop it later, press <strong>Ctrl + C</strong> in Terminal.</p>
+        </div>
+    </div>
+
+    <!-- TROUBLESHOOTING -->
+    <div class="troubleshooting">
+        <h2>🔧 Troubleshooting</h2>
+
+        <div class="faq" onclick="this.classList.toggle('open')">
+            <div class="faq-q">The video won't download / "bot" error</div>
+            <div class="faq-a">YouTube may require browser cookies. Install the "Get cookies.txt" extension in Chrome, go to youtube.com, export cookies, and save the file as <strong>www.youtube.com_cookies.txt</strong> in the VibeCut folder.</div>
+        </div>
+
+        <div class="faq" onclick="this.classList.toggle('open')">
+            <div class="faq-q">Windows says "protected your PC" / blocks the script</div>
+            <div class="faq-a">This is Windows SmartScreen. Click <strong>"More info"</strong> then <strong>"Run anyway"</strong>. This is normal for any script not from the Microsoft Store.</div>
+        </div>
+
+        <div class="faq" onclick="this.classList.toggle('open')">
+            <div class="faq-q">The page says "localhost refused to connect"</div>
+            <div class="faq-a">The server might not have started yet. Wait 10 seconds and refresh. If it still doesn't work, close everything and double-click START.bat again.</div>
+        </div>
+
+        <div class="faq" onclick="this.classList.toggle('open')">
+            <div class="faq-q">I can't find the .env.local file</div>
+            <div class="faq-a"><strong>Windows:</strong> In File Explorer, click View → check "Hidden items".<br><strong>Mac:</strong> In Finder, press Cmd + Shift + . (period) to show hidden files.</div>
+        </div>
+
+        <div class="faq" onclick="this.classList.toggle('open')">
+            <div class="faq-q">"Port is already in use" error</div>
+            <div class="faq-a">Another app (or a previous VibeCut session) is using the port. Close all command prompt / terminal windows and try again. On Windows, you can also restart your computer.</div>
+        </div>
+
+        <div class="faq" onclick="this.classList.toggle('open')">
+            <div class="faq-q">AI features say "API key not set"</div>
+            <div class="faq-a">You need to edit the .env.local file and add your Gemini API key. See Step 3 above for instructions on getting a free key.</div>
+        </div>
+    </div>
+
+</div>
+
+<footer>
+    VibeCut AI — Made with ❤️
+</footer>
+
+<script>
+    function showOS(os) {
+        document.querySelectorAll('.os-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.os-tab').forEach(el => el.classList.remove('active'));
+        document.getElementById(os).classList.add('active');
+        event.target.classList.add('active');
+    }
+
+    // Auto-detect OS
+    if (navigator.platform.indexOf('Mac') !== -1) {
+        showOS('mac');
+    }
+</script>
+
+</body>
+</html>

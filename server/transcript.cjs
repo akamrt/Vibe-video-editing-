@@ -2,6 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const os = require('os');
+const { getYtDlpPath, getEnvWithBinPath } = require('./binpath.cjs');
+
+// Resolve yt-dlp path once at startup
+const YT_DLP = getYtDlpPath();
+const childEnv = getEnvWithBinPath();
 
 class TranscriptError extends Error {
     constructor(message, code) {
@@ -228,11 +233,11 @@ async function getTranscriptViaYtDlp(videoId) {
     }
 
     const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';
-    const cmd = `yt-dlp --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings ${cookiesArg} ${uaArgs} --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
+    const cmd = `"${YT_DLP}" --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings ${cookiesArg} ${uaArgs} --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
 
     try {
         console.log('[Transcript] Running yt-dlp...');
-        execSync(cmd, { stdio: 'pipe' });
+        execSync(cmd, { stdio: 'pipe', env: childEnv });
         console.log('[Transcript] yt-dlp finished.');
     } catch (e) {
         throw new TranscriptError(`yt-dlp failed: ${e.message}`, 'DOWNLOAD_ERROR');

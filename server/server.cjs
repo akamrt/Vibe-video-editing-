@@ -5,6 +5,12 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { extractVideoId, getTranscript } = require('./transcript.cjs');
+const { getYtDlpPath, getEnvWithBinPath } = require('./binpath.cjs');
+
+// Resolve yt-dlp path once at startup
+const YT_DLP = getYtDlpPath();
+const childEnv = getEnvWithBinPath();
+console.log(`Using yt-dlp: ${YT_DLP}`);
 
 const app = express();
 const PORT = 3001; // Changed to 3001 to match Vite proxy
@@ -47,15 +53,16 @@ app.get('/api/download', async (req, res) => {
             console.log('Using Chrome browser cookies for authentication');
         }
 
-        // Get video info first using global yt-dlp
+        // Get video info first using yt-dlp
         console.log(`Getting info for: ${videoId}`);
         const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';
-        const infoCmd = `yt-dlp --dump-single-json --no-warnings --remote-components ejs:github ${cookiesArg} ${uaArgs} "${youtubeUrl}"`;
+        const infoCmd = `"${YT_DLP}" --dump-single-json --no-warnings ${cookiesArg} ${uaArgs} "${youtubeUrl}"`;
         console.log('Running:', infoCmd);
 
         const infoJson = execSync(infoCmd, {
             encoding: 'utf8',
-            maxBuffer: 10 * 1024 * 1024
+            maxBuffer: 10 * 1024 * 1024,
+            env: childEnv
         });
         const info = JSON.parse(infoJson);
 
@@ -66,16 +73,17 @@ app.get('/api/download', async (req, res) => {
         const tempDir = os.tmpdir();
         const tempFile = path.join(tempDir, `${videoId}_${Date.now()}.mp4`);
 
-        // Download using global yt-dlp
+        // Download using yt-dlp
         console.log('Downloading to temp file:', tempFile);
 
-        const downloadCmd = `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 --remote-components ejs:github ${cookiesArg} ${uaArgs} -o "${tempFile}" "${youtubeUrl}"`;
+        const downloadCmd = `"${YT_DLP}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 ${cookiesArg} ${uaArgs} -o "${tempFile}" "${youtubeUrl}"`;
         console.log('Running:', downloadCmd);
 
         execSync(downloadCmd, {
             encoding: 'utf8',
             maxBuffer: 50 * 1024 * 1024,
-            timeout: 300000 // 5 minute timeout
+            timeout: 300000, // 5 minute timeout
+            env: childEnv
         });
 
         console.log('Download complete, streaming to client...');
@@ -157,12 +165,13 @@ app.get('/api/video-info', async (req, res) => {
         }
 
         // Get video info using yt-dlp
-        const cmd = `yt-dlp --dump-single-json --no-warnings ${cookiesArg} "${youtubeUrl}"`;
+        const cmd = `"${YT_DLP}" --dump-single-json --no-warnings ${cookiesArg} "${youtubeUrl}"`;
         console.log('Fetching video info:', cmd);
 
         const infoJson = execSync(cmd, {
             encoding: 'utf8',
-            maxBuffer: 10 * 1024 * 1024
+            maxBuffer: 10 * 1024 * 1024,
+            env: childEnv
         });
         const info = JSON.parse(infoJson);
 
