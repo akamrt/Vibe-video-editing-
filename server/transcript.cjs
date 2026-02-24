@@ -186,6 +186,89 @@ async function fetchVideoTitle(videoId) {
     return null;
 }
 
+// ─── Strategy 0: YouTube innertube API (no scraping, no yt-dlp) ─────────
+async function getTranscriptViaInnertube(videoId) {
+    console.log('[Transcript] Trying innertube API for', videoId);
+
+    // Call YouTube's internal player endpoint — a JSON API that returns
+    // video metadata including caption track URLs. Much less likely to be
+    // blocked by YouTube's bot detection than page scraping or yt-dlp.
+    const playerRes = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            videoId,
+            context: {
+                client: {
+                    clientName: 'WEB',
+                    clientVersion: '2.20240101.00.00',
+                    hl: 'en',
+                },
+            },
+        }),
+    });
+
+    if (!playerRes.ok) {
+        throw new TranscriptError(`Innertube API HTTP ${playerRes.status}`, 'INNERTUBE_ERROR');
+    }
+
+    const playerData = await playerRes.json();
+
+    // Check for playability errors
+    if (playerData?.playabilityStatus?.status !== 'OK') {
+        const reason = playerData?.playabilityStatus?.reason || 'Unknown';
+        throw new TranscriptError(`Video not playable: ${reason}`, 'NOT_PLAYABLE');
+    }
+
+    const captionTracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!captionTracks || captionTracks.length === 0) {
+        throw new TranscriptError('No caption tracks in innertube response', 'NO_CAPTIONS');
+    }
+
+    // Prefer English, fall back to first available
+    const enTrack = captionTracks.find(t =>
+        t.languageCode === 'en' || (t.languageCode && t.languageCode.startsWith('en'))
+    );
+    const track = enTrack || captionTracks[0];
+
+    console.log('[Transcript] Innertube: using track', track.languageCode, track.name?.simpleText);
+
+    // Fetch the timedtext XML
+    let captionUrl = track.baseUrl;
+    if (!captionUrl.includes('fmt=')) {
+        captionUrl += '&fmt=srv3';
+    }
+
+    const captionRes = await fetch(captionUrl);
+    if (!captionRes.ok) {
+        throw new TranscriptError(`Caption XML fetch failed: HTTP ${captionRes.status}`, 'CAPTION_FETCH_ERROR');
+    }
+
+    const xml = await captionRes.text();
+
+    // Parse <text start="..." dur="...">...</text> elements
+    const segments = [];
+    const textRegex = /<text start="([\d.]+)" dur="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g;
+    let match;
+
+    while ((match = textRegex.exec(xml)) !== null) {
+        const start = parseFloat(match[1]);
+        const duration = parseFloat(match[2]);
+        const text = decodeHtml(match[3].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+
+        if (text) {
+            segments.push({ start, duration, text, isKaraoke: false });
+        }
+    }
+
+    if (segments.length === 0) {
+        throw new TranscriptError('Innertube: parsed 0 segments from caption XML', 'EMPTY_TRANSCRIPT');
+    }
+
+    console.log(`[Transcript] Innertube: ${segments.length} segments`);
+    return segments;
+}
+
 // ─── Strategy 1: youtube-transcript npm package ────────────────────────────
 async function getTranscriptViaPackage(videoId) {
     const { YoutubeTranscript } = require('youtube-transcript');
@@ -278,22 +361,32 @@ async function getTranscript(videoId) {
     let segments = null;
     let method = '';
 
-    // Try Strategy 1 first (youtube-transcript package — fast, no VTT parsing)
+    // Strategy 0: innertube API (JSON API, least likely to be blocked)
     try {
-        segments = await getTranscriptViaPackage(videoId);
-        method = 'youtube-transcript';
+        segments = await getTranscriptViaInnertube(videoId);
+        method = 'innertube';
     } catch (err) {
-        console.warn(`[Transcript] Strategy 1 failed: ${err.message} — trying yt-dlp`);
+        console.warn(`[Transcript] Strategy 0 (innertube) failed: ${err.message}`);
     }
 
-    // Strategy 2 fallback (yt-dlp VTT download)
+    // Strategy 1: youtube-transcript package (fast, no VTT parsing)
+    if (!segments || segments.length === 0) {
+        try {
+            segments = await getTranscriptViaPackage(videoId);
+            method = 'youtube-transcript';
+        } catch (err) {
+            console.warn(`[Transcript] Strategy 1 failed: ${err.message}`);
+        }
+    }
+
+    // Strategy 2: yt-dlp VTT download (last resort)
     if (!segments || segments.length === 0) {
         try {
             segments = await getTranscriptViaYtDlp(videoId);
             method = 'yt-dlp';
         } catch (err) {
             console.error(`[Transcript] Strategy 2 failed: ${err.message}`);
-            throw err; // Re-throw — both strategies failed
+            throw err; // Re-throw — all strategies failed
         }
     }
 
