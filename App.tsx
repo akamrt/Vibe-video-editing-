@@ -20,7 +20,8 @@ import { GeneratedShort, contentDB } from './services/contentDatabase';
 import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion } from './utils/interpolation';
 import { resolveGradientStops, buildGradientCSS } from './utils/gradientUtils';
 import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
-import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes } from './services/templateTrackingService';
+import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes, detectPersonInFrame } from './services/templateTrackingService';
+import { fullScanAndCenter } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
@@ -189,6 +190,7 @@ function App() {
   const [scanSmooth, setScanSmooth] = useState(false);             // Apply Gaussian smoothing after scan
   const [scanSmoothAmount, setScanSmoothAmount] = useState(50);    // Smoothing strength 0-100
   const [scanProgress, setScanProgress] = useState('');
+  const [scanMethod, setScanMethod] = useState<'python' | 'browser' | ''>(''); // Which tracking engine is active
   const [showScanPanel, setShowScanPanel] = useState(false);
   const scanButtonRef = useRef<HTMLButtonElement>(null);
   const [fillerProgress, setFillerProgress] = useState('');
@@ -2987,48 +2989,69 @@ function App() {
       const vh = videoEl.videoHeight;
       const segment: TrackingSegment = { startTime: seg.startTime, endTime: seg.endTime };
 
-      // --- 1 Gemini call to anchor person position at frame 0 ---
-      setScanProgress('Detecting person in first frame...');
-      const firstFrameBlob = await seekAndCaptureFrame(videoEl, seg.startTime + 0.05);
-      if (!firstFrameBlob) {
-        alert('Could not capture first frame. Try again.');
-        return;
-      }
+      // Get the File object from the media library for Python tracker upload
+      const mediaItem = project.library.find(m => m.id === seg.mediaId);
+      const videoFile = mediaItem?.file || null;
 
-      const detection = await detectPersonPosition(firstFrameBlob);
-      console.log(`[ScanCenter] Gemini result:`, JSON.stringify(detection));
-
-      if (!detection.personVisible) {
-        alert(`No person detected in this clip.\n\nGemini returned: visible=false, confidence=${detection.confidence}%\n\nTry moving the playhead to a frame where the person is clearly visible, then scan again.`);
-        return;
-      }
-
-      // Convert % → pixel coords for the template tracker
-      const personPixelX = (detection.centerX / 100) * vw;
-      const personPixelY = (detection.centerY / 100) * vh;
-      setScanProgress(`Person at ${detection.centerX.toFixed(0)}% x (${detection.confidence}% conf) — template tracking...`);
-      console.log(`[ScanCenter] Person at ${detection.centerX.toFixed(1)}%x ${detection.centerY.toFixed(1)}%y conf=${detection.confidence} → pixel (${personPixelX.toFixed(0)},${personPixelY.toFixed(0)}) in ${vw}x${vh} video`);
-
-      // --- Template-track the person through every frame (0 tokens) ---
-      const { keyframes, triggerCount, frameCount } = await scanAndGenerateThresholdKeyframes(
+      // --- Try Python-enhanced full pipeline first (no API key needed) ---
+      setScanMethod('python');
+      setScanProgress('Trying Python tracker (MediaPipe + OpenCV)...');
+      const pythonResult = await fullScanAndCenter(
         videoEl,
         segment,
-        personPixelX,
-        personPixelY,
         outOfZoneThreshold,
+        videoFile,
         (progress, label) => setScanProgress(`${label} (${Math.round(progress * 100)}%)`)
       );
+
+      let keyframes: ClipKeyframe[] = [];
+      let triggerCount = 0;
+      let frameCount = 0;
+      let method = 'browser';
+
+      if (pythonResult && pythonResult.keyframes.length > 0) {
+        // Python tracker handled detection + tracking in one shot
+        keyframes = pythonResult.keyframes;
+        triggerCount = pythonResult.triggerCount;
+        frameCount = pythonResult.frameCount;
+        method = pythonResult.method;
+        console.log(`[ScanCenter] Python tracker: ${keyframes.length} keyframes, ${triggerCount} triggers, method=${method}`);
+      } else {
+        // Fall back to browser-based auto-detect tracking (no API key needed)
+        setScanMethod('browser');
+        setScanProgress('Detecting person (browser)...');
+        console.log('[ScanCenter] Python tracker unavailable, falling back to browser auto-detect');
+
+        // Detect person using skin-tone + motion analysis (no API key)
+        const detection = await detectPersonInFrame(videoEl, seg.startTime);
+        const personPixelX = detection ? detection.x : vw / 2;
+        const personPixelY = detection ? detection.y : vh * 0.4;
+        console.log(`[ScanCenter] Browser person detect: (${personPixelX.toFixed(0)}, ${personPixelY.toFixed(0)}) ${detection ? `conf=${detection.confidence.toFixed(0)}%` : '(center fallback)'}`);
+
+        setScanProgress('Tracking person (browser canvas)...');
+        const browserResult = await scanAndGenerateThresholdKeyframes(
+          videoEl, segment, personPixelX, personPixelY, outOfZoneThreshold,
+          (progress, label) => setScanProgress(`${label} (${Math.round(progress * 100)}%)`)
+        );
+        keyframes = browserResult.keyframes;
+        triggerCount = browserResult.triggerCount;
+        frameCount = browserResult.frameCount;
+        method = 'browser-autodetect';
+      }
 
       if (keyframes.length === 0) {
         alert('Scan complete — no trackable positions found. Try a different clip.');
         return;
       }
 
+      const methodLabel = method.includes('mediapipe') || method.includes('python') || method.includes('optical_flow')
+        ? 'Python (MediaPipe + OpenCV)'
+        : 'Browser (Canvas)';
       const finalKeyframes = scanSmooth ? smoothScannedKeyframes(keyframes, scanSmoothAmount) : keyframes;
       handleUpdateKeyframes(segmentId, finalKeyframes, true);
       setTransformTarget(segmentId);
       const smoothNote = scanSmooth ? `\n• Smoothed at ${scanSmoothAmount}%` : '';
-      const msg = `✅ Scan complete!\n\n• ${finalKeyframes.length} keyframes added\n• ${triggerCount} centering event${triggerCount !== 1 ? 's' : ''}\n• ${frameCount} frames scanned${smoothNote}\n\nCheck the clip's keyframe track on the timeline.`;
+      const msg = `Scan complete!\n\n• Engine: ${methodLabel}\n• ${finalKeyframes.length} keyframes added\n• ${triggerCount} centering event${triggerCount !== 1 ? 's' : ''}\n• ${frameCount} frames scanned${smoothNote}\n\nCheck the clip's keyframe track on the timeline.`;
       setScanProgress(`Done — ${keyframes.length} keyframes, ${triggerCount} centering events`);
       alert(msg);
     } catch (e) {
@@ -3037,6 +3060,7 @@ function App() {
     } finally {
       setStatus(ProcessingStatus.IDLE);
       setScanProgress('');
+      setScanMethod('');
     }
   };
 
@@ -3069,34 +3093,51 @@ function App() {
       const vw = videoEl.videoWidth;
       const vh = videoEl.videoHeight;
       const segment: TrackingSegment = { startTime: seg.startTime, endTime: seg.endTime };
+      const mediaItem = project.library.find(m => m.id === seg.mediaId);
+      const videoFile = mediaItem?.file || null;
       try {
-        // 1 Gemini call per clip to find person
-        setScanProgress(`Clip ${i + 1}/${videoSegs.length}: detecting person...`);
-        const firstBlob = await seekAndCaptureFrame(videoEl, seg.startTime + 0.05);
-        if (!firstBlob) { console.warn(`[ScanAll] Clip ${i + 1}: frame capture failed`); continue; }
-
-        const det = await detectPersonPosition(firstBlob);
-        if (!det.personVisible || det.confidence < 25) {
-          console.log(`[ScanAll] Clip ${i + 1}: no person detected, skipping`);
-          continue;
-        }
-
-        const pixelX = (det.centerX / 100) * vw;
-        const pixelY = (det.centerY / 100) * vh;
-
-        const { keyframes, triggerCount } = await scanAndGenerateThresholdKeyframes(
-          videoEl,
-          segment,
-          pixelX,
-          pixelY,
-          outOfZoneThreshold,
+        // Try Python-enhanced full pipeline first (no API key needed)
+        setScanMethod('python');
+        setScanProgress(`Clip ${i + 1}/${videoSegs.length}: trying Python tracker...`);
+        const pythonResult = await fullScanAndCenter(
+          videoEl, segment, outOfZoneThreshold, videoFile,
           (progress, label) => setScanProgress(`Clip ${i + 1}/${videoSegs.length}: ${label}`)
         );
+
+        let keyframes: ClipKeyframe[] = [];
+        let triggerCount = 0;
+        let method = 'browser';
+
+        if (pythonResult && pythonResult.keyframes.length > 0) {
+          keyframes = pythonResult.keyframes;
+          triggerCount = pythonResult.triggerCount;
+          method = pythonResult.method;
+        } else {
+          // Fall back to browser-based auto-detect tracking (no API key needed)
+          setScanMethod('browser');
+          setScanProgress(`Clip ${i + 1}/${videoSegs.length}: detecting person (browser)...`);
+          console.log(`[ScanAll] Clip ${i + 1}: Python tracker unavailable, falling back to browser auto-detect`);
+
+          // Detect person using skin-tone + motion analysis (no API key)
+          const detection = await detectPersonInFrame(videoEl, seg.startTime);
+          const personPixelX = detection ? detection.x : vw / 2;
+          const personPixelY = detection ? detection.y : vh * 0.4;
+
+          setScanProgress(`Clip ${i + 1}/${videoSegs.length}: tracking (browser canvas)...`);
+          const browserResult = await scanAndGenerateThresholdKeyframes(
+            videoEl, segment, personPixelX, personPixelY, outOfZoneThreshold,
+            (progress, label) => setScanProgress(`Clip ${i + 1}/${videoSegs.length}: ${label}`)
+          );
+          keyframes = browserResult.keyframes;
+          triggerCount = browserResult.triggerCount;
+          method = 'browser-autodetect';
+        }
+
         if (keyframes.length > 0) {
           const finalKfs = scanSmooth ? smoothScannedKeyframes(keyframes, scanSmoothAmount) : keyframes;
           handleUpdateKeyframes(seg.id, finalKfs, true);
         }
-        console.log(`[ScanAll] Clip ${i + 1}: ${triggerCount} centering events, ${keyframes.length} keyframes${scanSmooth ? ` (smoothed ${scanSmoothAmount}%)` : ''}`);
+        console.log(`[ScanAll] Clip ${i + 1}: ${triggerCount} centering events, ${keyframes.length} keyframes (${method})${scanSmooth ? ` (smoothed ${scanSmoothAmount}%)` : ''}`);
       } catch (e) {
         console.error(`[ScanAll] Clip ${i + 1} failed:`, e);
       }
@@ -3106,6 +3147,7 @@ function App() {
     await new Promise(r => setTimeout(r, 1500));
     setStatus(ProcessingStatus.IDLE);
     setScanProgress('');
+    setScanMethod('');
   };
 
   // ── Filler Word Removal ──────────────────────────────────────────
@@ -4018,8 +4060,17 @@ function App() {
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
           </svg>
           <span className="text-cyan-200 text-sm font-medium">Scan & Center:</span>
+          {scanMethod && (
+            <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
+              scanMethod === 'python'
+                ? 'bg-green-600/80 text-green-100'
+                : 'bg-yellow-600/80 text-yellow-100'
+            }`}>
+              {scanMethod === 'python' ? 'Python' : 'Browser'}
+            </span>
+          )}
           <span className="text-white text-sm flex-1">{scanProgress || 'Scanning...'}</span>
-          <span className="text-cyan-400 text-xs">0 AI tokens used for tracking</span>
+          <span className="text-cyan-400 text-xs">0 AI tokens used</span>
         </div>
       )}
 

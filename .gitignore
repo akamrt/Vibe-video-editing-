@@ -31,3 +31,12 @@ cookies.txt
 www.youtube.com_cookies.txt
 *.vtt
 bin/
+
+# Python
+__pycache__/
+*.pyc
+python/build/
+python/dist/
+python/*.spec
+.env
+.env.local

@@ -1,13 +1,18 @@
 {
   "name": "vibecut-ai",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "server": "node server/server.cjs"
+    "server": "node server/server.cjs",
+    "electron:dev": "concurrently \"vite\" \"node server/server.cjs\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "vite build && electron-builder",
+    "electron:pack": "vite build && electron-builder --dir",
+    "electron:compile": "tsc -p electron/tsconfig.json"
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
@@ -15,6 +20,7 @@
     "@remotion/player": "^4.0.419",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "multer": "^2.0.2",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "remotion": "^4.0.419",
@@ -23,7 +29,11 @@
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.1.2",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "wait-on": "^8.0.3"
   }
 }

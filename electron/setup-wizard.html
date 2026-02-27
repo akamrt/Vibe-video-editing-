@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VibeCut AI - Setup</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-app-region: drag;
+    }
+    .container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 32px 40px 24px;
+      -webkit-app-region: no-drag;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+    .subtitle {
+      font-size: 13px;
+      color: #888;
+      margin-bottom: 24px;
+    }
+    .step { display: none; flex-direction: column; flex: 1; }
+    .step.active { display: flex; }
+    label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #aaa;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    label .required { color: #f97316; font-size: 11px; }
+    label .optional { color: #555; font-size: 11px; }
+    input[type="text"], input[type="password"] {
+      width: 100%;
+      padding: 10px 12px;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #fff;
+      font-size: 13px;
+      font-family: 'SF Mono', 'Cascadia Code', monospace;
+      margin-bottom: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus { border-color: #f97316; }
+    input::placeholder { color: #444; }
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      margin-top: auto;
+      padding-top: 20px;
+    }
+    button {
+      padding: 10px 24px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn-primary {
+      background: #f97316;
+      color: #fff;
+      flex: 1;
+    }
+    .btn-primary:hover { background: #ea580c; }
+    .btn-primary:disabled { background: #555; cursor: not-allowed; }
+    .btn-secondary {
+      background: #222;
+      color: #aaa;
+      border: 1px solid #333;
+    }
+    .btn-secondary:hover { background: #2a2a2a; color: #fff; }
+    a {
+      color: #f97316;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    a:hover { text-decoration: underline; }
+    .check-list {
+      list-style: none;
+      margin: 16px 0;
+    }
+    .check-list li {
+      padding: 8px 0;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .check-list .icon {
+      width: 20px;
+      text-align: center;
+      font-size: 16px;
+    }
+    .check-list .ok { color: #22c55e; }
+    .check-list .missing { color: #ef4444; }
+    .check-list .spinner { color: #f97316; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .welcome-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    .info-text {
+      font-size: 13px;
+      color: #777;
+      margin-top: 6px;
+      line-height: 1.5;
+    }
+    .done-icon {
+      font-size: 64px;
+      text-align: center;
+      margin: 20px 0;
+    }
+    .steps-indicator {
+      display: flex;
+      gap: 6px;
+      justify-content: center;
+      margin-bottom: 20px;
+    }
+    .steps-indicator .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #333;
+      transition: background 0.2s;
+    }
+    .steps-indicator .dot.active { background: #f97316; }
+    .steps-indicator .dot.done { background: #22c55e; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="steps-indicator">
+      <div class="dot active" id="dot-0"></div>
+      <div class="dot" id="dot-1"></div>
+      <div class="dot" id="dot-2"></div>
+      <div class="dot" id="dot-3"></div>
+    </div>
+
+    <!-- Step 0: Welcome -->
+    <div class="step active" id="step-0">
+      <div class="welcome-icon">&#127916;</div>
+      <h1>Welcome to VibeCut AI</h1>
+      <p class="subtitle">AI-powered video editing, running locally on your machine.</p>
+      <p class="info-text">
+        This quick setup will get you ready in under a minute. VibeCut uses Google Gemini AI
+        (free tier available) for intelligent video editing features.
+      </p>
+      <ul class="check-list" id="binary-check">
+        <li><span class="icon spinner">&#8635;</span> Checking system components...</li>
+      </ul>
+      <div class="btn-row">
+        <button class="btn-primary" onclick="goToStep(1)">Get Started</button>
+      </div>
+    </div>
+
+    <!-- Step 1: API Keys -->
+    <div class="step" id="step-1">
+      <h1>API Keys</h1>
+      <p class="subtitle">Enter your AI service keys. Only Gemini is required (free tier available).</p>
+
+      <label>Gemini API Key <span class="required">Required</span></label>
+      <input type="password" id="gemini-key" placeholder="AIzaSy..." />
+      <p class="info-text" style="margin-top:-8px; margin-bottom:14px;">
+        Get a free key at <a id="get-key-link" href="#">aistudio.google.com/apikey</a>
+      </p>
+
+      <label>OpenAI API Key <span class="optional">Optional</span></label>
+      <input type="password" id="openai-key" placeholder="sk-..." />
+
+      <label>Kimi API Key <span class="optional">Optional</span></label>
+      <input type="password" id="kimi-key" placeholder="..." />
+
+      <label>MiniMax API Key <span class="optional">Optional</span></label>
+      <input type="password" id="minimax-key" placeholder="..." />
+
+      <div class="btn-row">
+        <button class="btn-secondary" onclick="goToStep(0)">Back</button>
+        <button class="btn-primary" id="save-keys-btn" onclick="saveKeys()">Save &amp; Continue</button>
+      </div>
+    </div>
+
+    <!-- Step 2: Binary Check -->
+    <div class="step" id="step-2">
+      <h1>System Components</h1>
+      <p class="subtitle">Checking required tools...</p>
+      <ul class="check-list" id="binary-detail-check">
+        <li><span class="icon spinner">&#8635;</span> Checking...</li>
+      </ul>
+      <p class="info-text" id="binary-note"></p>
+      <div class="btn-row">
+        <button class="btn-secondary" onclick="goToStep(1)">Back</button>
+        <button class="btn-primary" id="continue-btn" onclick="goToStep(3)">Continue</button>
+      </div>
+    </div>
+
+    <!-- Step 3: Done -->
+    <div class="step" id="step-3">
+      <div class="done-icon">&#9989;</div>
+      <h1 style="text-align:center;">You're all set!</h1>
+      <p class="subtitle" style="text-align:center;">VibeCut AI is ready to launch.</p>
+      <p class="info-text" style="text-align:center;">
+        Import a YouTube video or drag a local file to start editing.
+      </p>
+      <div class="btn-row">
+        <button class="btn-primary" onclick="launchApp()" id="launch-btn">Launch VibeCut AI</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentStep = 0;
+
+    function goToStep(n) {
+      document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+      document.getElementById('step-' + n).classList.add('active');
+
+      for (let i = 0; i < 4; i++) {
+        const dot = document.getElementById('dot-' + i);
+        dot.className = 'dot';
+        if (i < n) dot.className = 'dot done';
+        if (i === n) dot.className = 'dot active';
+      }
+
+      currentStep = n;
+
+      if (n === 0) checkBinaries();
+      if (n === 2) checkBinariesDetailed();
+    }
+
+    async function checkBinaries() {
+      const list = document.getElementById('binary-check');
+      try {
+        const bins = await window.electronAPI.checkBinaries();
+        let html = '';
+        html += `<li><span class="icon ${bins.ytdlp ? 'ok' : 'missing'}">${bins.ytdlp ? '&#10003;' : '&#10007;'}</span> yt-dlp (video download)</li>`;
+        html += `<li><span class="icon ${bins.ffmpeg ? 'ok' : 'missing'}">${bins.ffmpeg ? '&#10003;' : '&#10007;'}</span> ffmpeg (video processing)</li>`;
+        html += `<li><span class="icon ${bins.pythonTracker ? 'ok' : 'missing'}">${bins.pythonTracker ? '&#10003;' : '&#10007;'}</span> Enhanced tracker (person tracking)</li>`;
+        list.innerHTML = html;
+      } catch (e) {
+        list.innerHTML = '<li><span class="icon missing">&#10007;</span> Could not check components</li>';
+      }
+    }
+
+    async function checkBinariesDetailed() {
+      const list = document.getElementById('binary-detail-check');
+      const note = document.getElementById('binary-note');
+      try {
+        const bins = await window.electronAPI.checkBinaries();
+        let html = '';
+        html += `<li><span class="icon ${bins.ytdlp ? 'ok' : 'missing'}">${bins.ytdlp ? '&#10003;' : '&#10007;'}</span> yt-dlp ${bins.ytdlp ? '(installed)' : '(not found - YouTube import will be unavailable)'}</li>`;
+        html += `<li><span class="icon ${bins.ffmpeg ? 'ok' : 'missing'}">${bins.ffmpeg ? '&#10003;' : '&#10007;'}</span> ffmpeg ${bins.ffmpeg ? '(installed)' : '(not found - some features limited)'}</li>`;
+        html += `<li><span class="icon ${bins.pythonTracker ? 'ok' : 'missing'}">${bins.pythonTracker ? '&#10003;' : '&#10007;'}</span> Enhanced tracker ${bins.pythonTracker ? '(installed)' : '(not found - using browser-based tracking)'}</li>`;
+        list.innerHTML = html;
+
+        const missing = [];
+        if (!bins.ffmpeg) missing.push('ffmpeg');
+        if (!bins.ytdlp) missing.push('yt-dlp');
+        if (missing.length > 0) {
+          note.textContent = `Missing components (${missing.join(', ')}) can be installed later via the Settings panel. The app will work with reduced functionality.`;
+        } else if (!bins.pythonTracker) {
+          note.textContent = 'The enhanced Python tracker is optional. Browser-based tracking will be used as a fallback.';
+        } else {
+          note.textContent = 'All components are installed and ready!';
+        }
+      } catch (e) {
+        list.innerHTML = '<li><span class="icon missing">&#10007;</span> Error checking components</li>';
+      }
+    }
+
+    async function saveKeys() {
+      const geminiKey = document.getElementById('gemini-key').value.trim();
+      if (!geminiKey) {
+        document.getElementById('gemini-key').style.borderColor = '#ef4444';
+        return;
+      }
+
+      const keys = {
+        GEMINI_API_KEY: geminiKey,
+      };
+
+      const openai = document.getElementById('openai-key').value.trim();
+      const kimi = document.getElementById('kimi-key').value.trim();
+      const minimax = document.getElementById('minimax-key').value.trim();
+      if (openai) keys.OPENAI_API_KEY = openai;
+      if (kimi) keys.KIMI_API_KEY = kimi;
+      if (minimax) keys.MINIMAX_API_KEY = minimax;
+
+      const btn = document.getElementById('save-keys-btn');
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+
+      try {
+        await window.electronAPI.saveApiKeys(keys);
+        goToStep(2);
+      } catch (e) {
+        alert('Failed to save API keys: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Save & Continue';
+      }
+    }
+
+    async function launchApp() {
+      const btn = document.getElementById('launch-btn');
+      btn.disabled = true;
+      btn.textContent = 'Starting...';
+      try {
+        await window.electronAPI.completeSetup();
+      } catch (e) {
+        alert('Failed to launch: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Launch VibeCut AI';
+      }
+    }
+
+    // Wire up the "get API key" link
+    document.getElementById('get-key-link').addEventListener('click', (e) => {
+      e.preventDefault();
+      window.electronAPI.openExternal('https://aistudio.google.com/apikey');
+    });
+
+    // Initial check
+    checkBinaries();
+  </script>
+</body>
+</html>
