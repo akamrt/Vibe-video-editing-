@@ -394,14 +394,8 @@
 
         <div class="step">
             <div class="step-number">1</div>
-            <h3><span class="emoji">📁</span>Get the Files</h3>
-            <p>Download or copy the VibeCut AI folder to your computer. Your Desktop or Documents folder works fine.</p>
-        </div>
-
-        <div class="step">
-            <div class="step-number">2</div>
             <h3><span class="emoji">💻</span>Open Terminal</h3>
-            <p>We need to use Terminal (Mac's command line) for the next steps:</p>
+            <p>We need to use Terminal (Mac's command line) for all the steps:</p>
             <ol>
                 <li>Press <strong>Cmd + Space</strong> to open Spotlight Search</li>
                 <li>Type <strong>Terminal</strong></li>
@@ -411,25 +405,36 @@
         </div>
 
         <div class="step">
-            <div class="step-number">3</div>
-            <h3><span class="emoji">📂</span>Navigate to the Folder</h3>
-            <p>In Terminal, type the following and press Enter:</p>
-            <div class="highlight-box">cd ~/Desktop/Vibe-video-editing-</div>
-            <div class="note">If you put the folder somewhere else, replace <code>~/Desktop/Vibe-video-editing-</code> with the actual path. You can also type <code>cd </code> (with a space) then <strong>drag and drop</strong> the folder into Terminal.</div>
+            <div class="step-number">2</div>
+            <h3><span class="emoji">📁</span>Get the Files</h3>
+            <p><strong>Option A — Clone with Git (recommended):</strong></p>
+            <p>Copy and paste this into Terminal, then press Enter:</p>
+            <div class="highlight-box">git clone https://github.com/akamrt/Vibe-video-editing-.git && cd Vibe-video-editing-</div>
+            <div class="note">If Terminal says "git" is not found, it will offer to install the Xcode Command Line Tools. Click <strong>Install</strong>, wait for it to finish, then try the command again.</div>
+            <p style="margin-top: 16px;"><strong>Option B — From a copied folder:</strong></p>
+            <p>If someone gave you the folder directly, type <code>cd </code> (with a space after it) then <strong>drag and drop</strong> the folder from Finder into Terminal, and press Enter.</p>
         </div>
 
         <div class="step">
-            <div class="step-number">4</div>
+            <div class="step-number">3</div>
             <h3><span class="emoji">📦</span>Install Everything</h3>
             <p>Type these two commands, pressing Enter after each:</p>
             <div class="highlight-box">chmod +x INSTALL.sh START.sh</div>
             <div class="highlight-box">./INSTALL.sh</div>
             <p>This will install everything automatically. It may ask for your Mac password — this is normal.</p>
+            <p>The installer will:</p>
+            <ol>
+                <li>Install Node.js (via Homebrew) if you don't have it</li>
+                <li>Download all app dependencies</li>
+                <li>Download yt-dlp and ffmpeg (for video processing)</li>
+                <li>Build the Python AI tracker (if Python is available — optional)</li>
+                <li>Create the API key config file</li>
+            </ol>
             <div class="success-box">When you see "INSTALLATION COMPLETE!", you're done with this step.</div>
         </div>
 
         <div class="step">
-            <div class="step-number">5</div>
+            <div class="step-number">4</div>
             <h3><span class="emoji">🔑</span>Add Your API Key</h3>
             <p>Same as Windows — get a free key from <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>.</p>
             <p>Then in Terminal, type:</p>
@@ -440,12 +445,54 @@
         </div>
 
         <div class="step">
-            <div class="step-number">6</div>
+            <div class="step-number">5</div>
             <h3><span class="emoji">🚀</span>Run the App!</h3>
             <p>In Terminal, type:</p>
             <div class="highlight-box">./START.sh</div>
             <p>A browser window will open with the app. To stop it later, press <strong>Ctrl + C</strong> in Terminal.</p>
         </div>
+    </div>
+
+    <!-- UPDATING -->
+    <div class="api-section" style="margin-top: 50px;">
+        <h3><span class="emoji">🔄</span>How to Get Updates</h3>
+        <p style="color: #b0b0c4; margin-bottom: 16px;">
+            When there's a new version, updating takes about 30 seconds. Make sure the app is stopped first, then:
+        </p>
+
+        <div class="os-tabs" style="margin-bottom: 20px;">
+            <button class="os-tab update-tab active" onclick="showUpdateOS('update-windows')">🪟 Windows</button>
+            <button class="os-tab update-tab" onclick="showUpdateOS('update-mac')">🍎 Mac</button>
+        </div>
+
+        <div id="update-windows" class="update-content" style="display: block;">
+            <p style="color: #b0b0c4; margin-bottom: 12px;"><strong>If you installed using Git:</strong></p>
+            <ol style="margin-bottom: 16px;">
+                <li>Open the VibeCut AI folder</li>
+                <li>Click in the address bar at the top of File Explorer, type <strong>cmd</strong>, and press Enter</li>
+                <li>A black command prompt window will open. Type this and press Enter:</li>
+            </ol>
+            <div class="highlight-box">git pull && INSTALL.bat</div>
+            <p style="color: #b0b0c4; margin-top: 16px;"><strong>If you received the folder as a copy:</strong></p>
+            <p style="color: #a0a0b8;">Ask the person who gave it to you for the updated folder, and replace your old one. Your <code>.env.local</code> file (with your API key) won't be in the new copy, so either copy it over from the old folder, or set it up again.</p>
+        </div>
+
+        <div id="update-mac" class="update-content" style="display: none;">
+            <p style="color: #b0b0c4; margin-bottom: 12px;"><strong>If you installed using Git (recommended method):</strong></p>
+            <ol style="margin-bottom: 12px;">
+                <li>Open Terminal (<strong>Cmd + Space</strong>, type "Terminal", press Enter)</li>
+                <li>Go to your VibeCut folder. If you put it on the Desktop:</li>
+            </ol>
+            <div class="highlight-box">cd ~/Desktop/Vibe-video-editing-</div>
+            <p style="color: #b0b0c4; margin-top: 12px;">Then run:</p>
+            <div class="highlight-box">git pull && ./INSTALL.sh</div>
+            <div class="success-box">That's it! <code>git pull</code> downloads the latest changes, and <code>INSTALL.sh</code> handles any new dependencies. Your API key and settings are kept.</div>
+
+            <p style="color: #b0b0c4; margin-top: 16px;"><strong>If you received the folder as a copy:</strong></p>
+            <p style="color: #a0a0b8;">Ask the person who gave it to you for the updated folder. Copy your <code>.env.local</code> file from the old folder to the new one so you don't have to set up your API key again.</p>
+        </div>
+
+        <div class="note" style="margin-top: 20px;">Your API key, settings, and any saved projects are never affected by updates — only the app code gets updated.</div>
     </div>
 
     <!-- TROUBLESHOOTING -->
@@ -497,9 +544,17 @@
         event.target.classList.add('active');
     }
 
+    function showUpdateOS(id) {
+        document.querySelectorAll('.update-content').forEach(el => el.style.display = 'none');
+        document.querySelectorAll('.update-tab').forEach(el => el.classList.remove('active'));
+        document.getElementById(id).style.display = 'block';
+        event.target.classList.add('active');
+    }
+
     // Auto-detect OS
     if (navigator.platform.indexOf('Mac') !== -1) {
         showOS('mac');
+        showUpdateOS('update-mac');
     }
 </script>
 

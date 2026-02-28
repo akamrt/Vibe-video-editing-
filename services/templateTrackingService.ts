@@ -267,6 +267,128 @@ function findGoodFeatures(
     return candidates;
 }
 
+// --- Browser-based Person Detection (no API key) ---
+
+/**
+ * Detect the most likely person region in a video frame using:
+ * 1. Skin-tone pixel density (works for most skin tones in YCbCr space)
+ * 2. Motion between two frames (person usually moves, background is static)
+ * 3. Edge density (person area has more texture than plain backgrounds)
+ *
+ * Returns estimated person center in pixel coordinates, or null if no confident detection.
+ * This replaces the Gemini API call for the browser fallback path.
+ */
+export async function detectPersonInFrame(
+    videoElement: HTMLVideoElement,
+    startTime: number,
+): Promise<{ x: number; y: number; confidence: number } | null> {
+    const vw = videoElement.videoWidth;
+    const vh = videoElement.videoHeight;
+    if (vw === 0 || vh === 0) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = vw;
+    canvas.height = vh;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+
+    // Draw first frame
+    await seekAndDraw(videoElement, ctx, startTime + 0.05);
+    const frame1 = ctx.getImageData(0, 0, vw, vh);
+
+    // Draw second frame (0.3s later for motion detection)
+    await seekAndDraw(videoElement, ctx, startTime + 0.35);
+    const frame2 = ctx.getImageData(0, 0, vw, vh);
+
+    // Divide frame into a grid of cells and score each cell
+    const CELL = 64;
+    const cols = Math.floor(vw / CELL);
+    const rows = Math.floor(vh / CELL);
+
+    const scores: { col: number; row: number; skinScore: number; motionScore: number; edgeScore: number; total: number }[] = [];
+
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            let skinPixels = 0;
+            let motionPixels = 0;
+            let edgePixels = 0;
+            let totalPixels = 0;
+
+            for (let y = r * CELL; y < (r + 1) * CELL && y < vh; y += 2) {
+                for (let x = c * CELL; x < (c + 1) * CELL && x < vw; x += 2) {
+                    const i = (y * vw + x) * 4;
+                    const r1 = frame1.data[i], g1 = frame1.data[i + 1], b1 = frame1.data[i + 2];
+                    const r2 = frame2.data[i], g2 = frame2.data[i + 1], b2 = frame2.data[i + 2];
+
+                    totalPixels++;
+
+                    // Skin-tone detection in YCbCr-like space
+                    // Works for diverse skin tones
+                    const y_lum = 0.299 * r1 + 0.587 * g1 + 0.114 * b1;
+                    const cb = 128 - 0.169 * r1 - 0.331 * g1 + 0.500 * b1;
+                    const cr = 128 + 0.500 * r1 - 0.419 * g1 - 0.081 * b1;
+                    if (y_lum > 40 && y_lum < 240 && cb > 77 && cb < 127 && cr > 133 && cr < 173) {
+                        skinPixels++;
+                    }
+
+                    // Motion detection
+                    const diff = Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
+                    if (diff > 30) motionPixels++;
+
+                    // Edge detection (horizontal gradient)
+                    if (x + 2 < (c + 1) * CELL && x + 2 < vw) {
+                        const j = (y * vw + x + 2) * 4;
+                        const edgeDiff = Math.abs(r1 - frame1.data[j]) + Math.abs(g1 - frame1.data[j + 1]) + Math.abs(b1 - frame1.data[j + 2]);
+                        if (edgeDiff > 40) edgePixels++;
+                    }
+                }
+            }
+
+            const skinScore = skinPixels / totalPixels;
+            const motionScore = motionPixels / totalPixels;
+            const edgeScore = edgePixels / totalPixels;
+
+            // Combined score: skin is strongest signal, motion and edges boost it
+            // Bias toward upper-center (where people usually are in talking-head videos)
+            const centerBias = 1.0 - 0.3 * Math.abs((c + 0.5) / cols - 0.5) * 2; // mild horizontal center bias
+            const upperBias = r < rows * 0.7 ? 1.0 : 0.7; // mild upper bias
+
+            const total = (skinScore * 3.0 + motionScore * 1.5 + edgeScore * 0.5) * centerBias * upperBias;
+            scores.push({ col: c, row: r, skinScore, motionScore, edgeScore, total });
+        }
+    }
+
+    // Find the best cluster of high-scoring cells (not just single best cell)
+    scores.sort((a, b) => b.total - a.total);
+
+    if (scores.length === 0 || scores[0].total < 0.05) {
+        console.log('[PersonDetect] No confident detection — scores too low');
+        return null;
+    }
+
+    // Take top 20% of cells and compute weighted centroid
+    const topN = Math.max(3, Math.floor(scores.length * 0.15));
+    const topCells = scores.slice(0, topN);
+    let weightedX = 0, weightedY = 0, weightSum = 0;
+    for (const cell of topCells) {
+        const cx = (cell.col + 0.5) * CELL;
+        const cy = (cell.row + 0.5) * CELL;
+        weightedX += cx * cell.total;
+        weightedY += cy * cell.total;
+        weightSum += cell.total;
+    }
+
+    if (weightSum === 0) return null;
+
+    const personX = weightedX / weightSum;
+    const personY = weightedY / weightSum;
+    const confidence = Math.min(100, scores[0].total * 200);
+
+    console.log(`[PersonDetect] Browser detection: (${personX.toFixed(0)}, ${personY.toFixed(0)}) px, confidence=${confidence.toFixed(0)}%, skin=${(scores[0].skinScore * 100).toFixed(0)}%, motion=${(scores[0].motionScore * 100).toFixed(0)}%`);
+
+    return { x: personX, y: personY, confidence };
+}
+
 // --- Seek-based Frame Extraction ---
 
 /**

@@ -1,32 +1,45 @@
 /**
- * Resolve paths for yt-dlp and ffmpeg binaries.
- * Prefers local bin/ copies, falls back to global PATH.
+ * Resolve paths for yt-dlp, ffmpeg, and vibecut-tracker binaries.
+ * Prefers Electron resources, then local bin/ copies, then global PATH.
  */
 const path = require('path');
 const fs = require('fs');
 const { execSync } = require('child_process');
-
-const BIN_DIR = path.join(__dirname, '..', 'bin');
 
 function isWindows() {
     return process.platform === 'win32';
 }
 
 /**
- * Find the path to yt-dlp binary.
- * Priority: bin/yt-dlp(.exe) → global yt-dlp
+ * Get the bin directory, checking Electron resources first, then local bin/.
  */
-function getYtDlpPath() {
+function getEffectiveBinDir() {
+    // Electron packaged app: binaries are in resources/bin/
+    if (process.resourcesPath) {
+        const electronBin = path.join(process.resourcesPath, 'bin');
+        if (fs.existsSync(electronBin)) return electronBin;
+    }
+    // Dev mode / non-Electron: use local bin/
+    return path.join(__dirname, '..', 'bin');
+}
+
+const BIN_DIR = getEffectiveBinDir();
+
+/**
+ * Generic binary resolver.
+ * Priority: BIN_DIR (Electron resources or local bin/) → global PATH
+ */
+function resolveBinary(name) {
     const ext = isWindows() ? '.exe' : '';
-    const localPath = path.join(BIN_DIR, `yt-dlp${ext}`);
+    const localPath = path.join(BIN_DIR, `${name}${ext}`);
 
     if (fs.existsSync(localPath)) {
         return localPath;
     }
 
-    // Check global
+    // Check global PATH
     try {
-        const cmd = isWindows() ? 'where yt-dlp' : 'which yt-dlp';
+        const cmd = isWindows() ? `where ${name}` : `which ${name}`;
         const result = execSync(cmd, { encoding: 'utf8', stdio: 'pipe' }).trim().split('\n')[0].trim();
         if (result) return result;
     } catch (e) { /* not found */ }
@@ -36,25 +49,36 @@ function getYtDlpPath() {
 }
 
 /**
+ * Find the path to yt-dlp binary.
+ */
+function getYtDlpPath() {
+    return resolveBinary('yt-dlp');
+}
+
+/**
  * Find the path to ffmpeg binary.
- * Priority: bin/ffmpeg(.exe) → global ffmpeg
  */
 function getFfmpegPath() {
-    const ext = isWindows() ? '.exe' : '';
-    const localPath = path.join(BIN_DIR, `ffmpeg${ext}`);
+    return resolveBinary('ffmpeg');
+}
 
-    if (fs.existsSync(localPath)) {
-        return localPath;
+/**
+ * Find the path to the vibecut-tracker Python executable.
+ * Returns null if not installed (frontend should fall back to browser tracking).
+ */
+function getPythonTrackerPath() {
+    const ext = isWindows() ? '.exe' : '';
+    const localPath = path.join(BIN_DIR, `vibecut-tracker${ext}`);
+
+    if (fs.existsSync(localPath)) return localPath;
+
+    // Also check the other bin dir (if Electron, check local; if local, check Electron)
+    if (process.resourcesPath) {
+        const devPath = path.join(__dirname, '..', 'bin', `vibecut-tracker${ext}`);
+        if (fs.existsSync(devPath)) return devPath;
     }
 
-    // Check global
-    try {
-        const cmd = isWindows() ? 'where ffmpeg' : 'which ffmpeg';
-        const result = execSync(cmd, { encoding: 'utf8', stdio: 'pipe' }).trim().split('\n')[0].trim();
-        if (result) return result;
-    } catch (e) { /* not found */ }
-
-    return localPath;
+    return null;
 }
 
 /**
@@ -78,6 +102,7 @@ function getEnvWithBinPath() {
 module.exports = {
     getYtDlpPath,
     getFfmpegPath,
+    getPythonTrackerPath,
     getBinDir,
     getEnvWithBinPath
 };

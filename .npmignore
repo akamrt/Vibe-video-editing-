@@ -1,0 +1,39 @@
+# .npmignore - used by electron-builder instead of .gitignore
+# This allows dist/ and electron/*.js to be included in the package
+
+# Source code not needed at runtime
+python/
+*.ts
+!*.d.ts
+*.tsx
+*.map
+
+# Build tooling and config
+.claude/
+.vscode/
+.git/
+.gitignore
+.npmignore
+electron-builder.yml
+tsconfig.json
+electron/tsconfig.json
+vite.config.ts
+
+# Binaries are in extraResources, not in the asar
+bin/
+
+# Dev/install files
+INSTALL.bat
+INSTALL.sh
+release/
+.env
+.env.local
+*.local
+
+# Misc
+screenshots/
+temp_downloads/
+cookies.txt
+*.vtt
+__pycache__/
+*.pyc

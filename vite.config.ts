@@ -16,6 +16,12 @@ export default defineConfig(({ mode }) => {
         }
       }
     },
+    build: {
+      outDir: 'dist',
+      // In Electron production, the Express server serves static files
+      // and proxies are not needed. The frontend uses relative /api/ paths
+      // which the Express server handles directly.
+    },
     plugins: [react()],
     define: {
       'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),

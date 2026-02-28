@@ -1,7 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx vite build:*)",
+      "Bash(timeout:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(taskkill:*)",
+      "Bash(node:*)",
+      "WebFetch(domain:github.com)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npx vite --version)",
+      "Bash(git cherry-pick 6e39df5^..4ed6f6b --no-commit)",
+      "Bash(git add -A)",
+      "Bash(git commit:*)"
     ]
   }
 }

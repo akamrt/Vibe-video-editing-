@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { extractVideoId, getTranscript } = require('./transcript.cjs');
-const { getYtDlpPath, getEnvWithBinPath } = require('./binpath.cjs');
+const { getYtDlpPath, getPythonTrackerPath, getEnvWithBinPath } = require('./binpath.cjs');
 
 // Resolve yt-dlp path once at startup
 const YT_DLP = getYtDlpPath();
@@ -16,8 +16,17 @@ const app = express();
 const PORT = 3001; // Changed to 3001 to match Vite proxy
 
 app.use(cors());
-app.use(express.static('public'));
 app.use(express.json({ limit: '10mb' }));
+
+// In Electron production mode, serve the built frontend from dist/
+const isElectron = process.env.VIBECUT_IS_ELECTRON === '1';
+const distPath = path.join(__dirname, '..', 'dist');
+if (isElectron && fs.existsSync(distPath)) {
+    console.log('[Server] Electron mode: serving static files from dist/');
+    app.use(express.static(distPath));
+} else {
+    app.use(express.static('public'));
+}
 
 // Root route to confirm server status
 app.get('/', (req, res) => {
@@ -254,20 +263,31 @@ app.post('/api/update-cookies', (req, res) => {
 // ==================== AI Endpoints ====================
 
 // Load .env.local manually since we don't have dotenv
+// In Electron, check VIBECUT_ENV_PATH (userData) first, then project root
 try {
-    const envPath = path.join(__dirname, '..', '.env.local');
-    if (fs.existsSync(envPath)) {
-        const envConfig = fs.readFileSync(envPath, 'utf8');
-        envConfig.split('\n').forEach(line => {
-            const match = line.match(/^([^=]+)=(.*)$/);
-            if (match) {
-                const key = match[1].trim();
-                const value = match[2].trim().replace(/^["']|["']$/g, ''); // Remove quotes
-                process.env[key] = value;
-            }
-        });
-        console.log('Loaded environment variables from .env.local');
+    const envPaths = [
+        process.env.VIBECUT_ENV_PATH,           // Electron userData path
+        path.join(__dirname, '..', '.env.local') // Project root
+    ].filter(Boolean);
+
+    let loaded = false;
+    for (const envPath of envPaths) {
+        if (fs.existsSync(envPath)) {
+            const envConfig = fs.readFileSync(envPath, 'utf8');
+            envConfig.split('\n').forEach(line => {
+                const match = line.match(/^([^=]+)=(.*)$/);
+                if (match) {
+                    const key = match[1].trim();
+                    const value = match[2].trim().replace(/^["']|["']$/g, '');
+                    process.env[key] = value;
+                }
+            });
+            console.log(`Loaded environment variables from ${envPath}`);
+            loaded = true;
+            break;
+        }
     }
+    if (!loaded) console.warn('.env.local not found in any location');
 } catch (e) {
     console.warn('Failed to load .env.local:', e.message);
 }
@@ -920,6 +940,231 @@ Rules:
     }
 });
 
+// ==================== Python Tracking Endpoints ====================
+
+// Multer for handling video file uploads for Python tracking
+const multer = require('multer');
+const trackingUploadDir = path.join(os.tmpdir(), 'vibecut-tracking');
+if (!fs.existsSync(trackingUploadDir)) fs.mkdirSync(trackingUploadDir, { recursive: true });
+
+const trackingUpload = multer({
+    storage: multer.diskStorage({
+        destination: trackingUploadDir,
+        filename: (req, file, cb) => {
+            const ext = path.extname(file.originalname) || '.mp4';
+            cb(null, `track_${Date.now()}${ext}`);
+        },
+    }),
+    limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB max
+});
+
+// Map of uploaded file IDs -> paths for tracking
+const trackingFiles = new Map();
+
+// Clean up old tracking files (older than 1 hour)
+setInterval(() => {
+    const cutoff = Date.now() - 3600000;
+    for (const [id, info] of trackingFiles) {
+        if (info.uploadedAt < cutoff) {
+            try { fs.unlinkSync(info.path); } catch {}
+            trackingFiles.delete(id);
+        }
+    }
+}, 600000); // Check every 10 minutes
+
+// Upload a video file for tracking
+app.post('/api/tracking/upload', trackingUpload.single('video'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ success: false, error: 'No video file provided' });
+    }
+    const fileId = `track_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    trackingFiles.set(fileId, { path: req.file.path, uploadedAt: Date.now() });
+    console.log(`[Tracking] Video uploaded: ${fileId} -> ${req.file.path} (${(req.file.size / 1024 / 1024).toFixed(1)}MB)`);
+    res.json({ success: true, fileId });
+});
+
+// Check if Python tracker is available
+app.get('/api/tracking/capabilities', (req, res) => {
+    const trackerPath = getPythonTrackerPath();
+    if (!trackerPath) {
+        return res.json({ success: true, available: false, reason: 'vibecut-tracker not installed' });
+    }
+    // Optionally query the tracker for its capabilities
+    try {
+        const child = spawn(trackerPath, [], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
+        child.stdin.write(JSON.stringify({ command: 'capabilities' }));
+        child.stdin.end();
+
+        let stdout = '';
+        child.stdout.on('data', d => stdout += d);
+        child.on('close', (code) => {
+            if (code !== 0) {
+                return res.json({ success: true, available: true, capabilities: {} });
+            }
+            try {
+                const caps = JSON.parse(stdout);
+                res.json({ success: true, available: true, capabilities: caps });
+            } catch {
+                res.json({ success: true, available: true, capabilities: {} });
+            }
+        });
+        child.on('error', () => {
+            res.json({ success: true, available: true, capabilities: {} });
+        });
+    } catch {
+        res.json({ success: true, available: false, reason: 'Failed to run tracker' });
+    }
+});
+
+// Python-enhanced tracking endpoint
+app.post('/api/tracking/analyze', async (req, res) => {
+    const trackerPath = getPythonTrackerPath();
+    if (!trackerPath) {
+        return res.status(501).json({ success: false, fallback: true, error: 'Python tracker not installed' });
+    }
+
+    const { fileId, startTime, endTime, mode, options, sampleInterval } = req.body;
+
+    // Look up the uploaded file
+    const fileInfo = fileId ? trackingFiles.get(fileId) : null;
+    if (!fileInfo || !fs.existsSync(fileInfo.path)) {
+        return res.status(400).json({ success: false, fallback: true, error: 'Video file not found. Upload via /api/tracking/upload first.' });
+    }
+
+    const videoPath = fileInfo.path;
+
+    const request = JSON.stringify({
+        command: 'track',
+        videoPath,
+        startTime: startTime || 0,
+        endTime: endTime || null,
+        sampleInterval: sampleInterval || 0.1,
+        mode: mode || 'person_center',
+        options: options || {},
+    });
+
+    console.log(`[Tracking] Running Python tracker: ${trackerPath}`);
+    console.log(`[Tracking] Video: ${videoPath}, Time: ${startTime}-${endTime}, Mode: ${mode}`);
+
+    try {
+        const child = spawn(trackerPath, [], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 300000, // 5 minute timeout
+            env: { ...process.env },
+        });
+
+        child.stdin.write(request);
+        child.stdin.end();
+
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', d => stdout += d);
+        child.stderr.on('data', d => {
+            const chunk = d.toString();
+            stderr += chunk;
+            // Log progress updates and errors from Python
+            for (const line of chunk.split('\n').filter(l => l.trim())) {
+                try {
+                    const progress = JSON.parse(line);
+                    if (progress.progress !== undefined) {
+                        console.log(`[Tracking] Progress: ${Math.round(progress.progress * 100)}% - ${progress.label || ''}`);
+                    }
+                } catch {
+                    // Non-JSON stderr = Python error/traceback
+                    console.log(`[Tracking] Python: ${line}`);
+                }
+            }
+        });
+
+        child.on('close', (code) => {
+            if (code !== 0) {
+                console.error(`[Tracking] Python tracker exited with code ${code}`);
+                console.error(`[Tracking] stderr: ${stderr.substring(0, 500)}`);
+                return res.status(500).json({ success: false, error: `Tracker exited with code ${code}`, stderr: stderr.substring(0, 500), fallback: true });
+            }
+            try {
+                const result = JSON.parse(stdout);
+                if (result.success === false) {
+                    console.error(`[Tracking] Tracker returned error: ${result.error}`);
+                } else {
+                    console.log(`[Tracking] Result: ${result.positions?.length || 0} positions, method=${result.method}`);
+                }
+                if (stderr.trim()) console.log(`[Tracking] stderr: ${stderr.substring(0, 1000)}`);
+                res.json(result);
+            } catch (e) {
+                console.error('[Tracking] Invalid tracker output:', stdout.substring(0, 200));
+                res.status(500).json({ success: false, error: 'Invalid tracker output', fallback: true });
+            }
+        });
+
+        child.on('error', (err) => {
+            console.error('[Tracking] Failed to spawn tracker:', err.message);
+            res.status(500).json({ success: false, error: err.message, fallback: true });
+        });
+    } catch (err) {
+        console.error('[Tracking] Error:', err.message);
+        res.status(500).json({ success: false, error: err.message, fallback: true });
+    }
+});
+
+// ==================== API Key Management ====================
+
+// Get current API key status (masked)
+app.get('/api/keys', (req, res) => {
+    res.json({
+        GEMINI_API_KEY: GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : null,
+        KIMI_API_KEY: KIMI_API_KEY ? '******' + KIMI_API_KEY.slice(-4) : null,
+        OPENAI_API_KEY: OPENAI_API_KEY ? '******' + OPENAI_API_KEY.slice(-4) : null,
+        MINIMAX_API_KEY: MINIMAX_API_KEY ? '******' + MINIMAX_API_KEY.slice(-4) : null,
+    });
+});
+
+// Update API keys (writes to .env.local)
+app.post('/api/keys', (req, res) => {
+    try {
+        const { keys } = req.body;
+        if (!keys || typeof keys !== 'object') {
+            return res.status(400).json({ error: 'Missing keys object' });
+        }
+
+        const envPaths = [
+            process.env.VIBECUT_ENV_PATH,
+            path.join(__dirname, '..', '.env.local')
+        ].filter(Boolean);
+
+        const envPath = envPaths[0];
+        const lines = Object.entries(keys)
+            .filter(([, v]) => v && String(v).trim())
+            .map(([k, v]) => `${k}=${String(v).trim()}`);
+
+        fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+
+        // Reload into process.env
+        for (const [k, v] of Object.entries(keys)) {
+            if (v && String(v).trim()) process.env[k] = String(v).trim();
+        }
+
+        console.log('API keys updated via /api/keys');
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Update keys error:', error);
+        res.status(500).json({ error: 'Failed to update keys' });
+    }
+});
+
+// ==================== SPA Fallback (Electron production) ====================
+// This must be the LAST route — catch-all for client-side routing
+if (isElectron && fs.existsSync(distPath)) {
+    app.get('*', (req, res) => {
+        // Don't interfere with API routes
+        if (req.path.startsWith('/api')) {
+            return res.status(404).json({ error: 'Not found' });
+        }
+        res.sendFile(path.join(distPath, 'index.html'));
+    });
+}
+
 app.listen(PORT, () => {
     console.log(`Server running at http://localhost:${PORT}`);
+    if (isElectron) console.log('[Server] Running in Electron mode');
 });
