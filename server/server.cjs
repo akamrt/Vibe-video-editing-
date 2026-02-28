@@ -251,26 +251,108 @@ app.post('/api/update-cookies', (req, res) => {
     }
 });
 
-// ==================== AI Endpoints ====================
+// ==================== API Key Management ====================
 
-// Load .env.local manually since we don't have dotenv
-try {
-    const envPath = path.join(__dirname, '..', '.env.local');
-    if (fs.existsSync(envPath)) {
-        const envConfig = fs.readFileSync(envPath, 'utf8');
-        envConfig.split('\n').forEach(line => {
-            const match = line.match(/^([^=]+)=(.*)$/);
+const ENV_FILE_PATH = path.join(__dirname, '..', '.env.local');
+
+function loadEnvFile() {
+    try {
+        if (fs.existsSync(ENV_FILE_PATH)) {
+            const envConfig = fs.readFileSync(ENV_FILE_PATH, 'utf8');
+            envConfig.split('\n').forEach(line => {
+                const match = line.match(/^([^=]+)=(.*)$/);
+                if (match) {
+                    const key = match[1].trim();
+                    const value = match[2].trim().replace(/^["']|["']$/g, '');
+                    process.env[key] = value;
+                }
+            });
+            console.log('Loaded environment variables from .env.local');
+        }
+    } catch (e) {
+        console.warn('Failed to load .env.local:', e.message);
+    }
+}
+
+// Load on startup
+loadEnvFile();
+
+// Mask an API key for safe display (show last 4 chars only)
+function maskKey(key) {
+    if (!key || key.length < 8 || key.startsWith('your_')) return '';
+    return '••••••••' + key.slice(-4);
+}
+
+// GET /api/keys — return masked keys + status
+app.get('/api/keys', (req, res) => {
+    const keys = {
+        GEMINI_API_KEY: { masked: maskKey(process.env.GEMINI_API_KEY), set: !!(process.env.GEMINI_API_KEY && !process.env.GEMINI_API_KEY.startsWith('your_')) },
+        KIMI_API_KEY: { masked: maskKey(process.env.KIMI_API_KEY), set: !!(process.env.KIMI_API_KEY && !process.env.KIMI_API_KEY.startsWith('your_')) },
+        OPENAI_API_KEY: { masked: maskKey(process.env.OPENAI_API_KEY), set: !!(process.env.OPENAI_API_KEY && !process.env.OPENAI_API_KEY.startsWith('your_')) },
+        MINIMAX_API_KEY: { masked: maskKey(process.env.MINIMAX_API_KEY), set: !!(process.env.MINIMAX_API_KEY && !process.env.MINIMAX_API_KEY.startsWith('your_')) },
+    };
+    res.json(keys);
+});
+
+// POST /api/keys — update keys in .env.local and reload
+app.post('/api/keys', (req, res) => {
+    try {
+        const updates = req.body; // { GEMINI_API_KEY: 'xxx', ... }
+        if (!updates || typeof updates !== 'object') {
+            return res.status(400).json({ error: 'Invalid request body' });
+        }
+
+        const VALID_KEYS = ['GEMINI_API_KEY', 'KIMI_API_KEY', 'OPENAI_API_KEY', 'MINIMAX_API_KEY'];
+
+        // Read existing file or create new
+        let existingLines = [];
+        if (fs.existsSync(ENV_FILE_PATH)) {
+            existingLines = fs.readFileSync(ENV_FILE_PATH, 'utf8').split('\n');
+        }
+
+        // Track which keys we've updated
+        const updatedKeys = new Set();
+
+        // Update existing lines
+        const newLines = existingLines.map(line => {
+            const match = line.match(/^([^=]+)=(.*)/);
             if (match) {
                 const key = match[1].trim();
-                const value = match[2].trim().replace(/^["']|["']$/g, ''); // Remove quotes
-                process.env[key] = value;
+                if (VALID_KEYS.includes(key) && updates[key] !== undefined) {
+                    updatedKeys.add(key);
+                    const val = updates[key].trim();
+                    if (val) {
+                        process.env[key] = val;
+                        return `${key}=${val}`;
+                    } else {
+                        // Empty value = remove key
+                        delete process.env[key];
+                        return null; // Will be filtered out
+                    }
+                }
             }
-        });
-        console.log('Loaded environment variables from .env.local');
+            return line;
+        }).filter(line => line !== null);
+
+        // Add any new keys that weren't in the file
+        for (const key of VALID_KEYS) {
+            if (updates[key] !== undefined && !updatedKeys.has(key) && updates[key].trim()) {
+                newLines.push(`${key}=${updates[key].trim()}`);
+                process.env[key] = updates[key].trim();
+            }
+        }
+
+        fs.writeFileSync(ENV_FILE_PATH, newLines.join('\n'), 'utf8');
+        console.log('API keys updated via UI');
+
+        res.json({ success: true, message: 'API keys updated. They will take effect immediately.' });
+    } catch (error) {
+        console.error('Update keys error:', error);
+        res.status(500).json({ error: 'Failed to update API keys' });
     }
-} catch (e) {
-    console.warn('Failed to load .env.local:', e.message);
-}
+});
+
+// ==================== AI Endpoints ====================
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyB1srFICGtx-6D1J6giVDnjz6kcf8AbZoc';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';

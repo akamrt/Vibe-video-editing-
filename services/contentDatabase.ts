@@ -5,7 +5,7 @@
  * Simple, free, and local - perfect for 100+ sermons with text and timestamps.
  */
 
-import { ProjectState, MediaItem, KeywordEmphasis } from '../types';
+import { ProjectState, MediaItem, KeywordEmphasis, ClipKeyframe } from '../types';
 
 // ==================== Types ====================
 
@@ -59,12 +59,30 @@ export interface ShortSegment {
     removedWordIndices?: number[];
 }
 
+// ==================== Scan Center Cache ====================
+
+export interface ScanCenterCacheEntry {
+    id: string;            // Composite key: `${mediaUrl}_${startTime}_${endTime}`
+    mediaUrl: string;      // Source video URL or blob URL identifier
+    videoId?: string;      // YouTube video ID if available
+    startTime: number;     // Clip start time in source video
+    endTime: number;       // Clip end time in source video
+    keyframes: any[];      // Cached ClipKeyframe[] data
+    triggerCount: number;
+    frameCount: number;
+    threshold: number;     // outOfZoneThreshold used
+    smoothed: boolean;     // whether smoothing was applied
+    smoothAmount: number;
+    createdAt: number;     // timestamp
+    aspectRatio: string;   // aspect ratio used during scan
+}
+
 // ==================== Database Class ====================
 
 const DB_NAME = 'ContentLibraryDB';
-const DB_VERSION = 3; // Incremented to add 'costLog' store
+const DB_VERSION = 4; // Incremented to add 'scanCenterCache' store
 
-class ContentDatabase {
+export class ContentDatabase {
     private db: IDBDatabase | null = null;
     private initPromise: Promise<void> | null = null;
 
@@ -126,6 +144,14 @@ class ContentDatabase {
                 if (!db.objectStoreNames.contains('costLog')) {
                     const costStore = db.createObjectStore('costLog', { keyPath: 'id', autoIncrement: true });
                     costStore.createIndex('timestamp', 'timestamp', { unique: false });
+                }
+
+                // Scan & Center cache store
+                if (!db.objectStoreNames.contains('scanCenterCache')) {
+                    const scanStore = db.createObjectStore('scanCenterCache', { keyPath: 'id' });
+                    scanStore.createIndex('mediaUrl', 'mediaUrl', { unique: false });
+                    scanStore.createIndex('videoId', 'videoId', { unique: false });
+                    scanStore.createIndex('createdAt', 'createdAt', { unique: false });
                 }
 
                 console.log('Database schema created/updated');
@@ -425,7 +451,7 @@ class ContentDatabase {
 
     // ==================== Project Persistence ====================
 
-    async saveProject(project: ProjectState): Promise<void> {
+    async saveProject(project: ProjectState, globalKeyframes?: ClipKeyframe[]): Promise<void> {
         await this.init();
         return new Promise((resolve, reject) => {
             const store = this.getStore('projects', 'readwrite');
@@ -435,13 +461,18 @@ class ContentDatabase {
             // Ensure isPlaying is false on save
             projectToSave.isPlaying = false;
 
+            // Store globalKeyframes alongside the project
+            if (globalKeyframes !== undefined) {
+                projectToSave._globalKeyframes = globalKeyframes;
+            }
+
             const request = store.put(projectToSave);
             request.onsuccess = () => resolve();
             request.onerror = () => reject(request.error);
         });
     }
 
-    async getProject(): Promise<ProjectState | null> {
+    async getProject(): Promise<{ project: ProjectState; globalKeyframes: ClipKeyframe[] } | null> {
         await this.init();
         return new Promise((resolve, reject) => {
             const store = this.getStore('projects');
@@ -453,8 +484,9 @@ class ContentDatabase {
                     return;
                 }
 
-                // Remove the db ID
-                const { id, ...projectState } = proj;
+                // Remove the db ID and extract globalKeyframes
+                const { id, _globalKeyframes, ...projectState } = proj;
+                const globalKfs: ClipKeyframe[] = _globalKeyframes || [];
 
                 // Revive object URLs for files
                 if (projectState.library) {
@@ -466,8 +498,18 @@ class ContentDatabase {
                     });
                 }
 
-                resolve(projectState as ProjectState);
+                resolve({ project: projectState as ProjectState, globalKeyframes: globalKfs });
             };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async deleteProject(): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('projects', 'readwrite');
+            const request = store.delete('current_project');
+            request.onsuccess = () => resolve();
             request.onerror = () => reject(request.error);
         });
     }
@@ -516,6 +558,86 @@ class ContentDatabase {
         await this.init();
         return new Promise((resolve, reject) => {
             const store = this.getStore('costLog', 'readwrite');
+            const request = store.clear();
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    // ==================== Scan Center Cache ====================
+
+    /** Generate a cache key for a specific clip scan */
+    static scanCacheKey(mediaUrl: string, startTime: number, endTime: number): string {
+        // Use a stable portion of the URL (strip blob: prefix and object URL hashes)
+        const urlKey = mediaUrl.replace(/^blob:.*\//, 'blob_');
+        return `${urlKey}_${startTime.toFixed(3)}_${endTime.toFixed(3)}`;
+    }
+
+    /** Save scan center results to cache */
+    async saveScanCache(entry: ScanCenterCacheEntry): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('scanCenterCache', 'readwrite');
+            const request = store.put(entry);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    /** Get cached scan center data for a specific clip */
+    async getScanCache(cacheKey: string): Promise<ScanCenterCacheEntry | undefined> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('scanCenterCache');
+            const request = store.get(cacheKey);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    /** Get all cached scan data */
+    async getAllScanCache(): Promise<ScanCenterCacheEntry[]> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('scanCenterCache');
+            const request = store.getAll();
+            request.onsuccess = () => {
+                const entries = request.result || [];
+                entries.sort((a: ScanCenterCacheEntry, b: ScanCenterCacheEntry) => b.createdAt - a.createdAt);
+                resolve(entries);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    /** Get cached scan data for a specific video */
+    async getScanCacheByVideoId(videoId: string): Promise<ScanCenterCacheEntry[]> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('scanCenterCache');
+            const index = store.index('videoId');
+            const request = index.getAll(videoId);
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    /** Delete a specific scan cache entry */
+    async deleteScanCache(cacheKey: string): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('scanCenterCache', 'readwrite');
+            const request = store.delete(cacheKey);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    /** Clear all scan center cache */
+    async clearScanCache(): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('scanCenterCache', 'readwrite');
             const request = store.clear();
             request.onsuccess = () => resolve();
             request.onerror = () => reject(request.error);

@@ -168,6 +168,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [hoveredKey, setHoveredKey] = useState<GraphPoint | null>(null);
     const [hoveredHandle, setHoveredHandle] = useState<{ time: number; channel: ChannelType; type: 'in' | 'out' } | null>(null);
     const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+    const selectedKeysRef = useRef<Set<string>>(new Set());
     const [activeChannels, setActiveChannels] = useState<Set<ChannelType>>(
         new Set(['translateX', 'translateY', 'scale', 'rotation'])
     );
@@ -177,6 +178,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [simplifyActive, setSimplifyActive] = useState(false);
     const [simplifyAmount, setSimplifyAmount] = useState(30);
     const preSimplifyRef = useRef<ClipKeyframe[] | null>(null);
+    const simplifySelectedRef = useRef<Set<string>>(new Set());
 
     // Clamp mode state
     const [clampActive, setClampActive] = useState(false);
@@ -192,6 +194,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
     // Use external keyframes if provided, otherwise fall back to segment keyframes
     const keyframes = externalKeyframes ?? segment?.keyframes ?? [];
+
+    // Keep selectedKeysRef in sync so useCallback closures always see the latest selection
+    useEffect(() => {
+        selectedKeysRef.current = selectedKeys;
+    }, [selectedKeys]);
 
     // Convert world coordinates to screen
     const worldToScreen = (time: number, value: number): { x: number; y: number } => {
@@ -972,38 +979,76 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     // ===== SIMPLIFY =====
-    const applySimplify = useCallback((amount: number, source: ClipKeyframe[]) => {
+    const applySimplify = useCallback((amount: number, source: ClipKeyframe[], selectedTimes: Set<string>) => {
         if (source.length <= 2) return;
-        let valueRange = 0;
-        for (const ch of activeChannels) {
-            const vals = source.map(kf => kf[ch] as number);
-            const range = Math.max(...vals) - Math.min(...vals);
-            if (range > valueRange) valueRange = range;
-        }
-        if (valueRange === 0) valueRange = 1;
-        const tolerance = (amount / 100) * valueRange * 0.5;
+
         const sorted = [...source].sort((a, b) => a.time - b.time);
-        const simplified = rdpSimplify(sorted, tolerance, activeChannels);
-        onUpdateKeyframes(simplified);
+
+        // If we have a selection, only simplify those keyframes and keep the rest
+        if (selectedTimes.size > 0) {
+            const selectedKfs = sorted.filter(kf => selectedTimes.has(kf.time.toFixed(3)));
+            const unselectedKfs = sorted.filter(kf => !selectedTimes.has(kf.time.toFixed(3)));
+
+            if (selectedKfs.length <= 2) {
+                // Not enough selected keyframes to simplify, return source unchanged
+                onUpdateKeyframes(sorted);
+                return;
+            }
+
+            let valueRange = 0;
+            for (const ch of activeChannels) {
+                const vals = selectedKfs.map(kf => kf[ch] as number);
+                const range = Math.max(...vals) - Math.min(...vals);
+                if (range > valueRange) valueRange = range;
+            }
+            if (valueRange === 0) valueRange = 1;
+            const tolerance = (amount / 100) * valueRange * 0.5;
+            const simplifiedSelected = rdpSimplify(selectedKfs, tolerance, activeChannels);
+
+            // Merge unselected + simplified, re-sort by time
+            const merged = [...unselectedKfs, ...simplifiedSelected].sort((a, b) => a.time - b.time);
+            onUpdateKeyframes(merged);
+        } else {
+            // No selection — simplify ALL keyframes
+            let valueRange = 0;
+            for (const ch of activeChannels) {
+                const vals = sorted.map(kf => kf[ch] as number);
+                const range = Math.max(...vals) - Math.min(...vals);
+                if (range > valueRange) valueRange = range;
+            }
+            if (valueRange === 0) valueRange = 1;
+            const tolerance = (amount / 100) * valueRange * 0.5;
+            const simplified = rdpSimplify(sorted, tolerance, activeChannels);
+            onUpdateKeyframes(simplified);
+        }
     }, [activeChannels, onUpdateKeyframes]);
 
     const handleSimplifyToggle = useCallback(() => {
         if (simplifyActive) {
             setSimplifyActive(false);
             preSimplifyRef.current = null;
+            simplifySelectedRef.current = new Set();
         } else {
             preSimplifyRef.current = [...keyframes];
+            // Read from ref to avoid stale closure
+            const currentSelection = selectedKeysRef.current;
+            simplifySelectedRef.current = currentSelection.size > 0
+                ? new Set([...currentSelection].map(k => k.split(':')[0]))
+                : new Set<string>();
+            console.log(`[GraphEditor] Simplify toggled ON — selection: ${currentSelection.size} keys → ${simplifySelectedRef.current.size} unique times`);
             setSimplifyActive(true);
             setClampActive(false);
             preClampRef.current = null;
+            setSmoothActive(false);
+            preSmoothRef.current = null;
             setSimplifyAmount(30);
-            applySimplify(30, keyframes);
+            applySimplify(30, keyframes, simplifySelectedRef.current);
         }
     }, [simplifyActive, keyframes, applySimplify]);
 
     const handleSimplifySlider = useCallback((val: number) => {
         setSimplifyAmount(val);
-        if (preSimplifyRef.current) applySimplify(val, preSimplifyRef.current);
+        if (preSimplifyRef.current) applySimplify(val, preSimplifyRef.current, simplifySelectedRef.current);
     }, [applySimplify]);
 
     // ===== CLAMP =====
@@ -1091,10 +1136,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             smoothSelectedRef.current = new Set();
         } else {
             preSmoothRef.current = [...keyframes];
-            // No selection → smooth ALL keys; selection → smooth only those
-            smoothSelectedRef.current = selectedKeys.size > 0
-                ? new Set([...selectedKeys].map(k => k.split(':')[0]))
+            // Read from ref to avoid stale closure
+            const currentSelection = selectedKeysRef.current;
+            smoothSelectedRef.current = currentSelection.size > 0
+                ? new Set([...currentSelection].map(k => k.split(':')[0]))
                 : new Set<string>(); // empty = smooth all in smoothKeyframeValues
+            console.log(`[GraphEditor] Smooth toggled ON — selection: ${currentSelection.size} keys → ${smoothSelectedRef.current.size} unique times, total kfs: ${keyframes.length}`);
             setSmoothActive(true);
             setSimplifyActive(false);
             preSimplifyRef.current = null;
@@ -1103,7 +1150,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             setSmoothAmount(50);
             applySmooth(50, keyframes, smoothSelectedRef.current);
         }
-    }, [smoothActive, selectedKeys, keyframes, applySmooth]);
+    }, [smoothActive, keyframes, applySmooth]);
 
     const handleSmoothSlider = useCallback((val: number) => {
         setSmoothAmount(val);
@@ -1320,7 +1367,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         fontSize: 12,
                         cursor: keyframes.length > 2 ? 'pointer' : 'not-allowed'
                     }}
-                    title="Simplify curve — reduce keyframes (RDP)"
+                    title={simplifyActive
+                        ? 'Turn off Simplify'
+                        : selectedKeys.size > 0
+                            ? 'Simplify selected keyframes (RDP)'
+                            : 'Simplify all keyframes (RDP) — select keys to limit scope'}
                 >
                     Simplify
                 </button>
@@ -1536,7 +1587,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     </span>
                     <span style={{ color: '#666', fontSize: 10 }}>
                         {simplifyActive
-                            ? `${keyframes.length} keys`
+                            ? simplifySelectedRef.current.size > 0
+                                ? `${keyframes.length} of ${preSimplifyRef.current?.length ?? '?'} keys (${simplifySelectedRef.current.size} selected)`
+                                : `${keyframes.length} of ${preSimplifyRef.current?.length ?? '?'} keys (all)`
                             : clampActive
                                 ? `${clampSelectedRef.current.size} keys`
                                 : smoothSelectedRef.current.size > 0
