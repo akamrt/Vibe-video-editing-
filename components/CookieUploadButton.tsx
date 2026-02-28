@@ -9,11 +9,21 @@ export const CookieUploadButton: React.FC = () => {
 
         try {
             const text = await file.text();
-            const res = await fetch('/api/update-cookies', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: text })
-            });
+
+            let res: Response;
+            try {
+                res = await fetch('/api/update-cookies', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: text })
+                });
+            } catch (networkErr) {
+                // fetch() itself failed — server is down or unreachable
+                throw new Error(
+                    'Cannot reach the backend server. A video download may still be in progress — ' +
+                    'please wait for it to finish and try again.'
+                );
+            }
 
             // Check for HTML response (Vite serving index.html on 404)
             const contentType = res.headers.get('content-type');
@@ -23,22 +33,36 @@ export const CookieUploadButton: React.FC = () => {
 
             if (!res.ok) {
                 const errText = await res.text();
-                throw new Error(`Server returned ${res.status}: ${errText}`);
+                if (!errText || errText.length === 0) {
+                    // Empty 500 body usually means the backend was busy/unreachable
+                    throw new Error(
+                        'Server returned an empty error (HTTP ' + res.status + '). ' +
+                        'This usually means the backend is busy with a download. ' +
+                        'Please wait a moment and try again.'
+                    );
+                }
+                // Try to parse JSON error from server
+                try {
+                    const errJson = JSON.parse(errText);
+                    throw new Error(errJson.error || `Server error ${res.status}`);
+                } catch (parseErr) {
+                    // Not JSON, use raw text
+                    if (parseErr instanceof SyntaxError) {
+                        throw new Error(`Server error ${res.status}: ${errText.substring(0, 200)}`);
+                    }
+                    throw parseErr; // Re-throw our custom error
+                }
             }
 
             const data = await res.json();
             if (data.success) {
-                alert('🍪 YouTube Cookies updated successfully!');
+                alert('YouTube Cookies updated successfully!');
             } else {
                 alert('Failed to update cookies: ' + data.error);
             }
         } catch (err: any) {
-            console.error(err);
-            if (err.name === 'SyntaxError' || (err.message && err.message.includes('JSON'))) {
-                alert('Error: Server returned invalid format. The backend has been restarted, please try again in a moment.');
-            } else {
-                alert('Error uploading cookies: ' + (err.message || err));
-            }
+            console.error('[CookieUpload]', err);
+            alert('Error uploading cookies: ' + (err.message || err));
         }
 
         // Reset input

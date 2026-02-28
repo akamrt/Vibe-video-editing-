@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const { spawn, execSync } = require('child_process');
+const { spawn, exec, execSync } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -62,13 +64,13 @@ app.get('/api/download', async (req, res) => {
             console.log('Using Chrome browser cookies for authentication');
         }
 
-        // Get video info first using yt-dlp
+        // Get video info first using yt-dlp (async to avoid blocking event loop)
         console.log(`Getting info for: ${videoId}`);
         const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';
         const infoCmd = `"${YT_DLP}" --dump-single-json --no-warnings ${cookiesArg} ${uaArgs} "${youtubeUrl}"`;
         console.log('Running:', infoCmd);
 
-        const infoJson = execSync(infoCmd, {
+        const { stdout: infoJson } = await execAsync(infoCmd, {
             encoding: 'utf8',
             maxBuffer: 10 * 1024 * 1024,
             env: childEnv
@@ -82,13 +84,13 @@ app.get('/api/download', async (req, res) => {
         const tempDir = os.tmpdir();
         const tempFile = path.join(tempDir, `${videoId}_${Date.now()}.mp4`);
 
-        // Download using yt-dlp
+        // Download using yt-dlp (async to avoid blocking event loop)
         console.log('Downloading to temp file:', tempFile);
 
         const downloadCmd = `"${YT_DLP}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 ${cookiesArg} ${uaArgs} -o "${tempFile}" "${youtubeUrl}"`;
         console.log('Running:', downloadCmd);
 
-        execSync(downloadCmd, {
+        await execAsync(downloadCmd, {
             encoding: 'utf8',
             maxBuffer: 50 * 1024 * 1024,
             timeout: 300000, // 5 minute timeout
@@ -173,11 +175,11 @@ app.get('/api/video-info', async (req, res) => {
             console.log('Using Chrome browser cookies for authentication (Make sure Chrome is closed if this fails)');
         }
 
-        // Get video info using yt-dlp
+        // Get video info using yt-dlp (async to avoid blocking event loop)
         const cmd = `"${YT_DLP}" --dump-single-json --no-warnings ${cookiesArg} "${youtubeUrl}"`;
         console.log('Fetching video info:', cmd);
 
-        const infoJson = execSync(cmd, {
+        const { stdout: infoJson } = await execAsync(cmd, {
             encoding: 'utf8',
             maxBuffer: 10 * 1024 * 1024,
             env: childEnv
