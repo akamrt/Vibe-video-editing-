@@ -9,7 +9,10 @@
       "Bash(findstr:*)",
       "Bash(taskkill:*)",
       "Bash(node:*)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(npx vite --version)",
+      "Bash(git commit:*)"
     ]
   }
 }

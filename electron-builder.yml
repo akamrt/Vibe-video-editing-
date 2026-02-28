@@ -1,0 +1,62 @@
+appId: com.vibecut.ai
+productName: VibeCut AI
+directories:
+  output: release
+  buildResources: assets
+files:
+  - "**/*"
+  - "!python${/*}"
+  - "!bin${/*}"
+  - "!.claude${/*}"
+  - "!release${/*}"
+  - "!assets${/*}"
+  - "!*.ts"
+  - "!*.tsx"
+  - "!*.map"
+  - "!INSTALL.*"
+  - "!.gitignore"
+  - "!.npmignore"
+  - "!electron-builder.yml"
+  - "!vite.config.ts"
+  - "!tsconfig.json"
+  - "!electron/tsconfig.json"
+extraResources:
+  - from: bin/
+    to: bin/
+    filter:
+      - "**/*"
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icon.png
+nsis:
+  oneClick: true
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: VibeCut AI
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: assets/icon.png
+  category: public.app-category.video
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  icon: assets/icon.png
+  category: AudioVideo
