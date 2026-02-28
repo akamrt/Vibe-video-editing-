@@ -4,11 +4,22 @@ directories:
   output: release
   buildResources: assets
 files:
-  - dist/**/*
-  - server/**/*
-  - electron/**/*.js
-  - electron/**/*.html
-  - package.json
+  - "**/*"
+  - "!python${/*}"
+  - "!bin${/*}"
+  - "!.claude${/*}"
+  - "!release${/*}"
+  - "!assets${/*}"
+  - "!*.ts"
+  - "!*.tsx"
+  - "!*.map"
+  - "!INSTALL.*"
+  - "!.gitignore"
+  - "!.npmignore"
+  - "!electron-builder.yml"
+  - "!vite.config.ts"
+  - "!tsconfig.json"
+  - "!electron/tsconfig.json"
 extraResources:
   - from: bin/
     to: bin/
@@ -19,7 +30,7 @@ win:
     - target: nsis
       arch:
         - x64
-  icon: assets/icon.ico
+  icon: assets/icon.png
 nsis:
   oneClick: true
   allowToChangeInstallationDirectory: false
@@ -32,7 +43,7 @@ mac:
       arch:
         - x64
         - arm64
-  icon: assets/icon.icns
+  icon: assets/icon.png
   category: public.app-category.video
 dmg:
   contents:
@@ -47,5 +58,5 @@ linux:
     - target: AppImage
       arch:
         - x64
-  icon: assets/icon.ico
+  icon: assets/icon.png
   category: AudioVideo
