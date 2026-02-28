@@ -280,23 +280,26 @@ export async function fullScanAndCenter(
   try {
     // If no File object (e.g., lost after page reload), reconstruct from video element's blob URL
     let file = videoFile;
+    console.log(`[TrackingBridge] Starting: videoFile=${videoFile ? `File(${videoFile.name}, ${(videoFile.size/1024/1024).toFixed(1)}MB)` : 'null'}, videoEl.src=${videoElement.src?.substring(0, 60) || 'none'}`);
     if (!file) {
-      console.log('[TrackingBridge] No File object, attempting to reconstruct from video element src...');
+      console.log('[TrackingBridge] No File object, reconstructing from video element src...');
       file = await reconstructFileFromVideoElement(videoElement, onProgress);
       if (!file) {
         console.log('[TrackingBridge] Could not obtain video file, skipping Python tracker');
         return null;
       }
     }
+    console.log(`[TrackingBridge] File ready: name=${file.name}, size=${(file.size / 1024 / 1024).toFixed(1)}MB, type=${file.type}`);
 
     onProgress?.(0.01, 'Checking Python tracker...');
 
     // First check if the Python tracker is available
     const available = await checkPythonTrackerAvailable();
     if (!available) {
-      console.log('[TrackingBridge] Python tracker not available');
+      console.log('[TrackingBridge] Python tracker not available (server says unavailable)');
       return null;
     }
+    console.log('[TrackingBridge] Tracker available, uploading video...');
 
     // Upload the video file to the server
     onProgress?.(0.03, 'Uploading video for tracking...');
@@ -305,6 +308,7 @@ export async function fullScanAndCenter(
       console.log('[TrackingBridge] Video upload failed');
       return null;
     }
+    console.log(`[TrackingBridge] Uploaded, fileId=${fileId}. Running analyze...`);
 
     onProgress?.(0.15, 'Python tracker running (MediaPipe)...');
 
@@ -350,12 +354,22 @@ export async function fullScanAndCenter(
       });
     }
 
+    console.log(`[TrackingBridge] Analyze response: HTTP ${response.status}`);
+
     if (response.status === 501 || response.status === 404) {
       console.log('[TrackingBridge] Tracker endpoint not available:', response.status);
       return null;
     }
 
+    if (!response.ok) {
+      const errBody = await response.text();
+      console.error(`[TrackingBridge] Analyze failed: HTTP ${response.status}:`, errBody.substring(0, 500));
+      return null;
+    }
+
     const result: PythonTrackingResult = await response.json();
+    console.log(`[TrackingBridge] Result: success=${result.success}, positions=${result.positions?.length ?? 0}, method=${result.method || 'n/a'}, error=${result.error || 'none'}`);
+    if (result.stderr) console.log(`[TrackingBridge] Tracker stderr: ${result.stderr.substring(0, 300)}`);
 
     if (!result.success) {
       console.error('[TrackingBridge] Python tracker error:', result.error, result.stderr);
@@ -363,7 +377,7 @@ export async function fullScanAndCenter(
     }
 
     if (result.fallback || !result.positions || result.positions.length === 0) {
-      console.log('[TrackingBridge] Python tracker returned no positions');
+      console.log('[TrackingBridge] Python tracker returned no usable positions, falling back to browser');
       return null;
     }
 

@@ -260,9 +260,7 @@ app.post('/api/update-cookies', (req, res) => {
     }
 });
 
-// ==================== Environment & API Key Management ====================
-
-const ENV_FILE_PATH = path.join(__dirname, '..', '.env.local');
+// ==================== AI Endpoints ====================
 
 // Load .env.local manually since we don't have dotenv
 // In Electron, check VIBECUT_ENV_PATH (userData) first, then project root
@@ -293,83 +291,6 @@ try {
 } catch (e) {
     console.warn('Failed to load .env.local:', e.message);
 }
-
-// Mask an API key for safe display (show last 4 chars only)
-function maskKey(key) {
-    if (!key || key.length < 8 || key.startsWith('your_')) return '';
-    return '••••••••' + key.slice(-4);
-}
-
-// GET /api/keys — return masked keys + status
-app.get('/api/keys', (req, res) => {
-    const keys = {
-        GEMINI_API_KEY: { masked: maskKey(process.env.GEMINI_API_KEY), set: !!(process.env.GEMINI_API_KEY && !process.env.GEMINI_API_KEY.startsWith('your_')) },
-        KIMI_API_KEY: { masked: maskKey(process.env.KIMI_API_KEY), set: !!(process.env.KIMI_API_KEY && !process.env.KIMI_API_KEY.startsWith('your_')) },
-        OPENAI_API_KEY: { masked: maskKey(process.env.OPENAI_API_KEY), set: !!(process.env.OPENAI_API_KEY && !process.env.OPENAI_API_KEY.startsWith('your_')) },
-        MINIMAX_API_KEY: { masked: maskKey(process.env.MINIMAX_API_KEY), set: !!(process.env.MINIMAX_API_KEY && !process.env.MINIMAX_API_KEY.startsWith('your_')) },
-    };
-    res.json(keys);
-});
-
-// POST /api/keys — update keys in .env.local and reload
-app.post('/api/keys', (req, res) => {
-    try {
-        const updates = req.body; // { GEMINI_API_KEY: 'xxx', ... }
-        if (!updates || typeof updates !== 'object') {
-            return res.status(400).json({ error: 'Invalid request body' });
-        }
-
-        const VALID_KEYS = ['GEMINI_API_KEY', 'KIMI_API_KEY', 'OPENAI_API_KEY', 'MINIMAX_API_KEY'];
-
-        // Read existing file or create new
-        let existingLines = [];
-        if (fs.existsSync(ENV_FILE_PATH)) {
-            existingLines = fs.readFileSync(ENV_FILE_PATH, 'utf8').split('\n');
-        }
-
-        // Track which keys we've updated
-        const updatedKeys = new Set();
-
-        // Update existing lines
-        const newLines = existingLines.map(line => {
-            const match = line.match(/^([^=]+)=(.*)/);
-            if (match) {
-                const key = match[1].trim();
-                if (VALID_KEYS.includes(key) && updates[key] !== undefined) {
-                    updatedKeys.add(key);
-                    const val = updates[key].trim();
-                    if (val) {
-                        process.env[key] = val;
-                        return `${key}=${val}`;
-                    } else {
-                        // Empty value = remove key
-                        delete process.env[key];
-                        return null; // Will be filtered out
-                    }
-                }
-            }
-            return line;
-        }).filter(line => line !== null);
-
-        // Add any new keys that weren't in the file
-        for (const key of VALID_KEYS) {
-            if (updates[key] !== undefined && !updatedKeys.has(key) && updates[key].trim()) {
-                newLines.push(`${key}=${updates[key].trim()}`);
-                process.env[key] = updates[key].trim();
-            }
-        }
-
-        fs.writeFileSync(ENV_FILE_PATH, newLines.join('\n'), 'utf8');
-        console.log('API keys updated via UI');
-
-        res.json({ success: true, message: 'API keys updated. They will take effect immediately.' });
-    } catch (error) {
-        console.error('Update keys error:', error);
-        res.status(500).json({ error: 'Failed to update API keys' });
-    }
-});
-
-// ==================== AI Endpoints ====================
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AIzaSyB1srFICGtx-6D1J6giVDnjz6kcf8AbZoc';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
@@ -1068,30 +989,15 @@ app.get('/api/tracking/capabilities', (req, res) => {
     if (!trackerPath) {
         return res.json({ success: true, available: false, reason: 'vibecut-tracker not installed' });
     }
-    // Optionally query the tracker for its capabilities
+    // Just check the binary exists and is accessible — don't actually run it
+    // (running PyInstaller binaries cold can take 5-10 seconds and cause timeouts)
     try {
-        const child = spawn(trackerPath, [], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
-        child.stdin.write(JSON.stringify({ command: 'capabilities' }));
-        child.stdin.end();
-
-        let stdout = '';
-        child.stdout.on('data', d => stdout += d);
-        child.on('close', (code) => {
-            if (code !== 0) {
-                return res.json({ success: true, available: true, capabilities: {} });
-            }
-            try {
-                const caps = JSON.parse(stdout);
-                res.json({ success: true, available: true, capabilities: caps });
-            } catch {
-                res.json({ success: true, available: true, capabilities: {} });
-            }
-        });
-        child.on('error', () => {
-            res.json({ success: true, available: true, capabilities: {} });
-        });
+        fs.accessSync(trackerPath, fs.constants.X_OK);
+        console.log(`[Tracking] Tracker binary found: ${trackerPath}`);
+        res.json({ success: true, available: true, capabilities: {} });
     } catch {
-        res.json({ success: true, available: false, reason: 'Failed to run tracker' });
+        console.log(`[Tracking] Tracker binary not executable: ${trackerPath}`);
+        res.json({ success: true, available: false, reason: 'Tracker binary not accessible' });
     }
 });
 
@@ -1122,15 +1028,22 @@ app.post('/api/tracking/analyze', async (req, res) => {
         options: options || {},
     });
 
+    // Check the video file exists and log its size
+    const videoStat = fs.statSync(videoPath);
     console.log(`[Tracking] Running Python tracker: ${trackerPath}`);
-    console.log(`[Tracking] Video: ${videoPath}, Time: ${startTime}-${endTime}, Mode: ${mode}`);
+    console.log(`[Tracking] Video: ${videoPath} (${(videoStat.size / 1024 / 1024).toFixed(1)}MB), Time: ${startTime}-${endTime}, Mode: ${mode}`);
 
     try {
         const child = spawn(trackerPath, [], {
             stdio: ['pipe', 'pipe', 'pipe'],
-            timeout: 300000, // 5 minute timeout
             env: { ...process.env },
         });
+
+        // Manual timeout since spawn doesn't support timeout option
+        const killTimer = setTimeout(() => {
+            console.error('[Tracking] Python tracker timed out after 5 minutes, killing...');
+            child.kill('SIGKILL');
+        }, 300000);
 
         child.stdin.write(request);
         child.stdin.end();
@@ -1156,6 +1069,7 @@ app.post('/api/tracking/analyze', async (req, res) => {
         });
 
         child.on('close', (code) => {
+            clearTimeout(killTimer);
             if (code !== 0) {
                 console.error(`[Tracking] Python tracker exited with code ${code}`);
                 console.error(`[Tracking] stderr: ${stderr.substring(0, 500)}`);
@@ -1177,12 +1091,58 @@ app.post('/api/tracking/analyze', async (req, res) => {
         });
 
         child.on('error', (err) => {
+            clearTimeout(killTimer);
             console.error('[Tracking] Failed to spawn tracker:', err.message);
             res.status(500).json({ success: false, error: err.message, fallback: true });
         });
     } catch (err) {
         console.error('[Tracking] Error:', err.message);
         res.status(500).json({ success: false, error: err.message, fallback: true });
+    }
+});
+
+// ==================== API Key Management ====================
+
+// Get current API key status (masked)
+app.get('/api/keys', (req, res) => {
+    res.json({
+        GEMINI_API_KEY: GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : null,
+        KIMI_API_KEY: KIMI_API_KEY ? '******' + KIMI_API_KEY.slice(-4) : null,
+        OPENAI_API_KEY: OPENAI_API_KEY ? '******' + OPENAI_API_KEY.slice(-4) : null,
+        MINIMAX_API_KEY: MINIMAX_API_KEY ? '******' + MINIMAX_API_KEY.slice(-4) : null,
+    });
+});
+
+// Update API keys (writes to .env.local)
+app.post('/api/keys', (req, res) => {
+    try {
+        const { keys } = req.body;
+        if (!keys || typeof keys !== 'object') {
+            return res.status(400).json({ error: 'Missing keys object' });
+        }
+
+        const envPaths = [
+            process.env.VIBECUT_ENV_PATH,
+            path.join(__dirname, '..', '.env.local')
+        ].filter(Boolean);
+
+        const envPath = envPaths[0];
+        const lines = Object.entries(keys)
+            .filter(([, v]) => v && String(v).trim())
+            .map(([k, v]) => `${k}=${String(v).trim()}`);
+
+        fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+
+        // Reload into process.env
+        for (const [k, v] of Object.entries(keys)) {
+            if (v && String(v).trim()) process.env[k] = String(v).trim();
+        }
+
+        console.log('API keys updated via /api/keys');
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Update keys error:', error);
+        res.status(500).json({ error: 'Failed to update keys' });
     }
 });
 
