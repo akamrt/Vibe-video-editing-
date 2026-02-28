@@ -989,30 +989,15 @@ app.get('/api/tracking/capabilities', (req, res) => {
     if (!trackerPath) {
         return res.json({ success: true, available: false, reason: 'vibecut-tracker not installed' });
     }
-    // Optionally query the tracker for its capabilities
+    // Just check the binary exists and is accessible — don't actually run it
+    // (running PyInstaller binaries cold can take 5-10 seconds and cause timeouts)
     try {
-        const child = spawn(trackerPath, [], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
-        child.stdin.write(JSON.stringify({ command: 'capabilities' }));
-        child.stdin.end();
-
-        let stdout = '';
-        child.stdout.on('data', d => stdout += d);
-        child.on('close', (code) => {
-            if (code !== 0) {
-                return res.json({ success: true, available: true, capabilities: {} });
-            }
-            try {
-                const caps = JSON.parse(stdout);
-                res.json({ success: true, available: true, capabilities: caps });
-            } catch {
-                res.json({ success: true, available: true, capabilities: {} });
-            }
-        });
-        child.on('error', () => {
-            res.json({ success: true, available: true, capabilities: {} });
-        });
+        fs.accessSync(trackerPath, fs.constants.X_OK);
+        console.log(`[Tracking] Tracker binary found: ${trackerPath}`);
+        res.json({ success: true, available: true, capabilities: {} });
     } catch {
-        res.json({ success: true, available: false, reason: 'Failed to run tracker' });
+        console.log(`[Tracking] Tracker binary not executable: ${trackerPath}`);
+        res.json({ success: true, available: false, reason: 'Tracker binary not accessible' });
     }
 });
 
@@ -1043,15 +1028,22 @@ app.post('/api/tracking/analyze', async (req, res) => {
         options: options || {},
     });
 
+    // Check the video file exists and log its size
+    const videoStat = fs.statSync(videoPath);
     console.log(`[Tracking] Running Python tracker: ${trackerPath}`);
-    console.log(`[Tracking] Video: ${videoPath}, Time: ${startTime}-${endTime}, Mode: ${mode}`);
+    console.log(`[Tracking] Video: ${videoPath} (${(videoStat.size / 1024 / 1024).toFixed(1)}MB), Time: ${startTime}-${endTime}, Mode: ${mode}`);
 
     try {
         const child = spawn(trackerPath, [], {
             stdio: ['pipe', 'pipe', 'pipe'],
-            timeout: 300000, // 5 minute timeout
             env: { ...process.env },
         });
+
+        // Manual timeout since spawn doesn't support timeout option
+        const killTimer = setTimeout(() => {
+            console.error('[Tracking] Python tracker timed out after 5 minutes, killing...');
+            child.kill('SIGKILL');
+        }, 300000);
 
         child.stdin.write(request);
         child.stdin.end();
@@ -1077,6 +1069,7 @@ app.post('/api/tracking/analyze', async (req, res) => {
         });
 
         child.on('close', (code) => {
+            clearTimeout(killTimer);
             if (code !== 0) {
                 console.error(`[Tracking] Python tracker exited with code ${code}`);
                 console.error(`[Tracking] stderr: ${stderr.substring(0, 500)}`);
@@ -1098,6 +1091,7 @@ app.post('/api/tracking/analyze', async (req, res) => {
         });
 
         child.on('error', (err) => {
+            clearTimeout(killTimer);
             console.error('[Tracking] Failed to spawn tracker:', err.message);
             res.status(500).json({ success: false, error: err.message, fallback: true });
         });
