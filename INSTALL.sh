@@ -147,7 +147,63 @@ echo ""
 # ====================================================
 # STEP 4: Set up API keys
 # ====================================================
-echo -e "${BOLD}[Step 4/4] Checking API keys...${NC}"
+echo -e "${BOLD}[Step 4/5] Building Python tracker (optional)...${NC}"
+echo ""
+
+if [ -f "bin/vibecut-tracker" ] || [ -f "bin/vibecut-tracker.exe" ]; then
+    echo -e "${GREEN}[OK] Python tracker already built.${NC}"
+else
+    if command -v python3 &> /dev/null; then
+        PYTHON_CMD=python3
+    elif command -v python &> /dev/null; then
+        PYTHON_CMD=python
+    else
+        PYTHON_CMD=""
+    fi
+
+    if [ -n "$PYTHON_CMD" ]; then
+        echo "Checking Python dependencies for AI-powered person tracking..."
+        if $PYTHON_CMD -c "import mediapipe; import cv2" 2>/dev/null; then
+            echo "Dependencies found! Checking for PyInstaller..."
+            if $PYTHON_CMD -c "import PyInstaller" 2>/dev/null; then
+                echo "Building Python tracker binary (this may take a few minutes)..."
+                $PYTHON_CMD python/build.py
+                if [ -f "bin/vibecut-tracker" ] || [ -f "bin/vibecut-tracker.exe" ]; then
+                    echo -e "${GREEN}[OK] Python tracker built successfully!${NC}"
+                else
+                    echo -e "${YELLOW}[WARNING] Python tracker build failed. Browser tracking will be used instead.${NC}"
+                fi
+            else
+                echo "Installing PyInstaller..."
+                $PYTHON_CMD -m pip install pyinstaller --quiet
+                echo "Building Python tracker binary (this may take a few minutes)..."
+                $PYTHON_CMD python/build.py
+                if [ -f "bin/vibecut-tracker" ] || [ -f "bin/vibecut-tracker.exe" ]; then
+                    echo -e "${GREEN}[OK] Python tracker built successfully!${NC}"
+                else
+                    echo -e "${YELLOW}[WARNING] Python tracker build failed. Browser tracking will be used instead.${NC}"
+                fi
+            fi
+        else
+            echo -e "${YELLOW}[INFO] Python tracker dependencies not installed."
+            echo "  To enable AI-powered person tracking, run:"
+            echo "    pip install mediapipe opencv-python-headless numpy pyinstaller"
+            echo "    python python/build.py"
+            echo ""
+            echo -e "  The app will use browser-based tracking in the meantime.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}[INFO] Python not found. Skipping tracker build."
+        echo -e "  The app will use browser-based tracking.${NC}"
+    fi
+fi
+
+echo ""
+
+# ====================================================
+# STEP 5: Set up API keys
+# ====================================================
+echo -e "${BOLD}[Step 5/5] Checking API keys...${NC}"
 echo ""
 
 if [ ! -f ".env.local" ]; then

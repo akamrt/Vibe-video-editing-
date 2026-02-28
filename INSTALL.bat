@@ -154,9 +154,50 @@ if exist "bin\ffmpeg.exe" (
 echo.
 
 :: ====================================================
-:: STEP 4: Set up API keys
+:: STEP 4: Build Python tracker (optional)
 :: ====================================================
-echo  [Step 4/4] Checking API keys...
+echo  [Step 4/5] Building Python tracker (optional)...
+echo.
+
+if exist "bin\vibecut-tracker.exe" (
+    echo  [OK] Python tracker already built.
+) else (
+    where python >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        python -c "import mediapipe; import cv2" >nul 2>nul
+        if !ERRORLEVEL! equ 0 (
+            python -c "import PyInstaller" >nul 2>nul
+            if !ERRORLEVEL! neq 0 (
+                echo  Installing PyInstaller...
+                python -m pip install pyinstaller --quiet
+            )
+            echo  Building Python tracker binary (this may take a few minutes^)...
+            python python\build.py
+            if exist "bin\vibecut-tracker.exe" (
+                echo  [OK] Python tracker built successfully!
+            ) else (
+                echo  [WARNING] Build failed. Browser tracking will be used instead.
+            )
+        ) else (
+            echo  [INFO] Python tracker dependencies not installed.
+            echo  To enable AI-powered person tracking, run:
+            echo    pip install mediapipe opencv-python-headless numpy pyinstaller
+            echo    python python\build.py
+            echo.
+            echo  The app will use browser-based tracking in the meantime.
+        )
+    ) else (
+        echo  [INFO] Python not found. Skipping tracker build.
+        echo  The app will use browser-based tracking.
+    )
+)
+
+echo.
+
+:: ====================================================
+:: STEP 5: Set up API keys
+:: ====================================================
+echo  [Step 5/5] Checking API keys...
 echo.
 
 if not exist ".env.local" (
