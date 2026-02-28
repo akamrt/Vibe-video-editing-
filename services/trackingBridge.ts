@@ -228,6 +228,42 @@ function convertPositionsToKeyframes(
 }
 
 /**
+ * Reconstruct a File object from a video element's src URL (blob: or http:).
+ * This handles the case where the original File object was lost (e.g., after page reload)
+ * but the video element still has a valid src with the video data.
+ */
+async function reconstructFileFromVideoElement(
+  videoElement: HTMLVideoElement,
+  onProgress?: (progress: number, label: string) => void,
+): Promise<File | null> {
+  const src = videoElement.src || videoElement.currentSrc;
+  if (!src) {
+    console.log('[TrackingBridge] No video src to reconstruct File from');
+    return null;
+  }
+
+  try {
+    onProgress?.(0.02, 'Preparing video for upload...');
+    const response = await fetch(src);
+    if (!response.ok) {
+      console.error('[TrackingBridge] Failed to fetch video src:', response.status);
+      return null;
+    }
+    const blob = await response.blob();
+    // Determine a reasonable filename and type
+    const type = blob.type || 'video/mp4';
+    const ext = type.includes('webm') ? '.webm' : type.includes('ogg') ? '.ogg' : '.mp4';
+    const name = `video_${Date.now()}${ext}`;
+    const file = new File([blob], name, { type });
+    console.log(`[TrackingBridge] Reconstructed File from blob URL: ${name} (${(file.size / 1024 / 1024).toFixed(1)}MB)`);
+    return file;
+  } catch (e) {
+    console.error('[TrackingBridge] Failed to reconstruct File from video src:', e);
+    return null;
+  }
+}
+
+/**
  * Full scan-and-center pipeline: person detection + tracking in one shot.
  *
  * When the Python tracker is available, this uploads the video file to the server,
@@ -242,9 +278,15 @@ export async function fullScanAndCenter(
   onProgress?: (progress: number, label: string) => void,
 ): Promise<{ keyframes: ClipKeyframe[]; triggerCount: number; frameCount: number; method: string } | null> {
   try {
-    if (!videoFile) {
-      console.log('[TrackingBridge] No video file provided, skipping Python tracker');
-      return null;
+    // If no File object (e.g., lost after page reload), reconstruct from video element's blob URL
+    let file = videoFile;
+    if (!file) {
+      console.log('[TrackingBridge] No File object, attempting to reconstruct from video element src...');
+      file = await reconstructFileFromVideoElement(videoElement, onProgress);
+      if (!file) {
+        console.log('[TrackingBridge] Could not obtain video file, skipping Python tracker');
+        return null;
+      }
     }
 
     onProgress?.(0.01, 'Checking Python tracker...');
@@ -258,7 +300,7 @@ export async function fullScanAndCenter(
 
     // Upload the video file to the server
     onProgress?.(0.03, 'Uploading video for tracking...');
-    const fileId = await uploadVideoForTracking(videoFile, onProgress);
+    const fileId = await uploadVideoForTracking(file, onProgress);
     if (!fileId) {
       console.log('[TrackingBridge] Video upload failed');
       return null;
@@ -283,11 +325,11 @@ export async function fullScanAndCenter(
 
     // Handle 400 = stale fileId (server restarted, clearing its file map).
     // Invalidate our cache, re-upload, and retry once.
-    if (response.status === 400 && videoFile) {
+    if (response.status === 400 && file) {
       console.log('[TrackingBridge] Got 400 — stale fileId, re-uploading...');
-      invalidateUploadCache(videoFile);
+      invalidateUploadCache(file);
       onProgress?.(0.08, 'Re-uploading video (server restarted)...');
-      const freshFileId = await uploadVideoForTracking(videoFile, onProgress, true);
+      const freshFileId = await uploadVideoForTracking(file, onProgress, true);
       if (!freshFileId) {
         console.log('[TrackingBridge] Re-upload failed');
         return null;
