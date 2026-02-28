@@ -1,0 +1,114 @@
+name: Build Electron App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            arch: x64
+          - os: macos-latest
+            platform: mac
+            arch: x64
+          - os: macos-latest
+            platform: mac
+            arch: arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install Python tracker dependencies
+        run: pip install mediapipe opencv-python-headless numpy pyinstaller
+
+      - name: Build Python tracker binary
+        run: python python/build.py
+
+      - name: Download yt-dlp (Windows)
+        if: matrix.platform == 'win'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path bin
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "bin/yt-dlp.exe"
+
+      - name: Download yt-dlp (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          mkdir -p bin
+          curl -L -o bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+          chmod +x bin/yt-dlp
+
+      - name: Download ffmpeg (Windows)
+        if: matrix.platform == 'win'
+        shell: powershell
+        run: |
+          $tmp = "bin/ffmpeg-release.zip"
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $tmp
+          $shell = New-Object -ComObject Shell.Application
+          $zip = $shell.NameSpace((Resolve-Path $tmp).Path)
+          $dest = $shell.NameSpace((Resolve-Path "bin").Path)
+          foreach ($item in $zip.Items()) {
+            if ($item.Name -match "ffmpeg") {
+              $inner = $shell.NameSpace($item.Path + "\bin")
+              if ($inner) { foreach ($f in $inner.Items()) { $dest.CopyHere($f, 0x14) } }
+            }
+          }
+          Remove-Item $tmp -Force
+
+      - name: Download ffmpeg (macOS)
+        if: matrix.platform == 'mac'
+        run: |
+          brew install ffmpeg
+          cp $(which ffmpeg) bin/ffmpeg
+          cp $(which ffprobe) bin/ffprobe
+          chmod +x bin/ffmpeg bin/ffprobe
+
+      - name: Compile Electron TypeScript
+        run: npx tsc -p electron/tsconfig.json
+
+      - name: Build Vite frontend
+        run: npx vite build
+
+      - name: Build Electron app (Windows)
+        if: matrix.platform == 'win'
+        run: npx electron-builder --win --${{ matrix.arch }}
+
+      - name: Build Electron app (macOS)
+        if: matrix.platform == 'mac'
+        run: npx electron-builder --mac --${{ matrix.arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibecut-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.blockmap
+            release/latest*.yml
+          if-no-files-found: error
