@@ -16,8 +16,7 @@ import FillerConfirmModal from './components/FillerConfirmModal';
 import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
 import { YoutubeImportModal } from './components/YoutubeImportModal';
 import ContentLibraryPage from './pages/ContentLibraryPage';
-import { GeneratedShort, contentDB, ScanCenterCacheEntry, ContentDatabase } from './services/contentDatabase';
-import SettingsPanel from './components/SettingsPanel';
+import { GeneratedShort, contentDB } from './services/contentDatabase';
 import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion } from './utils/interpolation';
 import { resolveGradientStops, buildGradientCSS } from './utils/gradientUtils';
 import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
@@ -27,6 +26,7 @@ import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
 import { getAudioBuffer, findNearestSilence, snapFillerRange, clearAudioBufferCache } from './utils/audioAnalysis';
+import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
 
 const INITIAL_SUBTITLE_STYLE: SubtitleStyle = {
   fontFamily: 'Arial',
@@ -157,6 +157,13 @@ function App() {
   const projectRef = useRef(project);
   useEffect(() => { projectRef.current = project; }, [project]);
 
+  // Server health polling — shows banner when backend is unreachable
+  useEffect(() => {
+    startHealthPolling();
+    const unsub = onStatusChange(setServerStatus);
+    return () => { stopHealthPolling(); unsub(); };
+  }, []);
+
   // Cost tracker: load persisted data + subscribe to updates
   useEffect(() => {
     const sync = () => { setCostTotal(getSessionTotal()); setCostLog(getSessionLog()); };
@@ -166,25 +173,19 @@ function App() {
   }, []);
 
   // Persistence Loading (with migration for new fields)
-  const hasLoadedRef = useRef(false);
   useEffect(() => {
     clearAudioBufferCache(); // Clear stale audio caches from any prior session
     contentDB.getProject().then(saved => {
       if (saved) {
         setProject({
           ...INITIAL_STATE,
-          ...saved.project,
-          activeSubtitleTemplate: saved.project.activeSubtitleTemplate ?? null,
-          activeTitleTemplate: saved.project.activeTitleTemplate ?? null,
-          activeKeywordAnimation: saved.project.activeKeywordAnimation ?? null,
+          ...saved,
+          activeSubtitleTemplate: saved.activeSubtitleTemplate ?? null,
+          activeTitleTemplate: saved.activeTitleTemplate ?? null,
+          activeKeywordAnimation: saved.activeKeywordAnimation ?? null,
         });
-        if (saved.globalKeyframes && saved.globalKeyframes.length > 0) {
-          setGlobalKeyframes(saved.globalKeyframes);
-        }
         console.log('Project loaded from storage');
       }
-      // Mark load complete — auto-save can proceed after this
-      hasLoadedRef.current = true;
     });
   }, []);
 
@@ -210,8 +211,6 @@ function App() {
   const trackingTemplatesRef = useRef<Map<string, ImageData>>(new Map());
   const trackingAbortRef = useRef<AbortController | null>(null);
   const autoCenteringRef = useRef(false);
-  /** Guard: set to true whenever any async operation needs exclusive video seek control (scan, auto-center). Prevents the video-sync useEffect from overwriting seeks. */
-  const scanningVideoRef = useRef(false);
   const [autoCenterOnImport, setAutoCenterOnImport] = useState(false);
   const [trackingZoom, setTrackingZoom] = useState(1);
   const [trackingPan, setTrackingPan] = useState({ x: 0, y: 0 });
@@ -255,7 +254,7 @@ function App() {
   const [showFillerModal, setShowFillerModal] = useState(false);
   const [fillerDetections, setFillerDetections] = useState<FillerDetectionWithMedia[]>([]);
   const [activePage, setActivePage] = useState<'editor' | 'library'>('editor');
-  const [showSettings, setShowSettings] = useState(false);
+  const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'connecting'>('connecting');
 
   // Viewport & Export Settings
   const [viewportSettings, setViewportSettings] = useState<ViewportSettings>({
@@ -286,43 +285,6 @@ function App() {
 
   // Global/Root transform keyframes (affects all clips)
   const [globalKeyframes, setGlobalKeyframes] = useState<ClipKeyframe[]>([]);
-
-  // ===== Auto-Save: debounced save whenever project or globalKeyframes change =====
-  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const globalKeyframesRef = useRef(globalKeyframes);
-  useEffect(() => { globalKeyframesRef.current = globalKeyframes; }, [globalKeyframes]);
-
-  useEffect(() => {
-    // Don't auto-save until initial load is complete
-    if (!hasLoadedRef.current) return;
-
-    // Debounce: wait 2 seconds after last change before saving
-    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    autoSaveTimerRef.current = setTimeout(() => {
-      contentDB.saveProject(project, globalKeyframes)
-        .then(() => console.log('[AutoSave] Project saved'))
-        .catch(e => console.error('[AutoSave] Failed:', e));
-    }, 2000);
-
-    return () => {
-      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-    };
-  }, [project, globalKeyframes]);
-
-  // Save immediately on tab close / refresh
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (!hasLoadedRef.current) return;
-      // Cancel any pending debounced save
-      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-      // Synchronous IndexedDB write isn't possible, but we fire-and-forget a save
-      // The browser gives us a short grace period to initiate async operations
-      contentDB.saveProject(projectRef.current, globalKeyframesRef.current)
-        .catch(() => { }); // Best effort
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, []);
 
   // Transform target: 'global' for root transform, or segment ID for individual clip
   const [transformTarget, setTransformTarget] = useState<'global' | string>('global');
@@ -598,8 +560,8 @@ function App() {
           }
         } else {
           if (!videoEl.paused) videoEl.pause();
-          // Don't fight the tracking service's seeks, auto-centering seeks, or scanning seeks
-          if (trackingMode !== 'tracking' && !autoCenteringRef.current && !scanningVideoRef.current) {
+          // Don't fight the tracking service's seeks or auto-centering seeks
+          if (trackingMode !== 'tracking' && !autoCenteringRef.current) {
             videoEl.currentTime = sourceTime; // Force sync when paused
           }
         }
@@ -3008,37 +2970,7 @@ function App() {
     const seg = project.segments.find(s => s.id === segmentId);
     if (!seg) return;
 
-    // Check cache first
-    const media = project.library.find(m => m.id === seg.mediaId);
-    const cacheKey = media ? ContentDatabase.scanCacheKey(media.url, seg.startTime, seg.endTime) : '';
-    if (cacheKey) {
-      try {
-        const cached = await contentDB.getScanCache(cacheKey);
-        if (cached && cached.threshold === outOfZoneThreshold && cached.aspectRatio === viewportSettings.previewAspectRatio) {
-          const useCached = confirm(
-            `📦 Cached scan data found!\n\n` +
-            `• ${cached.keyframes.length} keyframes\n` +
-            `• ${cached.triggerCount} centering events\n` +
-            `• ${cached.frameCount} frames scanned\n` +
-            `• Scanned ${new Date(cached.createdAt).toLocaleString()}\n\n` +
-            `Press OK to use cached data, or Cancel to re-scan and overwrite.`
-          );
-          if (useCached) {
-            console.log('[ScanCenter] Using cached result:', cached.id);
-            const finalKfs = scanSmooth ? smoothScannedKeyframes(cached.keyframes, scanSmoothAmount) : cached.keyframes;
-            handleUpdateKeyframes(segmentId, finalKfs, true);
-            setTransformTarget(segmentId);
-            return;
-          } else {
-            console.log('[ScanCenter] User chose to re-scan, overwriting cache');
-            // Fall through to re-scan below
-          }
-        }
-      } catch (e) { console.warn('[ScanCenter] Cache check failed:', e); }
-    }
-
     setStatus(ProcessingStatus.SCANNING);
-    scanningVideoRef.current = true; // Prevent video sync from fighting our seeks
     setScanProgress('Waiting for video...');
 
     try {
@@ -3127,30 +3059,6 @@ function App() {
       const finalKeyframes = scanSmooth ? smoothScannedKeyframes(keyframes, scanSmoothAmount) : keyframes;
       handleUpdateKeyframes(segmentId, finalKeyframes, true);
       setTransformTarget(segmentId);
-
-      // Save to cache
-      if (cacheKey && media) {
-        try {
-          const cacheEntry: ScanCenterCacheEntry = {
-            id: cacheKey,
-            mediaUrl: media.url,
-            videoId: media.id,
-            startTime: seg.startTime,
-            endTime: seg.endTime,
-            keyframes: keyframes, // Save raw (un-smoothed) keyframes
-            triggerCount,
-            frameCount,
-            threshold: outOfZoneThreshold,
-            smoothed: scanSmooth,
-            smoothAmount: scanSmoothAmount,
-            createdAt: Date.now(),
-            aspectRatio: viewportSettings.previewAspectRatio,
-          };
-          await contentDB.saveScanCache(cacheEntry);
-          console.log('[ScanCenter] Results saved to cache:', cacheKey);
-        } catch (e) { console.warn('[ScanCenter] Failed to save to cache:', e); }
-      }
-
       const smoothNote = scanSmooth ? `\n• Smoothed at ${scanSmoothAmount}%` : '';
       const msg = `Scan complete!\n\n• Engine: ${methodLabel}\n• ${finalKeyframes.length} keyframes added\n• ${triggerCount} centering event${triggerCount !== 1 ? 's' : ''}\n• ${frameCount} frames scanned${smoothNote}\n\nCheck the clip's keyframe track on the timeline.`;
       setScanProgress(`Done — ${keyframes.length} keyframes, ${triggerCount} centering events`);
@@ -3159,7 +3067,6 @@ function App() {
       console.error('[ScanCenter] Error:', e);
       alert(`Scan & Center failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
     } finally {
-      scanningVideoRef.current = false;
       setStatus(ProcessingStatus.IDLE);
       setScanProgress('');
       setScanMethod('');
@@ -3173,30 +3080,24 @@ function App() {
     const videoSegs = project.segments.filter(s => s.type === 'video' || !s.type);
     if (videoSegs.length === 0) return;
 
-    const results: { index: number; status: string; keyframes: number }[] = [];
-
     setStatus(ProcessingStatus.SCANNING);
-    scanningVideoRef.current = true; // Prevent video sync from fighting our seeks
     for (let i = 0; i < videoSegs.length; i++) {
-      const seg = videoSegs[i];
       setScanProgress(`Scanning clip ${i + 1}/${videoSegs.length}...`);
-      console.log(`[ScanAll] === Starting clip ${i + 1}/${videoSegs.length}: seg.id=${seg.id}, start=${seg.startTime}, end=${seg.endTime} ===`);
+      const seg = videoSegs[i];
 
-      // Check cache first
-      const media = project.library.find(m => m.id === seg.mediaId);
-      const cacheKey = media ? ContentDatabase.scanCacheKey(media.url, seg.startTime, seg.endTime) : '';
-      if (cacheKey) {
-        try {
-          const cached = await contentDB.getScanCache(cacheKey);
-          if (cached && cached.threshold === outOfZoneThreshold && cached.aspectRatio === viewportSettings.previewAspectRatio) {
-            console.log(`[ScanAll] Clip ${i + 1}: using cached result (${cached.keyframes.length} kfs)`);
-            const finalKfs = scanSmooth ? smoothScannedKeyframes(cached.keyframes, scanSmoothAmount) : cached.keyframes;
-            handleUpdateKeyframes(seg.id, finalKfs, true);
-            results.push({ index: i + 1, status: 'cached', keyframes: finalKfs.length });
-            continue;
-          }
-        } catch (e) { /* cache miss, proceed */ }
+      // Bring video into view
+      setProject(prev => ({ ...prev, currentTime: seg.timelineStart + 0.01 }));
+      await new Promise(r => setTimeout(r, 100));
+
+      let videoEl: HTMLVideoElement | null = null;
+      let waited = 0;
+      while (waited < 10000) {
+        videoEl = videoRefs.current.get(seg.id) || null;
+        if (videoEl && videoEl.readyState >= 2) break;
+        await new Promise(r => setTimeout(r, 100));
+        waited += 100;
       }
+      if (!videoEl || videoEl.readyState < 2) continue;
 
       const vw = videoEl.videoWidth;
       const vh = videoEl.videoHeight;
@@ -3244,50 +3145,15 @@ function App() {
         if (keyframes.length > 0) {
           const finalKfs = scanSmooth ? smoothScannedKeyframes(keyframes, scanSmoothAmount) : keyframes;
           handleUpdateKeyframes(seg.id, finalKfs, true);
-
-          // Save to cache
-          if (cacheKey && media) {
-            try {
-              await contentDB.saveScanCache({
-                id: cacheKey,
-                mediaUrl: media.url,
-                videoId: media.id,
-                startTime: seg.startTime,
-                endTime: seg.endTime,
-                keyframes,
-                triggerCount,
-                frameCount,
-                threshold: outOfZoneThreshold,
-                smoothed: scanSmooth,
-                smoothAmount: scanSmoothAmount,
-                createdAt: Date.now(),
-                aspectRatio: viewportSettings.previewAspectRatio,
-              });
-            } catch (e) { /* cache save failed, not critical */ }
-          }
-          results.push({ index: i + 1, status: `✅ ${triggerCount} events`, keyframes: finalKfs.length });
-        } else {
-          results.push({ index: i + 1, status: 'no trackable positions', keyframes: 0 });
         }
         console.log(`[ScanAll] Clip ${i + 1}: ${triggerCount} centering events, ${keyframes.length} keyframes (${method})${scanSmooth ? ` (smoothed ${scanSmoothAmount}%)` : ''}`);
-
-        // Brief pause between clips to let state settle
-        await new Promise(r => setTimeout(r, 300));
       } catch (e) {
         console.error(`[ScanAll] Clip ${i + 1} failed:`, e);
-        results.push({ index: i + 1, status: `error: ${e instanceof Error ? e.message : 'unknown'}`, keyframes: 0 });
       }
     }
 
-    // Summary
-    const totalKfs = results.reduce((sum, r) => sum + r.keyframes, 0);
-    const scannedCount = results.filter(r => r.status.startsWith('✅') || r.status === 'cached').length;
-    const summary = results.map(r => `  Clip ${r.index}: ${r.status} (${r.keyframes} kfs)`).join('\n');
-    console.log(`[ScanAll] Complete. ${scannedCount}/${videoSegs.length} clips processed:\n${summary}`);
-    setScanProgress(`Done — ${scannedCount}/${videoSegs.length} clips, ${totalKfs} total keyframes`);
-    alert(`✅ Scan All complete!\n\n${scannedCount}/${videoSegs.length} clips processed, ${totalKfs} total keyframes\n\n${summary}`);
+    setScanProgress(`All ${videoSegs.length} clips scanned`);
     await new Promise(r => setTimeout(r, 1500));
-    scanningVideoRef.current = false;
     setStatus(ProcessingStatus.IDLE);
     setScanProgress('');
     setScanMethod('');
@@ -4195,12 +4061,19 @@ function App() {
   return (
     <div className="flex h-screen w-screen bg-[#121212] text-gray-200 overflow-hidden relative font-sans">
 
+      {/* Server disconnected banner */}
+      {serverStatus === 'disconnected' && (
+        <div className="fixed top-0 left-0 right-0 z-[9999] bg-red-600 text-white text-center py-1.5 text-sm font-medium">
+          Backend server unreachable — reconnecting...
+        </div>
+      )}
+
       {/* Scan & Center progress banner — always visible while scanning */}
       {status === ProcessingStatus.SCANNING && (
         <div className="fixed bottom-0 left-0 right-0 z-[500] bg-cyan-900/95 border-t border-cyan-500 px-4 py-2 flex items-center gap-3">
           <svg className="w-4 h-4 text-cyan-300 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
           </svg>
           <span className="text-cyan-200 text-sm font-medium">Scan & Center:</span>
           {scanMethod && (
@@ -4328,7 +4201,7 @@ function App() {
           {/* Scan / radar icon */}
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="2" fill="currentColor" />
-            <path strokeLinecap="round" d="M12 12 L19.5 4.5" opacity="0.5" />
+            <path strokeLinecap="round" d="M12 12 L19.5 4.5" opacity="0.5"/>
             <path strokeLinecap="round" d="M12 3a9 9 0 100 18A9 9 0 0012 3z" />
             <path strokeLinecap="round" d="M12 7a5 5 0 100 10A5 5 0 0012 7z" opacity="0.5" />
           </svg>
@@ -4455,7 +4328,7 @@ function App() {
                 onClick={async () => {
                   setIsSaving(true);
                   try {
-                    await contentDB.saveProject(project, globalKeyframes);
+                    await contentDB.saveProject(project);
                     setTimeout(() => setIsSaving(false), 1000);
                   } catch (e) {
                     console.error(e);
@@ -4466,37 +4339,7 @@ function App() {
                 disabled={isSaving}
                 className={`px-3 py-1 text-xs rounded font-medium flex items-center gap-1 ${isSaving ? 'bg-green-600 text-white' : 'bg-[#333] text-gray-300 hover:text-white hover:bg-[#444]'}`}
               >
-                {isSaving ? '💾 Saved' : '💾 Save'}
-              </button>
-              <button
-                onClick={async () => {
-                  const confirmed = window.confirm(
-                    '🗑️ Create a New Project?\n\nThis will clear all media, clips, keyframes, subtitles, and settings from the editor.\n\nYour saved scan cache data will be preserved.\n\nAre you sure?'
-                  );
-                  if (!confirmed) return;
-
-                  // Clear the saved project from IndexedDB
-                  try { await contentDB.deleteProject(); } catch (e) { console.error('Failed to clear saved project:', e); }
-
-                  // Revoke all existing object URLs to free memory
-                  project.library.forEach(item => {
-                    if (item.url) try { URL.revokeObjectURL(item.url); } catch (_) { }
-                  });
-
-                  // Reset all state
-                  setProject(INITIAL_STATE);
-                  setGlobalKeyframes([]);
-                  setUndoStack([]);
-                  setRedoStack([]);
-                  setMessages([{ id: '1', role: 'model', text: 'New project created. Upload clips to the Media Bin to begin editing.', timestamp: new Date() }]);
-                  setSelectedDialogues([]);
-                  setIsTitleSelected(false);
-                  console.log('[NewProject] Editor reset');
-                }}
-                className="px-3 py-1 text-xs rounded font-medium text-gray-400 hover:text-white bg-[#333] hover:bg-[#444]"
-                title="Create a new empty project — clears all current media, clips, and settings"
-              >
-                📄 New
+                {isSaving ? '💾 Saving...' : '💾 Save Project'}
               </button>
               <div className="w-px h-6 bg-[#444] mx-1"></div>
               <button
@@ -4512,18 +4355,6 @@ function App() {
                   }`}
               >
                 Content Library
-              </button>
-              <div className="w-px h-6 bg-[#444] mx-1"></div>
-              <button
-                onClick={() => setShowSettings(true)}
-                title="Settings — API Keys & Cache"
-                className="px-2 py-1 text-xs rounded font-medium text-gray-400 hover:text-white hover:bg-[#444] flex items-center gap-1"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-                ⚙
               </button>
             </div>
             {/* Tracking Progress Overlay — only show for auto-tracking, not manual (viewport stays visible during manual) */}
@@ -5454,9 +5285,6 @@ function App() {
           hasCachedData={project.library.some(m => (m.fillerDetections?.length ?? 0) > 0)}
         />
       )}
-
-      {/* Settings Panel Modal */}
-      <SettingsPanel isOpen={showSettings} onClose={() => setShowSettings(false)} />
     </div>
   );
 }
