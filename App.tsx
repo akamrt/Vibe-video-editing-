@@ -26,6 +26,7 @@ import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
 import { getAudioBuffer, findNearestSilence, snapFillerRange, clearAudioBufferCache } from './utils/audioAnalysis';
+import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
 
 const INITIAL_SUBTITLE_STYLE: SubtitleStyle = {
   fontFamily: 'Arial',
@@ -156,6 +157,13 @@ function App() {
   const projectRef = useRef(project);
   useEffect(() => { projectRef.current = project; }, [project]);
 
+  // Server health polling — shows banner when backend is unreachable
+  useEffect(() => {
+    startHealthPolling();
+    const unsub = onStatusChange(setServerStatus);
+    return () => { stopHealthPolling(); unsub(); };
+  }, []);
+
   // Cost tracker: load persisted data + subscribe to updates
   useEffect(() => {
     const sync = () => { setCostTotal(getSessionTotal()); setCostLog(getSessionLog()); };
@@ -246,6 +254,7 @@ function App() {
   const [showFillerModal, setShowFillerModal] = useState(false);
   const [fillerDetections, setFillerDetections] = useState<FillerDetectionWithMedia[]>([]);
   const [activePage, setActivePage] = useState<'editor' | 'library'>('editor');
+  const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'connecting'>('connecting');
 
   // Viewport & Export Settings
   const [viewportSettings, setViewportSettings] = useState<ViewportSettings>({
@@ -4051,6 +4060,13 @@ function App() {
 
   return (
     <div className="flex h-screen w-screen bg-[#121212] text-gray-200 overflow-hidden relative font-sans">
+
+      {/* Server disconnected banner */}
+      {serverStatus === 'disconnected' && (
+        <div className="fixed top-0 left-0 right-0 z-[9999] bg-red-600 text-white text-center py-1.5 text-sm font-medium">
+          Backend server unreachable — reconnecting...
+        </div>
+      )}
 
       {/* Scan & Center progress banner — always visible while scanning */}
       {status === ProcessingStatus.SCANNING && (

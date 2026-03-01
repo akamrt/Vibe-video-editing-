@@ -17,6 +17,9 @@ console.log(`Using yt-dlp: ${YT_DLP}`);
 const app = express();
 const PORT = 3001; // Changed to 3001 to match Vite proxy
 
+// Track all spawned child processes for cleanup on shutdown
+const activeChildren = new Set();
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
@@ -33,6 +36,16 @@ if (isElectron && fs.existsSync(distPath)) {
 // Root route to confirm server status
 app.get('/', (req, res) => {
     res.send('Vibe Video Editing API Server is running. Access endpoints at /api/...');
+});
+
+// Health check endpoint for frontend/Electron to verify server is alive
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        uptime: process.uptime(),
+        activeProcesses: activeChildren.size,
+        port: PORT,
+    });
 });
 
 // Video download endpoint using global yt-dlp
@@ -1040,6 +1053,7 @@ app.post('/api/tracking/analyze', async (req, res) => {
             stdio: ['pipe', 'pipe', 'pipe'],
             env: { ...process.env },
         });
+        activeChildren.add(child);
 
         // Manual timeout since spawn doesn't support timeout option
         const killTimer = setTimeout(() => {
@@ -1071,6 +1085,7 @@ app.post('/api/tracking/analyze', async (req, res) => {
         });
 
         child.on('close', (code) => {
+            activeChildren.delete(child);
             clearTimeout(killTimer);
             if (code !== 0) {
                 console.error(`[Tracking] Python tracker exited with code ${code}`);
@@ -1093,6 +1108,7 @@ app.post('/api/tracking/analyze', async (req, res) => {
         });
 
         child.on('error', (err) => {
+            activeChildren.delete(child);
             clearTimeout(killTimer);
             console.error('[Tracking] Failed to spawn tracker:', err.message);
             res.status(500).json({ success: false, error: err.message, fallback: true });
@@ -1160,7 +1176,98 @@ if (isElectron && fs.existsSync(distPath)) {
     });
 }
 
-app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
-    if (isElectron) console.log('[Server] Running in Electron mode');
+// ==================== Server Startup & Process Management ====================
+
+let server = null;
+
+async function killProcessOnPort(port) {
+    try {
+        if (process.platform === 'win32') {
+            const { stdout } = await execAsync(
+                `netstat -ano | findstr :${port} | findstr LISTENING`
+            );
+            for (const line of stdout.trim().split('\n')) {
+                const pid = line.trim().split(/\s+/).pop();
+                if (pid && pid !== '0' && pid !== String(process.pid)) {
+                    console.log(`[Server] Killing stale process on port ${port}: PID ${pid}`);
+                    await execAsync(`taskkill /F /PID ${pid}`).catch(() => {});
+                }
+            }
+        } else {
+            await execAsync(`lsof -ti:${port} | xargs kill -9`).catch(() => {});
+        }
+    } catch {
+        // No process found on port — that's fine
+    }
+}
+
+function startServer(port, retryCount = 0) {
+    server = app.listen(port, () => {
+        console.log(`Server running at http://localhost:${port}`);
+        if (isElectron) console.log('[Server] Running in Electron mode');
+    });
+
+    server.on('error', async (err) => {
+        if (err.code === 'EADDRINUSE' && retryCount === 0) {
+            console.warn(`[Server] Port ${port} in use, killing stale process...`);
+            await killProcessOnPort(port);
+            setTimeout(() => startServer(port, 1), 1000);
+        } else {
+            console.error(`[Server] Failed to start on port ${port}:`, err.message);
+            process.exit(1);
+        }
+    });
+}
+
+startServer(PORT);
+
+// Graceful shutdown — clean up child processes and temp files
+function gracefulShutdown(signal) {
+    console.log(`[Server] ${signal} received, shutting down...`);
+
+    // Kill all active child processes (Python tracker etc.)
+    for (const child of activeChildren) {
+        try {
+            if (process.platform === 'win32' && child.pid) {
+                spawn('taskkill', ['/pid', String(child.pid), '/f', '/t'], { stdio: 'ignore' });
+            } else {
+                child.kill('SIGTERM');
+            }
+        } catch (e) {
+            console.error('[Server] Failed to kill child:', e.message);
+        }
+    }
+    activeChildren.clear();
+
+    // Clean up tracking temp files
+    for (const [id, info] of trackingFiles) {
+        try { fs.unlinkSync(info.path); } catch {}
+    }
+    trackingFiles.clear();
+
+    // Close the HTTP server
+    if (server) {
+        server.close(() => {
+            console.log('[Server] HTTP server closed');
+            process.exit(0);
+        });
+    }
+
+    // Force exit after 5 seconds if graceful close hangs
+    setTimeout(() => {
+        console.error('[Server] Forced exit after timeout');
+        process.exit(1);
+    }, 5000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('exit', () => {
+    // Last-ditch cleanup for unexpected exits
+    for (const child of activeChildren) {
+        try { child.kill(); } catch {}
+    }
 });
+
+// Expose for Electron in-process usage
+process.__vibecut_shutdown = gracefulShutdown;
