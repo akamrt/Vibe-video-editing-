@@ -36,9 +36,14 @@ if not exist ".env.local" (
 
 :: Kill any existing processes on our ports
 echo  Checking for other instances...
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":3000" ^| findstr "LISTENING" 2^>nul') do (
+    taskkill /F /PID %%a >nul 2>nul
+)
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":3001" ^| findstr "LISTENING" 2^>nul') do (
     taskkill /F /PID %%a >nul 2>nul
 )
+:: Kill any orphaned Python tracker processes
+taskkill /F /IM vibecut-tracker.exe >nul 2>nul
 
 :: Start the backend server in a new minimized window
 echo  Starting backend server...

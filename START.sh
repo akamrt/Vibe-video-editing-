@@ -31,6 +31,8 @@ cleanup() {
         kill $BACKEND_PID 2>/dev/null
         wait $BACKEND_PID 2>/dev/null
     fi
+    # Kill any orphaned tracker processes
+    pkill -f vibecut-tracker 2>/dev/null || true
     echo "Goodbye!"
     exit 0
 }

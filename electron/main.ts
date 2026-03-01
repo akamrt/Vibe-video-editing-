@@ -43,6 +43,20 @@ function startExpressServer() {
   require('../server/server.cjs');
 }
 
+async function waitForServer(url: string, timeoutMs = 15000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await fetch(`${url}/api/health`);
+      if (res.ok) return true;
+    } catch {
+      // Server not ready yet
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return false;
+}
+
 function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -150,8 +164,8 @@ ipcMain.handle('setup:complete', async () => {
 
   if (!isDev) {
     startExpressServer();
-    // Give server a moment to start
-    await new Promise(r => setTimeout(r, 1500));
+    const ready = await waitForServer('http://localhost:3001');
+    if (!ready) console.error('[Electron] Server failed to start within timeout');
   }
 
   createMainWindow();
@@ -171,11 +185,17 @@ app.whenReady().then(async () => {
     createMainWindow();
   } else if (hasCompletedSetup()) {
     startExpressServer();
-    // Give server a moment to start
-    await new Promise(r => setTimeout(r, 1500));
+    const ready = await waitForServer('http://localhost:3001');
+    if (!ready) console.error('[Electron] Server failed to start within timeout');
     createMainWindow();
   } else {
     createSetupWindow();
+  }
+});
+
+app.on('before-quit', () => {
+  if (typeof (process as any).__vibecut_shutdown === 'function') {
+    (process as any).__vibecut_shutdown('electron-quit');
   }
 });
 
