@@ -90,16 +90,28 @@ def handle_capabilities(_request: dict) -> dict:
     return caps
 
 
+def _write_result(data: dict):
+    """Write JSON result to stdout explicitly. Works around PyInstaller on Windows
+    sometimes redirecting print() to stderr."""
+    output = json.dumps(data)
+    sys.stdout.write(output + '\n')
+    sys.stdout.flush()
+    # Also write to stderr as a backup channel so the server can recover
+    # if stdout is swallowed by the PyInstaller bootloader.
+    sys.stderr.write(f'__RESULT__{output}__END_RESULT__\n')
+    sys.stderr.flush()
+
+
 def main():
     try:
         raw_input = sys.stdin.read()
         if not raw_input.strip():
-            print(json.dumps({'success': False, 'error': 'Empty input'}))
+            _write_result({'success': False, 'error': 'Empty input'})
             return
 
         request = json.loads(raw_input)
     except json.JSONDecodeError as e:
-        print(json.dumps({'success': False, 'error': f'Invalid JSON input: {str(e)}'}))
+        _write_result({'success': False, 'error': f'Invalid JSON input: {str(e)}'})
         return
 
     command = request.get('command', 'track')
@@ -116,7 +128,7 @@ def main():
     except Exception as e:
         result = {'success': False, 'error': str(e)}
 
-    print(json.dumps(result))
+    _write_result(result)
 
 
 if __name__ == '__main__':
