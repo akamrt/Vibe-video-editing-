@@ -1092,8 +1092,38 @@ app.post('/api/tracking/analyze', async (req, res) => {
                 console.error(`[Tracking] stderr: ${stderr.substring(0, 500)}`);
                 return res.status(500).json({ success: false, error: `Tracker exited with code ${code}`, stderr: stderr.substring(0, 500), fallback: true });
             }
+
+            // Try to parse JSON result from stdout first.
+            // PyInstaller on Windows can sometimes redirect stdout to stderr,
+            // so if stdout is empty/invalid, also check stderr for the result.
+            let resultJson = stdout.trim();
+
+            // If stdout is empty or not valid JSON, check stderr for backup result marker
+            if (!resultJson || !resultJson.startsWith('{')) {
+                const marker = stderr.match(/__RESULT__(.+?)__END_RESULT__/);
+                if (marker) {
+                    console.log('[Tracking] stdout empty, recovered result from stderr backup marker');
+                    resultJson = marker[1];
+                } else {
+                    // Last resort: try to find a JSON object in stderr
+                    // (PyInstaller may route print() to stderr on Windows)
+                    const lines = stderr.split('\n').filter(l => l.trim());
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        const line = lines[i].trim();
+                        if (line.startsWith('{') && line.endsWith('}')) {
+                            try {
+                                JSON.parse(line);
+                                console.log('[Tracking] stdout empty, recovered JSON result from stderr');
+                                resultJson = line;
+                                break;
+                            } catch {}
+                        }
+                    }
+                }
+            }
+
             try {
-                const result = JSON.parse(stdout);
+                const result = JSON.parse(resultJson);
                 if (result.success === false) {
                     console.error(`[Tracking] Tracker returned error: ${result.error}`);
                 } else {
@@ -1102,7 +1132,8 @@ app.post('/api/tracking/analyze', async (req, res) => {
                 if (stderr.trim()) console.log(`[Tracking] stderr: ${stderr.substring(0, 1000)}`);
                 res.json(result);
             } catch (e) {
-                console.error('[Tracking] Invalid tracker output:', stdout.substring(0, 200));
+                console.error('[Tracking] Invalid tracker output. stdout:', stdout.substring(0, 200));
+                console.error('[Tracking] stderr:', stderr.substring(0, 500));
                 res.status(500).json({ success: false, error: 'Invalid tracker output', fallback: true });
             }
         });

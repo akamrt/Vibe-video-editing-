@@ -13,6 +13,7 @@ export default defineConfig(({ mode }) => {
           target: 'http://localhost:3001',
           changeOrigin: true,
           secure: false,
+          timeout: 600000, // 10 min — Python tracker + large video uploads can be slow
         }
       }
     },

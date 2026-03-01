@@ -37,10 +37,16 @@ const uploadCache = new Map<string, { fileId: string; uploadedAt: number }>();
 export async function checkPythonTrackerAvailable(): Promise<boolean> {
   try {
     const res = await fetch('/api/tracking/capabilities');
-    if (!res.ok) return false;
+    if (!res.ok) {
+      console.log(`[TrackingBridge] capabilities check failed: HTTP ${res.status}`);
+      return false;
+    }
     const data = await res.json();
-    return data.success && data.available;
-  } catch {
+    const available = data.success && data.available;
+    console.log(`[TrackingBridge] capabilities check: available=${available}`, data);
+    return available;
+  } catch (e) {
+    console.log('[TrackingBridge] capabilities check error (server not running?):', e);
     return false;
   }
 }
@@ -89,12 +95,16 @@ async function uploadVideoForTracking(
     });
 
     if (!res.ok) {
-      console.error('[TrackingBridge] Upload failed:', res.status);
+      const errText = await res.text().catch(() => '');
+      console.error(`[TrackingBridge] Upload failed: HTTP ${res.status}`, errText.substring(0, 200));
       return null;
     }
 
     const data = await res.json();
-    if (!data.success || !data.fileId) return null;
+    if (!data.success || !data.fileId) {
+      console.error('[TrackingBridge] Upload returned unexpected data:', data);
+      return null;
+    }
 
     // Cache the upload
     const cacheKey = `${file.name}_${file.size}`;
