@@ -4,14 +4,14 @@
     {
       "name": "dev",
       "runtimeExecutable": "cmd",
-      "runtimeArgs": ["/c", "npm", "run", "dev"],
+      "runtimeArgs": ["/c", "cd /d C:\\Users\\Nathan\\Documents\\code\\Vibe-video-editing- && npm run dev"],
       "port": 3000,
       "autoPort": false
     },
     {
       "name": "server",
       "runtimeExecutable": "cmd",
-      "runtimeArgs": ["/c", "npm", "run", "server"],
+      "runtimeArgs": ["/c", "cd /d C:\\Users\\Nathan\\Documents\\code\\Vibe-video-editing- && npm run server"],
       "port": 3001,
       "autoPort": false
     }
