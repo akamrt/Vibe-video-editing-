@@ -359,6 +359,9 @@ function App() {
     return Math.max(contentDuration + 5, 30); // Min 30s view, always some padding
   }, [contentDuration]);
 
+  // Map of mediaId → File for waveform rendering in Timeline
+  const mediaFilesMap = useMemo(() => new Map(project.library.map(m => [m.id, m.file])), [project.library]);
+
   // Identify active segments at the current time (Logical)
   const activeSegments = useMemo(() => {
     return project.segments.filter(s =>
@@ -5145,6 +5148,7 @@ function App() {
                 onInsertBlank={handleInsertBlank}
                 zoom={timelineZoom}
                 onZoomChange={safeSetTimelineZoom}
+                mediaFiles={mediaFilesMap}
               />
             )}
             {activeBottomTab === 'graph' && (

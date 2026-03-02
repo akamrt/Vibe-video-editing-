@@ -299,3 +299,61 @@ export function snapFillerRange(
 
   return { startTime: snappedStart, endTime: snappedEnd };
 }
+
+// ── Waveform Peak Extraction ─────────────────────────────
+
+export interface WaveformPeak {
+  min: number;
+  max: number;
+}
+
+/**
+ * Extract downsampled min/max peaks from an AudioBuffer for waveform rendering.
+ * Mixes stereo to mono. Returns one { min, max } pair per bucket.
+ */
+export function getWaveformPeaks(
+  audioBuffer: AudioBuffer,
+  startTime: number,
+  endTime: number,
+  numBuckets: number
+): WaveformPeak[] {
+  const sampleRate = audioBuffer.sampleRate;
+  const numChannels = audioBuffer.numberOfChannels;
+  const startSample = Math.max(0, Math.floor(startTime * sampleRate));
+  const endSample = Math.min(Math.floor(endTime * sampleRate), audioBuffer.length);
+  const totalSamples = endSample - startSample;
+
+  if (totalSamples <= 0 || numBuckets <= 0) return [];
+
+  // Get channel data (mono mix if stereo)
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < numChannels; c++) {
+    channels.push(audioBuffer.getChannelData(c));
+  }
+
+  const samplesPerBucket = totalSamples / numBuckets;
+  const peaks: WaveformPeak[] = new Array(numBuckets);
+
+  for (let b = 0; b < numBuckets; b++) {
+    const bucketStart = startSample + Math.floor(b * samplesPerBucket);
+    const bucketEnd = startSample + Math.floor((b + 1) * samplesPerBucket);
+    let min = 1;
+    let max = -1;
+
+    for (let i = bucketStart; i < bucketEnd && i < endSample; i++) {
+      // Average across channels for mono mix
+      let sample = 0;
+      for (let c = 0; c < numChannels; c++) {
+        sample += channels[c][i];
+      }
+      sample /= numChannels;
+
+      if (sample < min) min = sample;
+      if (sample > max) max = sample;
+    }
+
+    peaks[b] = { min, max };
+  }
+
+  return peaks;
+}
