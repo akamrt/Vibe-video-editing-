@@ -78,6 +78,7 @@ export interface ClipTransform {
     translateY: number;
     scale: number;
     rotation: number;
+    volume: number;
 }
 
 /**
@@ -95,7 +96,8 @@ export const getInterpolatedTransform = (
         translateX: 0,
         translateY: 0,
         scale: 1,
-        rotation: 0
+        rotation: 0,
+        volume: 1
     };
 
     if (!keyframes || keyframes.length === 0) {
@@ -111,7 +113,8 @@ export const getInterpolatedTransform = (
             translateX: sorted[0].translateX,
             translateY: sorted[0].translateY,
             scale: sorted[0].scale,
-            rotation: sorted[0].rotation
+            rotation: sorted[0].rotation,
+            volume: sorted[0].volume ?? 1
         };
     }
 
@@ -122,7 +125,8 @@ export const getInterpolatedTransform = (
             translateX: last.translateX,
             translateY: last.translateY,
             scale: last.scale,
-            rotation: last.rotation
+            rotation: last.rotation,
+            volume: last.volume ?? 1
         };
     }
 
@@ -138,12 +142,13 @@ export const getInterpolatedTransform = (
     }
 
     // Interpolate each property
-    const props: (keyof ClipTransform)[] = ['translateX', 'translateY', 'scale', 'rotation'];
+    const props: (keyof ClipTransform)[] = ['translateX', 'translateY', 'scale', 'rotation', 'volume'];
     const result: ClipTransform = { ...defaultTransform };
 
     props.forEach(prop => {
-        const v0 = prev[prop];
-        const v1 = next[prop];
+        // volume is optional on ClipKeyframe — default to 1 when absent
+        const v0 = prop === 'volume' ? (prev.volume ?? 1) : prev[prop] as number;
+        const v1 = prop === 'volume' ? (next.volume ?? 1) : next[prop] as number;
         const t0 = prev.time;
         const t1 = next.time;
         const cfg0 = prev.keyframeConfig?.[prop];

@@ -620,6 +620,21 @@ function App() {
           }
         }
 
+        // --- Audio: keyframed volume + micro-fade at cut boundaries ---
+        const clipTime = project.currentTime - seg.timelineStart;
+        const clipTransform = getInterpolatedTransform(seg.keyframes, clipTime);
+        let audioVolume = clipTransform.volume; // from keyframes, defaults to 1.0
+
+        // 30ms fade-in/out at segment edges to prevent clicks at cuts
+        const AUDIO_FADE_SEC = 0.03;
+        if (relTime < AUDIO_FADE_SEC) {
+          audioVolume *= relTime / AUDIO_FADE_SEC;
+        }
+        if (relTime > duration - AUDIO_FADE_SEC) {
+          audioVolume *= Math.max(0, (duration - relTime) / AUDIO_FADE_SEC);
+        }
+        videoEl.volume = Math.max(0, Math.min(1, audioVolume));
+
         videoEl.style.opacity = opacity.toString();
         videoEl.style.mixBlendMode = videoBlendMode;
 
@@ -4147,6 +4162,25 @@ function App() {
                   });
                 }
               } : undefined}
+              currentVolume={primarySelectedSegment ? getInterpolatedTransform(primarySelectedSegment.keyframes, project.currentTime - primarySelectedSegment.timelineStart).volume : undefined}
+              onAddVolumeKey={(segId: string, volume: number) => {
+                const seg = project.segments.find(s => s.id === segId);
+                if (!seg) return;
+                const clipTime = project.currentTime - seg.timelineStart;
+                const currentVals = getInterpolatedTransform(seg.keyframes, clipTime);
+                const newKf: ClipKeyframe = {
+                  time: clipTime,
+                  translateX: currentVals.translateX,
+                  translateY: currentVals.translateY,
+                  scale: currentVals.scale,
+                  rotation: currentVals.rotation,
+                  volume,
+                };
+                const existing = seg.keyframes || [];
+                const filtered = existing.filter(kf => Math.abs(kf.time - clipTime) >= 0.01);
+                const updated = [...filtered, newKf].sort((a, b) => a.time - b.time);
+                handleUpdateSegments([{ ...seg, keyframes: updated }]);
+              }}
             />
           )}
         </div>

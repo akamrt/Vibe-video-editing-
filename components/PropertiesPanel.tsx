@@ -30,6 +30,8 @@ interface PropertiesPanelProps {
   onUpdateWordEmphases?: (emphases: KeywordEmphasis[]) => void;
   activeKeywordAnimation?: TextAnimation | null;
   onUpdateKeywordAnimation?: (animation: TextAnimation | null) => void;
+  currentVolume?: number; // Interpolated volume at current playback position (0-1)
+  onAddVolumeKey?: (segId: string, volume: number) => void;
 }
 
 const BLEND_MODES = [
@@ -132,8 +134,11 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   onUpdateWordEmphases,
   activeKeywordAnimation,
   onUpdateKeywordAnimation,
+  currentVolume,
+  onAddVolumeKey,
 }) => {
   const [analysisFocus, setAnalysisFocus] = useState('');
+  const [volumeSlider, setVolumeSlider] = useState(100);
 
   if (!selectedSegment && !selectedTransition && !selectedDialogue && !isTitleSelected) {
     return (
@@ -846,6 +851,35 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 </div>
               </div>
             </Accordion>
+
+            {selectedSegment.type !== 'blank' && (
+              <Accordion title="Audio" defaultOpen={true}>
+                <div className="space-y-4">
+                  {currentVolume !== undefined && (
+                    <div className="flex items-center justify-between text-[10px] text-gray-400">
+                      <span>Current: {Math.round(currentVolume * 100)}%</span>
+                    </div>
+                  )}
+                  <Field label={`Volume: ${volumeSlider}%`} stack={true}>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={volumeSlider}
+                      onChange={(e) => setVolumeSlider(parseInt(e.target.value))}
+                      className="w-full accent-amber-400"
+                    />
+                  </Field>
+                  <button
+                    onClick={() => onAddVolumeKey && selectedSegment && onAddVolumeKey(selectedSegment.id, volumeSlider / 100)}
+                    className="w-full py-2 bg-amber-600/20 text-amber-400 border border-amber-600/50 rounded-md hover:bg-amber-600/30 text-[11px] font-bold uppercase tracking-widest transition-colors"
+                  >
+                    Add Volume Key
+                  </button>
+                  <p className="text-[9px] text-gray-500 text-center">Set volume slider, then add a keyframe at the current time. Use Graph Editor for full curve control.</p>
+                </div>
+              </Accordion>
+            )}
 
             {selectedSegment.type !== 'blank' && (
               <Accordion title="AI Analysis" defaultOpen={false}>
