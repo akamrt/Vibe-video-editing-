@@ -1,5 +1,6 @@
-import React, { useRef, useState, useEffect, useMemo } from 'react';
+import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { Segment, VideoAnalysis, Transition, TitleLayer } from '../types';
+import { getAudioBuffer, getWaveformPeaks } from '../utils/audioAnalysis';
 
 interface TimelineProps {
   duration: number;
@@ -28,7 +29,69 @@ interface TimelineProps {
   onInsertBlank?: (time: number) => void;
   zoom: number;
   onZoomChange: (zoom: number) => void;
+  mediaFiles?: Map<string, File>;
 }
+
+/** Small canvas component that renders an audio waveform for a segment */
+const WaveformCanvas: React.FC<{
+  mediaId: string;
+  file: File;
+  startTime: number;
+  endTime: number;
+  color?: string;
+}> = React.memo(({ mediaId, file, startTime, endTime, color = '#22c55e' }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+
+    const draw = async () => {
+      try {
+        const audioBuffer = await getAudioBuffer(mediaId, file);
+        if (cancelled) return;
+
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+        if (width === 0 || height === 0) return;
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const peaks = getWaveformPeaks(audioBuffer, startTime, endTime, width);
+        const ctx = canvas.getContext('2d');
+        if (!ctx || peaks.length === 0) return;
+
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.6;
+
+        const centerY = height / 2;
+        for (let i = 0; i < peaks.length; i++) {
+          const { min, max } = peaks[i];
+          const top = centerY - max * centerY;
+          const bottom = centerY - min * centerY;
+          const barHeight = Math.max(1, bottom - top);
+          ctx.fillRect(i, top, 1, barHeight);
+        }
+      } catch {
+        // Audio decode may fail for some formats — silently fall back to empty
+      }
+    };
+
+    draw();
+    return () => { cancelled = true; };
+  }, [mediaId, file, startTime, endTime, color]);
+
+  return (
+    <div ref={containerRef} className="absolute inset-0">
+      <canvas ref={canvasRef} className="w-full h-full" />
+    </div>
+  );
+});
 
 const Timeline: React.FC<TimelineProps> = ({
   duration,
@@ -56,7 +119,8 @@ const Timeline: React.FC<TimelineProps> = ({
   onUpdateTitle,
   onInsertBlank,
   zoom,
-  onZoomChange
+  onZoomChange,
+  mediaFiles
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0); // Track scroll for virtualization
@@ -958,8 +1022,16 @@ const Timeline: React.FC<TimelineProps> = ({
                         className={`absolute top-1 bottom-1 ${seg.type === 'blank' ? 'bg-[#222222] border-[#333]' : 'bg-green-900/30 border-green-500/30'} border rounded overflow-hidden flex items-center justify-center`}
                         style={{ left: `${seg.leftPercent}%`, width: `${seg.widthPercent}%` }}
                       >
-                        {/* Audio Waveform Shim */}
-                        {seg.type !== 'blank' && (
+                        {/* Audio Waveform */}
+                        {seg.type !== 'blank' && mediaFiles?.get(seg.mediaId) && (
+                          <WaveformCanvas
+                            mediaId={seg.mediaId}
+                            file={mediaFiles.get(seg.mediaId)!}
+                            startTime={seg.startTime}
+                            endTime={seg.endTime}
+                          />
+                        )}
+                        {seg.type !== 'blank' && !mediaFiles?.get(seg.mediaId) && (
                           <div className="absolute inset-0 opacity-40 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMCAxMCIgcHJlc2VydmVBc3BlY3RSYXRpbz0ibm9uZSI+PHBhdGggZD0iTTAgNWw1LTUgNSA1di01SDB6IiBmaWxsPSIjZmZmIi8+PC9zdmc+')]" style={{ backgroundSize: '10px 100%' }} />
                         )}
                         <span className="text-[10px] text-white/50 relative z-10">{seg.type === 'blank' ? 'No Audio' : seg.description}</span>
