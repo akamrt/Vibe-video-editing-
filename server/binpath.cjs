@@ -65,18 +65,44 @@ function getFfmpegPath() {
 /**
  * Find the path to the vibecut-tracker Python executable.
  * Returns null if not installed (frontend should fall back to browser tracking).
+ * Checks: BIN_DIR, git worktree main repo bin/, Electron resources, global PATH.
  */
 function getPythonTrackerPath() {
     const ext = isWindows() ? '.exe' : '';
-    const localPath = path.join(BIN_DIR, `vibecut-tracker${ext}`);
+    const name = `vibecut-tracker${ext}`;
 
+    // 1. Standard BIN_DIR (Electron resources or local bin/)
+    const localPath = path.join(BIN_DIR, name);
     if (fs.existsSync(localPath)) return localPath;
 
-    // Also check the other bin dir (if Electron, check local; if local, check Electron)
+    // 2. If in a git worktree, BIN_DIR might not have bin/ — check the main repo
+    //    Git worktrees store the real repo path in .git file
+    try {
+        const dotGit = path.join(__dirname, '..', '.git');
+        if (fs.existsSync(dotGit) && fs.statSync(dotGit).isFile()) {
+            const content = fs.readFileSync(dotGit, 'utf8').trim();
+            const match = content.match(/gitdir:\s*(.+)/);
+            if (match) {
+                // .git file points to e.g. /repo/.git/worktrees/name → main repo is 3 levels up
+                const mainRepo = path.resolve(path.dirname(dotGit), match[1], '..', '..', '..');
+                const mainBinPath = path.join(mainRepo, 'bin', name);
+                if (fs.existsSync(mainBinPath)) return mainBinPath;
+            }
+        }
+    } catch { /* ignore */ }
+
+    // 3. Electron resources fallback
     if (process.resourcesPath) {
-        const devPath = path.join(__dirname, '..', 'bin', `vibecut-tracker${ext}`);
+        const devPath = path.join(__dirname, '..', 'bin', name);
         if (fs.existsSync(devPath)) return devPath;
     }
+
+    // 4. Global PATH
+    try {
+        const cmd = isWindows() ? `where ${name}` : `which ${name}`;
+        const result = execSync(cmd, { encoding: 'utf8', stdio: 'pipe' }).trim().split('\n')[0].trim();
+        if (result && fs.existsSync(result)) return result;
+    } catch { /* not found */ }
 
     return null;
 }

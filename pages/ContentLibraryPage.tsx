@@ -196,8 +196,28 @@ export const ContentLibraryPage: React.FC<{
 
             const result = await buildShortPrompt(shortTargetVideo, shortPrompt, shortDuration, refinementPrompt, existingShorts);
             if (result.success && result.prompt) {
-                await navigator.clipboard.writeText(result.prompt);
-                alert("Prompt copied to clipboard! Paste this into ChatGPT or Claude.");
+                // Try Clipboard API first, fall back to execCommand for permission-denied contexts
+                let copied = false;
+                try {
+                    await navigator.clipboard.writeText(result.prompt);
+                    copied = true;
+                } catch {
+                    // Fallback: textarea + execCommand
+                    const ta = document.createElement('textarea');
+                    ta.value = result.prompt;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    copied = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                if (copied) {
+                    alert("Prompt copied to clipboard! Paste this into ChatGPT or Claude.");
+                } else {
+                    console.log('Generated prompt:\n', result.prompt);
+                    alert("Could not copy to clipboard. The prompt has been logged to the browser console (F12) — you can copy it from there.");
+                }
             } else {
                 alert('Failed to generate prompt: ' + (result.error || 'Unknown error'));
             }

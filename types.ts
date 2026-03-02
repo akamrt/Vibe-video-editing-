@@ -45,6 +45,7 @@ export interface ClipKeyframe {
   translateY: number; // Percentage offset (-100 to 100)
   scale: number; // 1.0 = 100%, 0.5 = 50%, 2.0 = 200%
   rotation: number; // Degrees
+  volume?: number; // 0.0 = silent, 1.0 = full (default when absent)
   keyframeConfig?: Record<string, KeyframeConfig>; // Per-property tangents
 }
 

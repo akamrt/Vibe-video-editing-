@@ -1205,6 +1205,15 @@ function startServer(port, retryCount = 0) {
     server = app.listen(port, () => {
         console.log(`Server running at http://localhost:${port}`);
         if (isElectron) console.log('[Server] Running in Electron mode');
+
+        // Log Python tracker availability at startup
+        const trackerPath = getPythonTrackerPath();
+        if (trackerPath) {
+            console.log(`[Tracking] Python tracker AVAILABLE: ${trackerPath}`);
+        } else {
+            console.log('[Tracking] WARNING: Python tracker NOT FOUND — will fall back to browser tracking');
+            console.log('[Tracking] Expected location: bin/vibecut-tracker' + (process.platform === 'win32' ? '.exe' : ''));
+        }
     });
 
     server.on('error', async (err) => {

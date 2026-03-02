@@ -20,19 +20,25 @@ const CHANNEL_COLORS = {
     translateX: '#ff4444',
     translateY: '#44ff44',
     scale: '#3b82f6',
-    rotation: '#f97316'
+    rotation: '#f97316',
+    volume: '#fbbf24'
 };
 
 const CHANNEL_LABELS = {
     translateX: 'X Position',
     translateY: 'Y Position',
     scale: 'Scale',
-    rotation: 'Rotation'
+    rotation: 'Rotation',
+    volume: 'Volume'
 };
 
 type ChannelType = keyof typeof CHANNEL_COLORS;
-const ALL_CHANNELS: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation'];
-const CHANNEL_DEFAULTS: Record<ChannelType, number> = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+const ALL_CHANNELS: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation', 'volume'];
+const CHANNEL_DEFAULTS: Record<ChannelType, number> = { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
+
+/** Read a channel value from a keyframe, defaulting volume to 1 when absent */
+const kfVal = (kf: ClipKeyframe, ch: ChannelType): number =>
+    ch === 'volume' ? (kf.volume ?? 1) : kf[ch] as number;
 
 // ===== Ramer-Douglas-Peucker Simplification =====
 function rdpSimplify(kfs: ClipKeyframe[], tolerance: number, channels: Set<ChannelType>): ClipKeyframe[] {
@@ -46,8 +52,8 @@ function rdpSimplify(kfs: ClipKeyframe[], tolerance: number, channels: Set<Chann
         const t = (kfs[i].time - start.time) / dt;
         let err = 0;
         for (const ch of channels) {
-            const interp = (start[ch] as number) + t * ((end[ch] as number) - (start[ch] as number));
-            err = Math.max(err, Math.abs((kfs[i][ch] as number) - interp));
+            const interp = kfVal(start, ch) + t * (kfVal(end, ch) - kfVal(start, ch));
+            err = Math.max(err, Math.abs(kfVal(kfs[i], ch) - interp));
         }
         if (err > maxDist) { maxDist = err; maxIdx = i; }
     }
@@ -86,7 +92,7 @@ function smoothKeyframeValues(
             for (let j = Math.max(0, i - radius); j <= Math.min(n - 1, i + radius); j++) {
                 const dist = Math.abs(i - j);
                 const w = Math.exp(-(dist * dist) / (2 * sigma * sigma));
-                wSum += (sorted[j][ch] as number) * w;
+                wSum += kfVal(sorted[j], ch) * w;
                 wTotal += w;
             }
             if (wTotal > 0) (newKf as any)[ch] = wSum / wTotal;
@@ -108,7 +114,7 @@ function clampKeyframeValues(
     if (selectedIndices.length <= 1 || threshold <= 0) return result;
 
     for (const ch of channels) {
-        const indexed = selectedIndices.map(i => ({ idx: i, value: result[i][ch] as number }));
+        const indexed = selectedIndices.map(i => ({ idx: i, value: kfVal(result[i] as ClipKeyframe, ch) }));
         indexed.sort((a, b) => a.value - b.value);
 
         // Group with complete-linkage: compare to group min
@@ -170,7 +176,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
     const selectedKeysRef = useRef<Set<string>>(new Set());
     const [activeChannels, setActiveChannels] = useState<Set<ChannelType>>(
-        new Set(['translateX', 'translateY', 'scale', 'rotation'])
+        new Set(ALL_CHANNELS)
     );
     const dragAccumulator = useRef(0);
 
@@ -320,7 +326,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         ctx.stroke();
 
         // Draw curves for each channel
-        const channels: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation'];
+        const channels: ChannelType[] = ALL_CHANNELS;
 
         channels.forEach(channel => {
             if (!activeChannels.has(channel)) return;
@@ -328,8 +334,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const color = CHANNEL_COLORS[channel];
             const defaultVal = CHANNEL_DEFAULTS[channel];
             const points = keyframes
-                .filter(kf => kf[channel] !== defaultVal) // Hide dots for channels at default value
-                .map(kf => ({ time: kf.time, value: kf[channel] }))
+                .filter(kf => kfVal(kf, channel) !== defaultVal) // Hide dots for channels at default value
+                .map(kf => ({ time: kf.time, value: kfVal(kf, channel) }))
                 .sort((a, b) => a.time - b.time);
 
             if (points.length === 0) return;
@@ -641,7 +647,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             const keyTime = parseFloat(parts[0]);
                             const channel = parts[1];
                             if (Math.abs(kf.time - keyTime) < 0.001) {
-                                (updatedKf as any)[channel] += valueDelta;
+                                (updatedKf as any)[channel] = kfVal(updatedKf, channel as ChannelType) + valueDelta;
                             }
                         });
 
@@ -845,14 +851,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const prev = i > 0 ? newKeyframes[i - 1] : null;
                 const next = i < newKeyframes.length - 1 ? newKeyframes[i + 1] : null;
 
-                const currentVal = kf[channel] as number;
+                const currentVal = kfVal(kf, channel);
                 let inTangent = { x: -0.3, y: 0 };
                 let outTangent = { x: 0.3, y: 0 };
 
                 if (prev && next) {
                     // Calculate slopes
-                    const prevVal = prev[channel] as number;
-                    const nextVal = next[channel] as number;
+                    const prevVal = kfVal(prev, channel);
+                    const nextVal = kfVal(next, channel);
 
                     const dtPrev = kf.time - prev.time;
                     const dtNext = next.time - kf.time;
@@ -878,14 +884,14 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     }
                 } else if (prev) {
                     // End of curve
-                    const prevVal = prev[channel] as number;
+                    const prevVal = kfVal(prev, channel);
                     const dt = kf.time - prev.time;
                     const slope = (currentVal - prevVal) / dt;
                     inTangent = { x: -dt * 0.33, y: -dt * 0.33 * slope };
                     outTangent = { x: 0.33, y: 0 };
                 } else if (next) {
                     // Start of curve
-                    const nextVal = next[channel] as number;
+                    const nextVal = kfVal(next, channel);
                     const dt = next.time - kf.time;
                     const slope = (nextVal - currentVal) / dt;
                     inTangent = { x: -0.33, y: 0 };
@@ -931,11 +937,12 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             translateY: currentVals.translateY,
             scale: currentVals.scale,
             rotation: currentVals.rotation,
+            volume: currentVals.volume,
             keyframeConfig: {}
         };
 
         // Calculate tangents for each channel
-        const channels: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation'];
+        const channels: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation', 'volume'];
         channels.forEach(channel => {
             const vPrev = prevVals[channel];
             const vNext = nextVals[channel];
@@ -997,7 +1004,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
             let valueRange = 0;
             for (const ch of activeChannels) {
-                const vals = selectedKfs.map(kf => kf[ch] as number);
+                const vals = selectedKfs.map(kf => kfVal(kf, ch));
                 const range = Math.max(...vals) - Math.min(...vals);
                 if (range > valueRange) valueRange = range;
             }
@@ -1012,7 +1019,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             // No selection — simplify ALL keyframes
             let valueRange = 0;
             for (const ch of activeChannels) {
-                const vals = sorted.map(kf => kf[ch] as number);
+                const vals = sorted.map(kf => kfVal(kf, ch));
                 const range = Math.max(...vals) - Math.min(...vals);
                 if (range > valueRange) valueRange = range;
             }
@@ -1056,7 +1063,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         if (source.length === 0 || selected.size === 0) return;
         let valueRange = 0;
         for (const ch of activeChannels) {
-            const vals = source.filter(kf => selected.has(kf.time.toFixed(3))).map(kf => kf[ch] as number);
+            const vals = source.filter(kf => selected.has(kf.time.toFixed(3))).map(kf => kfVal(kf, ch));
             if (vals.length === 0) continue;
             const range = Math.max(...vals) - Math.min(...vals);
             if (range > valueRange) valueRange = range;
@@ -1084,10 +1091,10 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                         if (!times.has(newKfs[i].time.toFixed(3))) continue;
                         const prev = i > 0 ? newKfs[i - 1] : null;
                         const next = i < newKfs.length - 1 ? newKfs[i + 1] : null;
-                        const val = newKfs[i][channel] as number;
+                        const val = kfVal(newKfs[i], channel);
                         let inT = { x: -0.3, y: 0 }, outT = { x: 0.3, y: 0 };
                         if (prev && next) {
-                            const pv = prev[channel] as number, nv = next[channel] as number;
+                            const pv = kfVal(prev, channel), nv = kfVal(next, channel);
                             const dtP = newKfs[i].time - prev.time, dtN = next.time - newKfs[i].time;
                             if ((val - pv) * (nv - val) < 0) {
                                 inT = { x: -dtP * 0.33, y: 0 };
@@ -1205,10 +1212,58 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         const canvas = canvasRef.current;
         if (!canvas) return;
 
-        const padding = 50;
-        const newScaleX = (canvas.width - padding * 2) / (segmentDuration || 1);
-        setScale(prev => ({ ...prev, x: newScaleX }));
-        setOffset({ x: padding, y: 0 });
+        const paddingH = 50;
+        const paddingV = 30;
+        const width = canvas.width;
+        const height = canvas.height;
+        const centerY = height / 2;
+
+        // Horizontal: fit segment duration
+        const newScaleX = (width - paddingH * 2) / (segmentDuration || 1);
+
+        // Vertical: find min/max values across all active channels
+        let minVal = Infinity, maxVal = -Infinity;
+        for (const ch of activeChannels) {
+            for (const kf of keyframes) {
+                const v = kfVal(kf, ch);
+                if (v < minVal) minVal = v;
+                if (v > maxVal) maxVal = v;
+            }
+            // Also include the default so the zero-line is visible
+            const def = CHANNEL_DEFAULTS[ch];
+            if (def < minVal) minVal = def;
+            if (def > maxVal) maxVal = def;
+        }
+
+        if (!isFinite(minVal) || !isFinite(maxVal)) {
+            // No keyframes — just fit horizontally with sensible vertical defaults
+            setScale({ x: newScaleX, y: 80 });
+            setOffset({ x: paddingH, y: 0 });
+            return;
+        }
+
+        const valueRange = maxVal - minVal;
+        const usableHeight = height - paddingV * 2;
+
+        let newScaleY: number;
+        let newOffsetY: number;
+
+        if (valueRange < 0.001) {
+            // All values are the same — use a sensible default scale and center on that value
+            newScaleY = 80;
+            newOffsetY = -(centerY - paddingV - minVal * newScaleY - centerY);
+        } else {
+            newScaleY = usableHeight / valueRange;
+            // Center the value range: midpoint of values should map to screen center
+            const midVal = (minVal + maxVal) / 2;
+            // worldToScreen y = centerY - value * scaleY + offsetY
+            // We want midVal to map to screen centerY: centerY = centerY - midVal * scaleY + offsetY
+            // So offsetY = midVal * scaleY
+            newOffsetY = midVal * newScaleY;
+        }
+
+        setScale({ x: newScaleX, y: newScaleY });
+        setOffset({ x: paddingH, y: newOffsetY });
     };
 
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -1464,7 +1519,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             // Simplest: Find index in sorted, take value from sorted[index-1]
                             const sortedIdx = sorted.findIndex(k => Math.abs(k.time - time) < 0.001);
                             if (sortedIdx > 0) {
-                                const prevVal = sorted[sortedIdx - 1][ch as ChannelType];
+                                const prevVal = kfVal(sorted[sortedIdx - 1], ch as ChannelType);
                                 if (kfIndex !== -1) (newKfs[kfIndex] as any)[ch] = prevVal;
                             }
                         });
@@ -1501,7 +1556,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                             const sortedIdx = sorted.findIndex(k => Math.abs(k.time - time) < 0.001);
                             if (sortedIdx !== -1 && sortedIdx < sorted.length - 1) {
-                                const nextVal = sorted[sortedIdx + 1][ch as ChannelType];
+                                const nextVal = kfVal(sorted[sortedIdx + 1], ch as ChannelType);
                                 (newKfs[kfIndex] as any)[ch] = nextVal;
                             }
                         });
