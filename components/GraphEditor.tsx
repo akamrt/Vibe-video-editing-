@@ -636,9 +636,31 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     timesToMove.add(parseFloat(timeStr));
                 });
 
+                // Prevent collisions: clamp timeDelta so moved keyframes don't land on stationary ones
+                const minGap = 1 / fps; // one frame
+                const movingTimes = Array.from(timesToMove);
+                const stationaryTimes = keyframes
+                    .filter(kf => !movingTimes.some(t => Math.abs(kf.time - t) < 0.001))
+                    .map(kf => kf.time);
+
+                let clampedTimeDelta = timeDelta;
+                for (const mt of movingTimes) {
+                    const proposed = mt + clampedTimeDelta;
+                    for (const st of stationaryTimes) {
+                        if (Math.abs(proposed - st) < minGap) {
+                            // Snap to minGap away from the stationary keyframe
+                            if (clampedTimeDelta > 0) {
+                                clampedTimeDelta = Math.min(clampedTimeDelta, (st - minGap) - mt);
+                            } else {
+                                clampedTimeDelta = Math.max(clampedTimeDelta, (st + minGap) - mt);
+                            }
+                        }
+                    }
+                }
+
                 const newKeyframes = keyframes.map(kf => {
                     if (Array.from(timesToMove).some(t => Math.abs(kf.time - t) < 0.001)) {
-                        const newTime = Math.max(0, Math.min(segmentDuration, kf.time + timeDelta));
+                        const newTime = Math.max(0, Math.min(segmentDuration, kf.time + clampedTimeDelta));
                         const updatedKf = { ...kf, time: newTime };
 
                         // Update values for selected channels
@@ -662,7 +684,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const parts = key.split(':');
                     const oldTime = parseFloat(parts[0]);
                     const channel = parts[1];
-                    const newTime = Math.max(0, Math.min(segmentDuration, oldTime + timeDelta));
+                    const newTime = Math.max(0, Math.min(segmentDuration, oldTime + clampedTimeDelta));
                     newSelection.add(getSelectionKey(newTime, channel as ChannelType));
                 });
                 setSelectedKeys(newSelection);
@@ -671,7 +693,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (hoveredKey) {
                     setHoveredKey({
                         ...hoveredKey,
-                        time: Math.max(0, Math.min(segmentDuration, hoveredKey.time + timeDelta)),
+                        time: Math.max(0, Math.min(segmentDuration, hoveredKey.time + clampedTimeDelta)),
                         value: hoveredKey.value + valueDelta
                     });
                 }
@@ -696,7 +718,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     });
 
                     if (kf) {
-                        const value = kf[channel as keyof ClipKeyframe] as number;
+                        const value = kfVal(kf, channel);
                         if (value === chDefault) continue; // Skip handles for default-value channels
                         const config = kf.keyframeConfig?.[channel];
                         const inTangent = config?.inTangent || { x: -0.3, y: 0 };
@@ -718,19 +740,21 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 if (foundHandle) break;
             }
 
-            // Then check for keyframe hover (skip channels at default value)
+            // Then check for keyframe hover — pick the CLOSEST point within threshold
             if (!foundHandle) {
+                let bestDist = Infinity;
                 for (const channel of activeChannels) {
                     const chDefault = CHANNEL_DEFAULTS[channel as ChannelType];
                     for (const kf of keyframes) {
-                        if (kf[channel as keyof ClipKeyframe] === chDefault) continue; // Skip default-value dots
-                        const screen = worldToScreen(kf.time, kf[channel as keyof ClipKeyframe] as number);
-                        if (Math.abs(x - screen.x) < threshold && Math.abs(y - screen.y) < threshold) {
-                            foundKey = { time: kf.time, value: kf[channel as keyof ClipKeyframe] as number, channel: channel as ChannelType };
-                            break;
+                        const val = kfVal(kf, channel as ChannelType);
+                        if (val === chDefault) continue; // Skip default-value dots
+                        const screen = worldToScreen(kf.time, val);
+                        const dist = Math.hypot(x - screen.x, y - screen.y);
+                        if (dist < threshold && dist < bestDist) {
+                            bestDist = dist;
+                            foundKey = { time: kf.time, value: val, channel: channel as ChannelType };
                         }
                     }
-                    if (foundKey) break;
                 }
             }
 
@@ -753,8 +777,9 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             for (const channel of activeChannels) {
                 const chDefault = CHANNEL_DEFAULTS[channel as ChannelType];
                 for (const kf of keyframes) {
-                    if (kf[channel as keyof ClipKeyframe] === chDefault) continue;
-                    const screen = worldToScreen(kf.time, kf[channel as keyof ClipKeyframe] as number);
+                    const marqVal = kfVal(kf, channel as ChannelType);
+                    if (marqVal === chDefault) continue;
+                    const screen = worldToScreen(kf.time, marqVal);
                     if (screen.x >= minX && screen.x <= maxX && screen.y >= minY && screen.y <= maxY) {
                         newSelection.add(getSelectionKey(kf.time, channel as ChannelType));
                     }
