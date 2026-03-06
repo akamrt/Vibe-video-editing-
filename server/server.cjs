@@ -64,23 +64,10 @@ app.get('/api/download', async (req, res) => {
 
         const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-        // Check for cookies file
-        const cookiesFile = path.join(__dirname, '..', 'www.youtube.com_cookies.txt');
-        const hasCookiesFile = fs.existsSync(cookiesFile);
-
-        let cookiesArg = '--cookies-from-browser chrome';
-
-        if (hasCookiesFile) {
-            console.log('Using cookies.txt file for authentication');
-            cookiesArg = `--cookies "${cookiesFile}"`;
-        } else {
-            console.log('Using Chrome browser cookies for authentication');
-        }
-
-        // Get video info first using yt-dlp (async to avoid blocking event loop)
+        // Run without cookies — stale cookies cause "Requested format is not available"
         console.log(`Getting info for: ${videoId}`);
-        const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';
-        const infoCmd = `"${YT_DLP}" --dump-single-json --no-warnings ${cookiesArg} ${uaArgs} "${youtubeUrl}"`;
+        const infoCmd = `"${YT_DLP}" --dump-single-json --no-warnings "${youtubeUrl}"`;
+
         console.log('Running:', infoCmd);
 
         const { stdout: infoJson } = await execAsync(infoCmd, {
@@ -100,7 +87,7 @@ app.get('/api/download', async (req, res) => {
         // Download using yt-dlp (async to avoid blocking event loop)
         console.log('Downloading to temp file:', tempFile);
 
-        const downloadCmd = `"${YT_DLP}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 ${cookiesArg} ${uaArgs} -o "${tempFile}" "${youtubeUrl}"`;
+        const downloadCmd = `"${YT_DLP}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 -o "${tempFile}" "${youtubeUrl}"`;
         console.log('Running:', downloadCmd);
 
         await execAsync(downloadCmd, {
@@ -175,21 +162,8 @@ app.get('/api/video-info', async (req, res) => {
 
     try {
         const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-        // Check for cookies file
-        const cookiesFile = path.join(__dirname, '..', 'www.youtube.com_cookies.txt');
-        const hasCookiesFile = fs.existsSync(cookiesFile);
-
-        let cookiesArg = '--cookies-from-browser chrome';
-
-        if (hasCookiesFile) {
-            console.log('Using cookies.txt file for authentication');
-            cookiesArg = `--cookies "${cookiesFile}"`;
-        } else {
-            console.log('Using Chrome browser cookies for authentication (Make sure Chrome is closed if this fails)');
-        }
-
-        // Get video info using yt-dlp (async to avoid blocking event loop)
-        const cmd = `"${YT_DLP}" --dump-single-json --no-warnings ${cookiesArg} "${youtubeUrl}"`;
+        // Run without cookies — stale cookies cause "Requested format is not available"
+        const cmd = `"${YT_DLP}" --dump-single-json --no-warnings "${youtubeUrl}"`;
         console.log('Fetching video info:', cmd);
 
         const { stdout: infoJson } = await execAsync(cmd, {
