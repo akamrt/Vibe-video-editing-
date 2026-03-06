@@ -26,7 +26,8 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "remotion": "^4.0.419",
-    "youtube-transcript": "^1.2.1"
+    "youtube-transcript": "^1.2.1",
+    "youtube-transcript-api": "^3.0.6"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

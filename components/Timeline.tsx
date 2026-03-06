@@ -31,6 +31,8 @@ interface TimelineProps {
   zoom: number;
   onZoomChange: (zoom: number) => void;
   mediaFiles?: Map<string, File>;
+  onUnlinkAudio?: (segId: string) => void;
+  onRelinkAudio?: (segId: string) => void;
 }
 
 /** Small canvas component that renders an audio waveform for a segment */
@@ -121,7 +123,9 @@ const Timeline: React.FC<TimelineProps> = ({
   onInsertBlank,
   zoom,
   onZoomChange,
-  mediaFiles
+  mediaFiles,
+  onUnlinkAudio,
+  onRelinkAudio
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0); // Track scroll for virtualization
@@ -129,6 +133,9 @@ const Timeline: React.FC<TimelineProps> = ({
   // Zoom sensitivity state (max zoom level)
   const [zoomSensitivity, setZoomSensitivity] = useState(500);
   const prevZoomRef = useRef(zoom);
+
+  // Audio context menu state
+  const [audioContextMenu, setAudioContextMenu] = useState<{ x: number; y: number; segId: string } | null>(null);
 
   const [isSeeking, setIsSeeking] = useState(false);
   const [dragState, setDragState] = useState<{
@@ -833,7 +840,7 @@ const Timeline: React.FC<TimelineProps> = ({
                   <div className="absolute inset-0 pointer-events-none opacity-5" style={{ backgroundImage: 'linear-gradient(to right, #ffffff 1px, transparent 1px)', backgroundSize: '10% 100%' }}></div>
 
                   {/* LAYER 1: BASE SEGMENTS */}
-                  {layoutSegments.filter(s => s.track === trackId).map((seg) => {
+                  {layoutSegments.filter(s => s.track === trackId && s.type !== 'audio').map((seg) => {
                     const isSelected = selectedSegmentIds.includes(seg.id);
                     const duration = seg.endTime - seg.startTime;
 
@@ -954,7 +961,7 @@ const Timeline: React.FC<TimelineProps> = ({
                   })}
 
                   {/* LAYER 3: HANDLES */}
-                  {layoutSegments.filter(s => s.track === trackId).map((seg) => {
+                  {layoutSegments.filter(s => s.track === trackId && s.type !== 'audio').map((seg) => {
                     const segData = segments.find(s => s.id === seg.id);
                     const hasTransIn = !!segData?.transitionIn;
                     const hasTransOut = !!segData?.transitionOut;
@@ -1003,22 +1010,94 @@ const Timeline: React.FC<TimelineProps> = ({
                 </div>
               </div>
 
-              {/* AUDIO TRACK (Linked to Video Track) */}
+              {/* AUDIO TRACK */}
               <div className="h-16 relative w-full flex bg-[#111111]">
                 <div className="sticky left-0 w-12 min-w-[3rem] h-full bg-[#181818] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-green-500 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)]">A{trackId + 1}</div>
-                <div className="relative flex-1 h-full pointer-events-none">
+                <div className="relative flex-1 h-full">
                   {/* Base Track Layout lines */}
                   <div className="absolute inset-x-0 top-1/2 h-[1px] bg-white/5" />
 
                   {layoutSegments.filter(s => s.track === trackId).map((seg) => {
                     const isSelected = selectedSegmentIds.includes(seg.id);
+                    const isUnlinked = seg.audioLinked === false || seg.type === 'audio';
+                    const isAudioOnly = seg.type === 'audio';
+
+                    // Find matching audio segment if this video segment has been unlinked
+                    const audioSeg = isAudioOnly ? seg : (isUnlinked
+                      ? segments.find(s => s.id === seg.linkedSegmentId && s.type === 'audio')
+                      : null);
+                    // For audio-only segments, check if the linked video segment is selected
+                    const linkedVideoSelected = isAudioOnly && seg.linkedSegmentId
+                      ? selectedSegmentIds.includes(seg.linkedSegmentId)
+                      : false;
+
+                    // Determine the actual segment to use for drag operations
+                    // Only audio-only segments are independently draggable/trimmable
+                    // Unlinked video segments in the A track just show as muted reference
+                    const canDragAudio = isAudioOnly;
+                    const dragTargetSeg = seg; // audio-only segments are already the right target
 
                     return (
                       <div
                         key={`a1-${seg.id}`}
-                        className={`absolute top-1 bottom-1 ${seg.type === 'blank' ? 'bg-[#222222] border-[#333]' : 'bg-green-900/30 border-green-500/30'} border rounded overflow-hidden flex items-center justify-center`}
+                        className={`absolute top-1 bottom-1 group/audio ${
+                          seg.type === 'blank'
+                            ? 'bg-[#222222] border-[#333] cursor-pointer'
+                            : canDragAudio
+                              ? isSelected || linkedVideoSelected
+                                ? 'bg-green-800/50 border-green-400/60 cursor-move'
+                                : 'bg-green-900/40 border-green-400/40 border-dashed cursor-move'
+                              : isSelected || linkedVideoSelected
+                                ? 'bg-green-800/50 border-green-400/60 cursor-pointer'
+                                : 'bg-green-900/30 border-green-500/30 cursor-pointer'
+                        } border rounded overflow-hidden flex items-center justify-center transition-colors`}
                         style={{ left: `${seg.leftPercent}%`, width: `${seg.widthPercent}%` }}
+                        onMouseDown={(e) => {
+                          if (canDragAudio && seg.type !== 'blank') {
+                            // Unlinked audio: use startDrag for move (enables drag & drop repositioning)
+                            startDrag(e, dragTargetSeg, 'move');
+                          } else {
+                            e.stopPropagation();
+                            const isMulti = e.ctrlKey || e.metaKey || e.shiftKey;
+                            // Linked: select the parent video segment
+                            onSegmentSelect(seg, isMulti);
+                          }
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          if (seg.type !== 'blank') {
+                            setAudioContextMenu({ x: e.clientX, y: e.clientY, segId: seg.id });
+                          }
+                        }}
                       >
+                        {/* Link/Unlink indicator */}
+                        {seg.type !== 'blank' && (
+                          <div className={`absolute top-0.5 left-1 z-20 text-[8px] ${isUnlinked ? 'text-yellow-400' : 'text-green-500/40'} opacity-0 group-hover/audio:opacity-100 transition-opacity`}>
+                            {isUnlinked ? '⛓️‍💥' : '🔗'}
+                          </div>
+                        )}
+                        {/* Trim handles + fade handles for unlinked/audio-only segments */}
+                        {canDragAudio && seg.type !== 'blank' && (
+                          <>
+                            {/* Left trim handle */}
+                            <div
+                              className="absolute left-0 top-0 bottom-0 w-3 cursor-col-resize z-30 hover:bg-green-400/20 group/fadein"
+                              title={seg.transitionIn ? `Fade In: ${seg.transitionIn.duration.toFixed(1)}s` : 'Drag to trim'}
+                              onMouseDown={(e) => startDrag(e, dragTargetSeg, 'leftTrim')}
+                            >
+                              <div className={`absolute left-0 top-0 bottom-0 w-0.5 ${seg.transitionIn ? 'bg-green-400' : 'bg-green-400/0 group-hover/fadein:bg-green-400/60'}`} />
+                            </div>
+                            {/* Right trim handle */}
+                            <div
+                              className="absolute right-0 top-0 bottom-0 w-3 cursor-col-resize z-30 hover:bg-green-400/20 group/fadeout"
+                              title={seg.transitionOut ? `Fade Out: ${seg.transitionOut.duration.toFixed(1)}s` : 'Drag to trim'}
+                              onMouseDown={(e) => startDrag(e, dragTargetSeg, 'rightTrim')}
+                            >
+                              <div className={`absolute right-0 top-0 bottom-0 w-0.5 ${seg.transitionOut ? 'bg-green-400' : 'bg-green-400/0 group-hover/fadeout:bg-green-400/60'}`} />
+                            </div>
+                          </>
+                        )}
                         {/* Audio Waveform */}
                         {seg.type !== 'blank' && mediaFiles?.get(seg.mediaId) && (
                           <WaveformCanvas
@@ -1031,7 +1110,7 @@ const Timeline: React.FC<TimelineProps> = ({
                         {seg.type !== 'blank' && !mediaFiles?.get(seg.mediaId) && (
                           <div className="absolute inset-0 opacity-40 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMCAxMCIgcHJlc2VydmVBc3BlY3RSYXRpbz0ibm9uZSI+PHBhdGggZD0iTTAgNWw1LTUgNSA1di01SDB6IiBmaWxsPSIjZmZmIi8+PC9zdmc+')]" style={{ backgroundSize: '10px 100%' }} />
                         )}
-                        <span className="text-[10px] text-white/50 relative z-10">{seg.type === 'blank' ? 'No Audio' : seg.description}</span>
+                        <span className="text-[10px] text-white/50 relative z-10 pointer-events-none">{seg.type === 'blank' ? 'No Audio' : seg.description}</span>
                       </div>
                     );
                   })}
@@ -1048,6 +1127,53 @@ const Timeline: React.FC<TimelineProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Audio Context Menu */}
+      {audioContextMenu && (
+        <>
+          <div className="fixed inset-0 z-[200]" onClick={() => setAudioContextMenu(null)} onContextMenu={(e) => { e.preventDefault(); setAudioContextMenu(null); }} />
+          <div
+            className="fixed z-[201] bg-[#1e1e1e] border border-[#444] rounded-lg shadow-xl py-1 min-w-[160px]"
+            style={{ left: audioContextMenu.x, top: audioContextMenu.y }}
+          >
+            {(() => {
+              const seg = segments.find(s => s.id === audioContextMenu.segId);
+              if (!seg) return null;
+              const isUnlinked = seg.audioLinked === false || seg.type === 'audio';
+              return (
+                <>
+                  {!isUnlinked && onUnlinkAudio && (
+                    <button
+                      className="w-full px-3 py-1.5 text-left text-xs text-gray-200 hover:bg-white/10 flex items-center gap-2"
+                      onClick={() => { onUnlinkAudio(audioContextMenu.segId); setAudioContextMenu(null); }}
+                    >
+                      <span>⛓️‍💥</span> Unlink Audio
+                    </button>
+                  )}
+                  {isUnlinked && onRelinkAudio && (
+                    <button
+                      className="w-full px-3 py-1.5 text-left text-xs text-gray-200 hover:bg-white/10 flex items-center gap-2"
+                      onClick={() => { onRelinkAudio(audioContextMenu.segId); setAudioContextMenu(null); }}
+                    >
+                      <span>🔗</span> Link Audio
+                    </button>
+                  )}
+                  <div className="border-t border-[#333] my-1" />
+                  <button
+                    className="w-full px-3 py-1.5 text-left text-xs text-gray-200 hover:bg-white/10 flex items-center gap-2"
+                    onClick={() => {
+                      if (seg) onSegmentSelect(seg, false);
+                      setAudioContextMenu(null);
+                    }}
+                  >
+                    <span>🔊</span> Select Audio
+                  </button>
+                </>
+              );
+            })()}
+          </div>
+        </>
+      )}
     </div>
   );
 };

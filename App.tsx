@@ -553,7 +553,8 @@ function App() {
             videoEl.currentTime = seg.startTime;
           }
           if (!videoEl.paused) videoEl.pause();
-          videoEl.style.opacity = '0';
+          if (seg.type !== 'audio') videoEl.style.opacity = '0';
+          videoEl.volume = 0;
           return;
         }
 
@@ -572,6 +573,39 @@ function App() {
           }
         }
 
+        // --- AUDIO-ONLY SEGMENT: skip visual transitions, handle audio only ---
+        if (seg.type === 'audio') {
+          const relTime = project.currentTime - seg.timelineStart;
+          const clipTime = project.currentTime - seg.timelineStart;
+          const clipTransform = getInterpolatedTransform(seg.keyframes, clipTime);
+          let audioVolume = clipTransform.volume;
+
+          // Audio transitions (fade in/out)
+          if (seg.transitionIn && relTime < seg.transitionIn.duration) {
+            const progress = Math.max(0, Math.min(1, relTime / seg.transitionIn.duration));
+            audioVolume *= progress;
+          }
+          if (seg.transitionOut && relTime > (duration - seg.transitionOut.duration)) {
+            const remaining = duration - relTime;
+            const progress = Math.max(0, Math.min(1, remaining / seg.transitionOut.duration));
+            audioVolume *= progress;
+          }
+
+          // Micro-fades at edges
+          const AUDIO_FADE_SEC = 0.03;
+          if (relTime < AUDIO_FADE_SEC) audioVolume *= relTime / AUDIO_FADE_SEC;
+          if (relTime > duration - AUDIO_FADE_SEC) audioVolume *= Math.max(0, (duration - relTime) / AUDIO_FADE_SEC);
+
+          videoEl.volume = Math.max(0, Math.min(1, audioVolume));
+          return; // Skip all visual transition logic
+        }
+
+        // --- VIDEO SEGMENT with unlinked audio: mute the video element ---
+        if (seg.audioLinked === false && seg.type !== 'audio') {
+          // Audio is on the separate audio segment, mute this video
+          // (the audio segment handles its own volume above)
+        }
+
         // --- Transition Logic ---
         let opacity = 1;
         let overlayOpacity = 0;
@@ -581,22 +615,72 @@ function App() {
         let segUsedCanvas = false;
 
         const relTime = project.currentTime - seg.timelineStart;
+        const segEnd = seg.timelineStart + duration;
 
-        // Determine active transition
+        // Determine active transition — overlap-aware
+        // KEY PRINCIPLE: Only the OUTGOING (left) clip drives cross-transitions.
+        // It renders ON TOP and the transition reveals the incoming clip below.
+        // The incoming clip just renders at full opacity underneath — no transition processing.
         let activeTransition: Transition | null = null;
         let activeProgress = 0;
         let isIntro = true;
+        let overlapNeighborEl: HTMLVideoElement | null = null;
+        let isCrossTransitionDriver = false;
 
-        if (seg.transitionIn && relTime < seg.transitionIn.duration) {
+        // Find overlapping neighbor AFTER this clip on same track (this clip is outgoing)
+        const overlapNeighborOut = seg.transitionOut ? project.segments.find(s =>
+          s.id !== seg.id && s.type !== 'audio' && s.type !== 'blank' &&
+          s.track === seg.track &&
+          s.timelineStart > seg.timelineStart && s.timelineStart < segEnd
+        ) : null;
+
+        // Check if this clip is the INCOMING clip in an overlap (a previous clip overlaps us)
+        const overlappingPredecessor = project.segments.find(s =>
+          s.id !== seg.id && s.type !== 'audio' && s.type !== 'blank' &&
+          s.track === seg.track &&
+          s.timelineStart < seg.timelineStart &&
+          (s.timelineStart + (s.endTime - s.startTime)) > seg.timelineStart
+        );
+        const isIncomingInCrossTransition = !!overlappingPredecessor && !!overlappingPredecessor.transitionOut;
+
+        if (seg.transitionOut && overlapNeighborOut) {
+          // THIS CLIP IS THE OUTGOING (LEFT) CLIP — it drives the cross-transition
+          const overlapStart = overlapNeighborOut.timelineStart;
+          const overlapEnd = segEnd;
+          const overlapDuration = overlapEnd - overlapStart;
+          if (overlapDuration > 0 && project.currentTime >= overlapStart) {
+            const overlapProgress = (project.currentTime - overlapStart) / overlapDuration;
+            activeTransition = seg.transitionOut;
+            // Progress 0→1 where 0 = outgoing fully visible, 1 = incoming fully revealed
+            activeProgress = Math.max(0, Math.min(1, overlapProgress));
+            isIntro = false;
+            isCrossTransitionDriver = true;
+            overlapNeighborEl = videoRefs.current.get(overlapNeighborOut.id) || null;
+          }
+        } else if (isIncomingInCrossTransition) {
+          // THIS CLIP IS THE INCOMING (RIGHT) CLIP — skip transition, just render at full opacity
+          // The outgoing clip handles the cross-transition.
+          // Just make sure we're BELOW the outgoing clip in z-order.
+          const container = videoEl.closest('.absolute.inset-0') as HTMLElement;
+          if (container) container.style.zIndex = '1';
+          // No active transition — render at full opacity
+        } else if (seg.transitionIn && relTime < seg.transitionIn.duration) {
+          // SOLO TRANSITION IN (no overlap — fade from black)
           activeTransition = seg.transitionIn;
           activeProgress = Math.max(0, Math.min(1, relTime / seg.transitionIn.duration));
           isIntro = true;
-        }
-        if (seg.transitionOut && relTime > (duration - seg.transitionOut.duration)) {
+        } else if (seg.transitionOut && relTime > (duration - seg.transitionOut.duration)) {
+          // SOLO TRANSITION OUT (no overlap — fade to black)
           const remaining = duration - relTime;
           activeTransition = seg.transitionOut;
           activeProgress = Math.max(0, Math.min(1, remaining / seg.transitionOut.duration));
           isIntro = false;
+        }
+
+        // Ensure the outgoing clip in a cross-transition is ON TOP
+        if (isCrossTransitionDriver) {
+          const container = videoEl.closest('.absolute.inset-0') as HTMLElement;
+          if (container) container.style.zIndex = '10';
         }
 
         if (activeTransition) {
@@ -611,73 +695,102 @@ function App() {
             if (type === 'DIP_TO_BLACK' || type === 'DIP_TO_WHITE' || type === 'FADE_BLACK' || type === 'FADE_WHITE') {
               const color = activeTransition.color || (type.includes('BLACK') ? '#000000' : '#ffffff');
               overlayColor = color;
-              overlayOpacity = 1 - Math.abs(activeProgress * 2 - 1);
+              if (isCrossTransitionDriver) {
+                // Cross-transition: dip overlay appears then disappears across the overlap
+                overlayOpacity = 1 - Math.abs(activeProgress * 2 - 1);
+                // Outgoing clip stays visible, incoming clip shows through overlay
+              } else {
+                overlayOpacity = 1 - Math.abs(activeProgress * 2 - 1);
+              }
               overlayBlendMode = activeTransition.blendMode || 'normal';
             } else if (type === 'FADE' || type === 'CROSSFADE') {
-              opacity = activeProgress;
+              if (isCrossTransitionDriver) {
+                // Outgoing clip on top: fade from 1→0, revealing incoming clip below
+                opacity = 1 - activeProgress;
+              } else {
+                // Solo transition
+                opacity = activeProgress;
+              }
             } else if (type.startsWith('DISSOLVE_')) {
-              opacity = activeProgress;
+              if (isCrossTransitionDriver) {
+                opacity = 1 - activeProgress;
+              } else {
+                opacity = activeProgress;
+              }
               videoBlendMode = activeTransition.blendMode || 'screen';
             }
           } else {
             // Complex transition — render on canvas
             const tCanvas = transitionCanvasRef.current;
-            if (tCanvas && videoEl.readyState >= 2) {
+            const vw = videoEl.videoWidth;
+            const vh = videoEl.videoHeight;
+            const cw = viewportContainerRef.current?.clientWidth || 0;
+            const ch = viewportContainerRef.current?.clientHeight || 0;
+            if (tCanvas && videoEl.readyState >= 2 && vw > 0 && vh > 0 && cw > 0 && ch > 0) {
               const ctx = tCanvas.getContext('2d');
               if (ctx) {
                 canvasUsed = true;
                 segUsedCanvas = true;
 
-                // Size canvas to viewport
-                const cw = tCanvas.clientWidth;
-                const ch = tCanvas.clientHeight;
                 if (tCanvas.width !== cw || tCanvas.height !== ch) {
                   tCanvas.width = cw;
                   tCanvas.height = ch;
                 }
 
-                // Capture video frame to offscreen canvas
-                const frameCanvas = document.createElement('canvas');
-                frameCanvas.width = cw;
-                frameCanvas.height = ch;
-                const frameCtx = frameCanvas.getContext('2d')!;
-                // Draw video with object-contain behavior
-                const vw = videoEl.videoWidth;
-                const vh = videoEl.videoHeight;
-                const videoAR = vw / vh;
-                const canvasAR = cw / ch;
-                let drawW: number, drawH: number, drawX: number, drawY: number;
-                if (canvasAR > videoAR) {
-                  drawH = ch;
-                  drawW = ch * videoAR;
-                  drawX = (cw - drawW) / 2;
-                  drawY = 0;
-                } else {
-                  drawW = cw;
-                  drawH = cw / videoAR;
-                  drawX = 0;
-                  drawY = (ch - drawH) / 2;
-                }
-                frameCtx.fillStyle = '#000';
-                frameCtx.fillRect(0, 0, cw, ch);
-                frameCtx.drawImage(videoEl, drawX, drawY, drawW, drawH);
+                // Helper: capture a video element frame to an offscreen canvas
+                const captureFrame = (el: HTMLVideoElement) => {
+                  const fc = document.createElement('canvas');
+                  fc.width = cw; fc.height = ch;
+                  const fctx = fc.getContext('2d')!;
+                  const evw = el.videoWidth, evh = el.videoHeight;
+                  if (evw === 0 || evh === 0) return fc;
+                  const ear = evw / evh, car = cw / ch;
+                  let dw: number, dh: number, dx: number, dy: number;
+                  if (car > ear) { dh = ch; dw = ch * ear; dx = (cw - dw) / 2; dy = 0; }
+                  else { dw = cw; dh = cw / ear; dx = 0; dy = (ch - dh) / 2; }
+                  fctx.fillStyle = '#000';
+                  fctx.fillRect(0, 0, cw, ch);
+                  fctx.drawImage(el, dx, dy, dw, dh);
+                  return fc;
+                };
 
-                // For intro: null → video (outFrame=null, inFrame=video)
-                // For outro: video → null (outFrame=video, inFrame=null)
-                renderTransitionCanvas({
-                  ctx,
-                  width: cw,
-                  height: ch,
-                  outFrame: isIntro ? null : frameCanvas,
-                  inFrame: isIntro ? frameCanvas : null,
-                  progress: activeProgress,
-                  transition: activeTransition,
-                });
+                const thisFrame = captureFrame(videoEl);
+                // Capture neighbor frame for cross-transitions
+                const neighborFrame = overlapNeighborEl && overlapNeighborEl.readyState >= 2
+                  ? captureFrame(overlapNeighborEl) : null;
 
-                // Show canvas, hide video during canvas transition
                 tCanvas.style.display = 'block';
                 tCanvas.style.zIndex = '50';
+
+                if (isCrossTransitionDriver) {
+                  // CROSS-TRANSITION: this clip is outgoing (on top)
+                  // outFrame = this clip (going away), inFrame = neighbor (being revealed)
+                  // progress 0→1: outgoing disappears, incoming appears
+                  renderTransitionCanvas({
+                    ctx,
+                    width: cw,
+                    height: ch,
+                    outFrame: thisFrame,
+                    inFrame: neighborFrame,
+                    progress: activeProgress,
+                    transition: activeTransition,
+                  });
+                } else {
+                  // SOLO TRANSITION: fade from/to black
+                  renderTransitionCanvas({
+                    ctx,
+                    width: cw,
+                    height: ch,
+                    outFrame: isIntro ? null : thisFrame,
+                    inFrame: isIntro ? thisFrame : null,
+                    progress: activeProgress,
+                    transition: activeTransition,
+                  });
+                }
+
+                // Hide both video elements — canvas shows the composited result
                 videoEl.style.opacity = '0';
+                if (overlapNeighborEl) overlapNeighborEl.style.opacity = '0';
               }
             }
           }
@@ -695,10 +808,15 @@ function App() {
           overlayEl.style.mixBlendMode = overlayBlendMode;
         }
 
-        // --- Audio: keyframed volume + micro-fade at cut boundaries ---
+        // --- Audio: keyframed volume + transition crossfade + micro-fade ---
         const clipTime = project.currentTime - seg.timelineStart;
         const clipTransform = getInterpolatedTransform(seg.keyframes, clipTime);
         let audioVolume = clipTransform.volume; // from keyframes, defaults to 1.0
+
+        // Audio crossfade during visual transitions (intro: 0→1, outro: 1→0)
+        if (activeTransition && activeTransition.type !== 'NONE') {
+          audioVolume *= activeProgress;
+        }
 
         // 30ms fade-in/out at segment edges to prevent clicks at cuts
         const AUDIO_FADE_SEC = 0.03;
@@ -708,7 +826,12 @@ function App() {
         if (relTime > duration - AUDIO_FADE_SEC) {
           audioVolume *= Math.max(0, (duration - relTime) / AUDIO_FADE_SEC);
         }
-        videoEl.volume = Math.max(0, Math.min(1, audioVolume));
+        // If audio is unlinked, mute the video element (audio plays from separate audio segment)
+        if (seg.audioLinked === false) {
+          videoEl.volume = 0;
+        } else {
+          videoEl.volume = Math.max(0, Math.min(1, audioVolume));
+        }
       }
     });
 
@@ -2419,50 +2542,81 @@ function App() {
       if (segIndex === -1) return prev;
 
       const seg = prev.segments[segIndex];
-      let updatedSegments = [...prev.segments];
+      const updatedSegments = [...prev.segments];
 
       updatedSegments[segIndex] = {
         ...seg,
         [side === 'in' ? 'transitionIn' : 'transitionOut']: transition
       };
 
-      // Sync logic for overlapping clips
-      if (side === 'out') {
-        const segEnd = seg.timelineStart + (seg.endTime - seg.startTime);
-        const neighbor = prev.segments.find(s =>
-          s.id !== seg.id &&
-          s.track === seg.track &&
-          s.timelineStart < segEnd &&
-          s.timelineStart >= seg.timelineStart
-        );
+      return { ...prev, segments: updatedSegments };
+    });
+  };
 
-        if (neighbor) {
-          const neighborIndex = updatedSegments.findIndex(s => s.id === neighbor.id);
-          if (neighborIndex !== -1) {
-            updatedSegments[neighborIndex] = {
-              ...updatedSegments[neighborIndex],
-              transitionIn: transition
-            };
-          }
-        }
-      } else if (side === 'in') {
-        const neighbor = prev.segments.find(s =>
-          s.id !== seg.id &&
-          s.track === seg.track &&
-          (s.timelineStart + (s.endTime - s.startTime)) > seg.timelineStart &&
-          s.timelineStart <= seg.timelineStart
-        );
+  // --- Audio Unlink/Link ---
+  const handleUnlinkAudio = (segId: string) => {
+    setProject(prev => {
+      const segIndex = prev.segments.findIndex(s => s.id === segId);
+      if (segIndex === -1) return prev;
+      const seg = prev.segments[segIndex];
+      if (seg.type === 'audio' || seg.type === 'blank') return prev; // already audio-only or blank
+      if (seg.audioLinked === false) return prev; // already unlinked
 
-        if (neighbor) {
-          const neighborIndex = updatedSegments.findIndex(s => s.id === neighbor.id);
-          if (neighborIndex !== -1) {
-            updatedSegments[neighborIndex] = {
-              ...updatedSegments[neighborIndex],
-              transitionOut: transition
-            };
-          }
-        }
+      const audioSegId = `audio_${seg.id}_${Date.now()}`;
+      const audioSeg: Segment = {
+        ...seg,
+        id: audioSegId,
+        type: 'audio',
+        audioLinked: false,
+        linkedSegmentId: seg.id,
+        // Audio segments don't need video-specific data
+        trackers: undefined,
+        trackingData: undefined,
+        // Reset transitions — user can add audio fades separately
+        transitionIn: undefined,
+        transitionOut: undefined,
+        color: '#22c55e', // green for audio
+      };
+
+      const updatedSegments = [...prev.segments];
+      updatedSegments[segIndex] = {
+        ...seg,
+        audioLinked: false,
+        linkedSegmentId: audioSegId,
+      };
+      updatedSegments.push(audioSeg);
+
+      return { ...prev, segments: updatedSegments };
+    });
+  };
+
+  const handleRelinkAudio = (segId: string) => {
+    setProject(prev => {
+      const seg = prev.segments.find(s => s.id === segId);
+      if (!seg) return prev;
+
+      // Find the counterpart
+      let videoSeg: Segment | undefined;
+      let audioSeg: Segment | undefined;
+
+      if (seg.type === 'audio') {
+        audioSeg = seg;
+        videoSeg = prev.segments.find(s => s.id === seg.linkedSegmentId);
+      } else {
+        videoSeg = seg;
+        audioSeg = prev.segments.find(s => s.id === seg.linkedSegmentId && s.type === 'audio');
       }
+
+      if (!videoSeg || !audioSeg) return prev;
+
+      // Remove audio segment, restore video segment's audio link
+      const updatedSegments = prev.segments
+        .filter(s => s.id !== audioSeg!.id)
+        .map(s => s.id === videoSeg!.id ? {
+          ...s,
+          audioLinked: undefined, // back to default (linked)
+          linkedSegmentId: undefined,
+        } : s);
 
       return { ...prev, segments: updatedSegments };
     });
@@ -4730,6 +4884,19 @@ function App() {
                       if (transform.rotation !== 0) txParts.push(`rotate(${transform.rotation}deg)`);
                       const cssTransform = txParts.length > 0 ? txParts.join(' ') : 'none';
 
+                      // Audio-only segments: hidden video element for audio playback only
+                      if (seg.type === 'audio') {
+                        return (
+                          <video
+                            key={seg.id}
+                            ref={el => { if (el) videoRefs.current.set(seg.id, el); }}
+                            src={project.library.find(m => m.id === seg.mediaId)?.url}
+                            className="hidden"
+                            muted={false}
+                          />
+                        );
+                      }
+
                       return (
                         <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: seg.track * 10 }}>
                           {seg.type === 'blank' ? (
@@ -5430,6 +5597,8 @@ function App() {
                 zoom={timelineZoom}
                 onZoomChange={safeSetTimelineZoom}
                 mediaFiles={mediaFilesMap}
+                onUnlinkAudio={handleUnlinkAudio}
+                onRelinkAudio={handleRelinkAudio}
               />
             )}
             {activeBottomTab === 'graph' && (

@@ -226,11 +226,24 @@ const TransitionPanel: React.FC<TransitionPanelProps> = ({
 
   const canApply = !!effectiveSelection;
 
+  // Detect if the selected segment is audio-only
+  const isAudioSegment = useMemo(() => {
+    if (!effectiveSelection) return false;
+    const seg = segments.find(s => s.id === effectiveSelection.segId);
+    return seg?.type === 'audio';
+  }, [effectiveSelection, segments]);
+
+  // Audio fade presets
+  const audioFadeIn: Transition = { type: 'FADE' as TransitionType, duration: 0.5 };
+  const audioFadeOut: Transition = { type: 'FADE' as TransitionType, duration: 0.5 };
+
   return (
     <div className="flex flex-col h-full overflow-hidden text-gray-200">
       {/* HEADER */}
       <div className="px-3 pt-3 pb-2">
-        <h3 className="text-[11px] font-bold tracking-widest uppercase text-gray-400 mb-2">Transitions</h3>
+        <h3 className="text-[11px] font-bold tracking-widest uppercase text-gray-400 mb-2">
+          {isAudioSegment ? '🔊 Audio Transitions' : 'Transitions'}
+        </h3>
 
         {/* EDGE SELECTOR — shown when a segment is selected */}
         {effectiveSelection && (
@@ -271,50 +284,112 @@ const TransitionPanel: React.FC<TransitionPanelProps> = ({
           </div>
         )}
 
-        {/* SEARCH */}
-        <div className="relative mb-2">
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search transitions..."
-            className="w-full bg-[#1a1a1a] border border-[#333] rounded-md px-3 py-1.5 text-[11px] text-gray-200 placeholder-gray-600 focus:border-cyan-500/50 focus:outline-none"
-          />
-          {searchQuery && (
-            <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white text-xs">✕</button>
-          )}
-        </div>
+        {/* AUDIO SEGMENT: Simplified fade controls */}
+        {isAudioSegment && effectiveSelection && (
+          <div className="mt-2 space-y-2">
+            <div className="text-[10px] text-gray-500">Audio fades control volume envelope</div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => onApplyTransition(effectiveSelection.segId, 'in', audioFadeIn)}
+                className={`p-3 rounded-lg border text-center transition-all ${
+                  segTransitionIn
+                    ? 'border-green-500 bg-green-500/10'
+                    : 'border-[#333] hover:border-green-500/50 bg-[#1a1a1a] hover:bg-[#222]'
+                }`}
+              >
+                <div className="text-lg mb-1">📈</div>
+                <div className="text-[10px] text-gray-300">Fade In</div>
+                {segTransitionIn && (
+                  <div className="text-[9px] text-green-400 mt-0.5">{segTransitionIn.duration.toFixed(1)}s</div>
+                )}
+              </button>
+              <button
+                onClick={() => onApplyTransition(effectiveSelection.segId, 'out', audioFadeOut)}
+                className={`p-3 rounded-lg border text-center transition-all ${
+                  segTransitionOut
+                    ? 'border-green-500 bg-green-500/10'
+                    : 'border-[#333] hover:border-green-500/50 bg-[#1a1a1a] hover:bg-[#222]'
+                }`}
+              >
+                <div className="text-lg mb-1">📉</div>
+                <div className="text-[10px] text-gray-300">Fade Out</div>
+                {segTransitionOut && (
+                  <div className="text-[9px] text-green-400 mt-0.5">{segTransitionOut.duration.toFixed(1)}s</div>
+                )}
+              </button>
+            </div>
+            {/* Duration slider for active audio fade */}
+            {currentTransition && (
+              <div className="mt-3 px-1">
+                <label className="text-[10px] text-gray-400 block mb-1">
+                  Duration: {currentTransition.duration.toFixed(1)}s
+                </label>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="5"
+                  step="0.1"
+                  value={currentTransition.duration}
+                  onChange={(e) => {
+                    const newDur = parseFloat(e.target.value);
+                    const updated: Transition = { ...currentTransition, duration: newDur };
+                    onApplyTransition(effectiveSelection.segId, effectiveSelection.side, updated);
+                  }}
+                  className="w-full accent-green-500"
+                />
+              </div>
+            )}
+          </div>
+        )}
 
-        {/* CATEGORY TABS */}
-        <div className="flex flex-wrap gap-1">
-          <button
-            onClick={() => setActiveCategory('All')}
-            className={`px-2 py-0.5 rounded-full text-[10px] font-medium transition-colors ${
-              activeCategory === 'All'
-                ? 'bg-white/15 text-white'
-                : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
-            }`}
-          >
-            All
-          </button>
-          {TRANSITION_CATEGORIES.map(cat => (
-            <button
-              key={cat}
-              onClick={() => setActiveCategory(cat)}
-              className={`px-2 py-0.5 rounded-full text-[10px] font-medium transition-colors ${
-                activeCategory === cat
-                  ? 'text-white'
-                  : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
-              }`}
-              style={activeCategory === cat ? { backgroundColor: TRANSITION_CATEGORY_COLORS[cat] + '40' } : undefined}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
+        {/* SEARCH (video transitions only) */}
+        {!isAudioSegment && (
+          <>
+            <div className="relative mb-2">
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Search transitions..."
+                className="w-full bg-[#1a1a1a] border border-[#333] rounded-md px-3 py-1.5 text-[11px] text-gray-200 placeholder-gray-600 focus:border-cyan-500/50 focus:outline-none"
+              />
+              {searchQuery && (
+                <button onClick={() => setSearchQuery('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white text-xs">✕</button>
+              )}
+            </div>
+
+            {/* CATEGORY TABS */}
+            <div className="flex flex-wrap gap-1">
+              <button
+                onClick={() => setActiveCategory('All')}
+                className={`px-2 py-0.5 rounded-full text-[10px] font-medium transition-colors ${
+                  activeCategory === 'All'
+                    ? 'bg-white/15 text-white'
+                    : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
+                }`}
+              >
+                All
+              </button>
+              {TRANSITION_CATEGORIES.map(cat => (
+                <button
+                  key={cat}
+                  onClick={() => setActiveCategory(cat)}
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-medium transition-colors ${
+                    activeCategory === cat
+                      ? 'text-white'
+                      : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
+                  }`}
+                  style={activeCategory === cat ? { backgroundColor: TRANSITION_CATEGORY_COLORS[cat] + '40' } : undefined}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
-      {/* GRID */}
+      {/* GRID (video transitions only) */}
       <div className="flex-1 overflow-y-auto px-3 pb-3">
         {!effectiveSelection && (
           <div className="text-center py-6 text-gray-500 text-[11px] border border-dashed border-[#333] rounded-lg mt-2 mx-1">
@@ -322,42 +397,44 @@ const TransitionPanel: React.FC<TransitionPanelProps> = ({
             Select a clip on the timeline to apply transitions
           </div>
         )}
-        <div className="grid grid-cols-2 gap-2 mt-1">
-          {filteredTransitions.map(def => {
-            const isActive = currentTransition?.type === def.id;
-            return (
-              <button
-                key={def.id}
-                onClick={() => handleApply(def)}
-                disabled={!canApply}
-                className={`group relative flex flex-col items-center p-2 rounded-lg border transition-all ${
-                  isActive
-                    ? 'border-cyan-500 bg-cyan-500/10'
-                    : canApply
-                      ? 'border-[#333] hover:border-[#555] bg-[#1a1a1a] hover:bg-[#222] cursor-pointer'
-                      : 'border-[#333] bg-[#1a1a1a] opacity-50 cursor-not-allowed'
-                }`}
-                title={def.description}
-              >
-                <TransitionPreviewCanvas definition={def} size={76} />
-                <div className="flex items-center gap-1 mt-1.5">
-                  <span
-                    className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: TRANSITION_CATEGORY_COLORS[def.category] }}
-                  />
-                  <span className="text-[10px] text-gray-300 truncate">{def.name}</span>
-                </div>
-                {isActive && (
-                  <div className="absolute -top-1 -right-1 w-4 h-4 bg-cyan-500 rounded-full flex items-center justify-center">
-                    <span className="text-[8px] text-white font-bold">✓</span>
+        {!isAudioSegment && (
+          <div className="grid grid-cols-2 gap-2 mt-1">
+            {filteredTransitions.map(def => {
+              const isActive = currentTransition?.type === def.id;
+              return (
+                <button
+                  key={def.id}
+                  onClick={() => handleApply(def)}
+                  disabled={!canApply}
+                  className={`group relative flex flex-col items-center p-2 rounded-lg border transition-all ${
+                    isActive
+                      ? 'border-cyan-500 bg-cyan-500/10'
+                      : canApply
+                        ? 'border-[#333] hover:border-[#555] bg-[#1a1a1a] hover:bg-[#222] cursor-pointer'
+                        : 'border-[#333] bg-[#1a1a1a] opacity-50 cursor-not-allowed'
+                  }`}
+                  title={def.description}
+                >
+                  <TransitionPreviewCanvas definition={def} size={76} />
+                  <div className="flex items-center gap-1 mt-1.5">
+                    <span
+                      className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                      style={{ backgroundColor: TRANSITION_CATEGORY_COLORS[def.category] }}
+                    />
+                    <span className="text-[10px] text-gray-300 truncate">{def.name}</span>
                   </div>
-                )}
-              </button>
-            );
-          })}
-        </div>
+                  {isActive && (
+                    <div className="absolute -top-1 -right-1 w-4 h-4 bg-cyan-500 rounded-full flex items-center justify-center">
+                      <span className="text-[8px] text-white font-bold">✓</span>
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
-        {filteredTransitions.length === 0 && (
+        {!isAudioSegment && filteredTransitions.length === 0 && (
           <div className="text-center py-8 text-gray-600 text-[11px]">
             No transitions match your search
           </div>

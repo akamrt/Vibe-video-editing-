@@ -163,7 +163,7 @@ export interface TransitionDefinition {
 
 export interface Segment {
   id: string;
-  type?: 'video' | 'blank'; // Defaults to video if undefined for backwards compatibility
+  type?: 'video' | 'audio' | 'blank'; // 'audio' = unlinked audio-only segment
   mediaId: string; // References MediaItem
   startTime: number; // Start point in SOURCE video
   endTime: number;   // End point in SOURCE video
@@ -177,6 +177,9 @@ export interface Segment {
   keyframes?: ClipKeyframe[]; // Animation keyframes for pan/zoom/rotate within clip
   trackers?: VibeCutTracker[];       // Manually placed tracker points
   trackingData?: TrackedFrame[];      // Frame-by-frame tracking results
+  // Audio unlinking
+  audioLinked?: boolean;      // true (default) = audio moves with video. false = audio is separate
+  linkedSegmentId?: string;   // ID of counterpart segment (video ↔ audio) when unlinked
 }
 
 export interface ChatMessage {
