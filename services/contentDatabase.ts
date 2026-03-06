@@ -514,6 +514,93 @@ export class ContentDatabase {
         });
     }
 
+    // ==================== Named Project Management ====================
+
+    async saveNamedProject(name: string, project: ProjectState): Promise<string> {
+        await this.init();
+        const id = `project_${Date.now()}`;
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('projects', 'readwrite');
+            const projectToSave = {
+                ...project,
+                id,
+                _projectName: name,
+                _savedAt: Date.now(),
+                isPlaying: false,
+            } as any;
+            // Strip file blobs from library to keep DB size reasonable for named saves
+            // (media URLs will need re-importing on load)
+            if (projectToSave.library) {
+                projectToSave.library = projectToSave.library.map((item: MediaItem) => ({
+                    ...item,
+                    file: undefined, // Don't store blob for named saves
+                }));
+            }
+            const request = store.put(projectToSave);
+            request.onsuccess = () => resolve(id);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async listProjects(): Promise<Array<{ id: string; name: string; savedAt: number; segmentCount: number; duration: number }>> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('projects');
+            const request = store.getAll();
+            request.onsuccess = () => {
+                const all = request.result || [];
+                const named = all
+                    .filter((p: any) => p.id !== 'current_project' && p._projectName)
+                    .map((p: any) => ({
+                        id: p.id,
+                        name: p._projectName,
+                        savedAt: p._savedAt || 0,
+                        segmentCount: p.segments?.length || 0,
+                        duration: p.segments?.reduce((sum: number, s: any) => {
+                            const end = s.timelineStart + (s.endTime - s.startTime);
+                            return Math.max(sum, end);
+                        }, 0) || 0,
+                    }))
+                    .sort((a: any, b: any) => b.savedAt - a.savedAt);
+                resolve(named);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async loadNamedProject(id: string): Promise<ProjectState | null> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('projects');
+            const request = store.get(id);
+            request.onsuccess = () => {
+                const proj = request.result;
+                if (!proj) { resolve(null); return; }
+                const { id: _id, _projectName, _savedAt, _globalKeyframes, ...projectState } = proj;
+                // Revive object URLs for files
+                if (projectState.library) {
+                    projectState.library.forEach((item: MediaItem) => {
+                        if (item.file && item.file instanceof Blob) {
+                            item.url = URL.createObjectURL(item.file);
+                        }
+                    });
+                }
+                resolve(projectState as ProjectState);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async deleteNamedProject(id: string): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('projects', 'readwrite');
+            const request = store.delete(id);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
     // ==================== Clear Database ====================
 
     async clearAll(): Promise<void> {

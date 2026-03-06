@@ -222,18 +222,9 @@ async function getTranscriptViaPackage(videoId) {
 async function getTranscriptViaYtDlp(videoId) {
     const tempPrefix = path.join(os.tmpdir(), `transcript_${videoId}_${Date.now()}`);
 
-    // Use cookies.txt if available; otherwise run anonymously (NOT --cookies-from-browser
-    // because Chrome locks its cookie DB while it's running, causing yt-dlp to fail)
-    let cookiesArg = '';
-    if (fs.existsSync(COOKIE_FILE)) {
-        console.log('[Transcript] Using cookies.txt for yt-dlp auth');
-        cookiesArg = `--cookies "${COOKIE_FILE}"`;
-    } else {
-        console.log('[Transcript] No cookies.txt — running yt-dlp anonymously');
-    }
-
-    const uaArgs = '--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/"';
-    const cmd = `"${YT_DLP}" --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings ${cookiesArg} ${uaArgs} --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
+    // Don't use cookies for subtitle-only downloads — stale cookies cause yt-dlp
+    // to fail with "Requested format is not available". Subtitles don't need auth.
+    const cmd = `"${YT_DLP}" --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
 
     try {
         console.log('[Transcript] Running yt-dlp...');

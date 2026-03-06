@@ -94,13 +94,71 @@ export interface MediaItem {
   fillerDetections?: CachedFillerDetection[];
 }
 
-export type TransitionType = 'FADE' | 'CROSSFADE' | 'WASH_WHITE' | 'WASH_BLACK' | 'WASH_COLOR' | 'NONE';
+// ============ TRANSITION SYSTEM ============
+export type TransitionType =
+  // Basic
+  | 'FADE' | 'CROSSFADE' | 'FADE_BLACK' | 'FADE_WHITE' | 'DIP_TO_BLACK' | 'DIP_TO_WHITE'
+  // Wipes
+  | 'WIPE_LEFT' | 'WIPE_RIGHT' | 'WIPE_UP' | 'WIPE_DOWN'
+  | 'WIPE_DIAGONAL_TL' | 'WIPE_DIAGONAL_TR' | 'WIPE_DIAGONAL_BL' | 'WIPE_DIAGONAL_BR'
+  | 'WIPE_RADIAL_CW' | 'WIPE_RADIAL_CCW' | 'WIPE_CLOCK'
+  // Shapes
+  | 'SHAPE_CIRCLE' | 'SHAPE_DIAMOND' | 'SHAPE_STAR' | 'SHAPE_HEART'
+  | 'SHAPE_HEXAGON' | 'SHAPE_TRIANGLE'
+  | 'IRIS_OPEN' | 'IRIS_CLOSE'
+  // Slide / Push
+  | 'SLIDE_LEFT' | 'SLIDE_RIGHT' | 'SLIDE_UP' | 'SLIDE_DOWN'
+  | 'PUSH_LEFT' | 'PUSH_RIGHT' | 'PUSH_UP' | 'PUSH_DOWN'
+  // Effects
+  | 'ZOOM_IN' | 'ZOOM_OUT' | 'ZOOM_ROTATE'
+  | 'BLUR' | 'BLUR_DIRECTIONAL'
+  | 'SPIN_CW' | 'SPIN_CCW'
+  | 'GLITCH'
+  | 'SPLIT_HORIZONTAL' | 'SPLIT_VERTICAL'
+  // Blend dissolves
+  | 'DISSOLVE_MULTIPLY' | 'DISSOLVE_SCREEN' | 'DISSOLVE_OVERLAY' | 'DISSOLVE_LUMINOSITY'
+  // Creative
+  | 'PIXELATE' | 'MOSAIC' | 'FILM_BURN' | 'LIGHT_LEAK'
+  | 'NONE';
+
+export type TransitionEasing = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'bounce';
+
+export type TransitionCategory = 'Basic' | 'Wipes' | 'Shapes' | 'Slide' | 'Effects' | 'Blend' | 'Creative';
 
 export interface Transition {
   type: TransitionType;
-  duration: number;
-  blendMode?: string; // CSS mix-blend-mode values (e.g., 'multiply', 'screen', 'overlay')
-  color?: string; // Hex code for WASH_COLOR
+  duration: number;            // seconds (0.1 - 3.0)
+  easing?: TransitionEasing;
+  blendMode?: string;          // CSS globalCompositeOperation value
+  color?: string;              // hex color for wash/dip/film-burn
+  direction?: 'left' | 'right' | 'up' | 'down' | 'cw' | 'ccw';
+  softness?: number;           // 0-100 feather width for wipe edges
+  centerX?: number;            // 0-1 normalized, default 0.5
+  centerY?: number;            // 0-1 normalized, default 0.5
+  intensity?: number;          // 0-100 for blur/glitch/pixelate strength
+  segments?: number;           // star points, mosaic grid size
+  angle?: number;              // degrees for diagonal/radial
+}
+
+export interface TransitionParamSchema {
+  key: keyof Transition;
+  label: string;
+  type: 'range' | 'select' | 'color' | 'number';
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: { value: string; label: string }[];
+  default?: number | string;
+}
+
+export interface TransitionDefinition {
+  id: TransitionType;
+  name: string;
+  category: TransitionCategory;
+  description: string;
+  icon: string;                // Unicode character for compact display
+  defaultParams: Partial<Transition>;
+  paramSchema: TransitionParamSchema[];
 }
 
 export interface Segment {

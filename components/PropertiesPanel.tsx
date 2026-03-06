@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Segment, Transition, TransitionType, VideoAnalysis, SubtitleStyle, TitleLayer, TitleStyle, SubtitleTemplate, TextAnimation, KeywordEmphasis, GradientStop } from '../types';
+import { Segment, Transition, TransitionType, TransitionEasing, VideoAnalysis, SubtitleStyle, TitleLayer, TitleStyle, SubtitleTemplate, TextAnimation, KeywordEmphasis, GradientStop } from '../types';
 import { migrateGradientColors } from '../utils/gradientUtils';
+import { TRANSITION_CATALOG, TRANSITION_CATEGORIES, getTransitionDef } from '../utils/transitionCatalog';
 import AnimationControls from './AnimationControls';
 import GradientEditor from './GradientEditor';
 
@@ -771,36 +772,76 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
         )}
 
         {/* TRANSITION MODE */}
-        {!isTitleSelected && !selectedDialogue && selectedTransition && selectedSegment && (
+        {!isTitleSelected && !selectedDialogue && selectedTransition && selectedSegment && (() => {
+          const def = currentTransition ? getTransitionDef(currentTransition.type) : null;
+          return (
           <Accordion title="Transition Settings" defaultOpen={true}>
             <div className="space-y-5">
+              {/* Type — grouped by category */}
               <Field label="Type" stack={true}>
-                <select value={currentTransition?.type || 'FADE'} onChange={(e) => handleTransitionChange({ type: e.target.value as TransitionType })} className={inputClass}>
-                  <option value="FADE">Opacity Fade</option>
-                  <option value="CROSSFADE">Crossfade</option>
-                  <option value="WASH_WHITE">Wash White</option>
-                  <option value="WASH_BLACK">Wash Black</option>
-                  <option value="WASH_COLOR">Wash Color</option>
+                <select value={currentTransition?.type || 'FADE'} onChange={(e) => {
+                  const newType = e.target.value as TransitionType;
+                  const newDef = getTransitionDef(newType);
+                  handleTransitionChange({ type: newType, ...(newDef?.defaultParams || {}) });
+                }} className={inputClass}>
+                  {TRANSITION_CATEGORIES.map(cat => (
+                    <optgroup key={cat} label={cat}>
+                      {TRANSITION_CATALOG.filter(t => t.category === cat).map(t => (
+                        <option key={t.id} value={t.id}>{t.icon} {t.name}</option>
+                      ))}
+                    </optgroup>
+                  ))}
                 </select>
               </Field>
 
+              {/* Duration */}
               <Field label="Duration" rightLabel={`${currentTransition?.duration?.toFixed(2) || 0.5}s`} stack={true}>
                 <input type="range" min="0.1" max="3.0" step="0.1" value={currentTransition?.duration || 0.5} onChange={(e) => handleTransitionChange({ duration: parseFloat(e.target.value) })} className={rangeClass} />
               </Field>
 
-              <Field label="CSS Blend Mode" stack={true}>
+              {/* Easing */}
+              <Field label="Easing" stack={true}>
+                <select value={currentTransition?.easing || 'linear'} onChange={(e) => handleTransitionChange({ easing: e.target.value as TransitionEasing })} className={inputClass}>
+                  <option value="linear">Linear</option>
+                  <option value="easeIn">Ease In</option>
+                  <option value="easeOut">Ease Out</option>
+                  <option value="easeInOut">Ease In-Out</option>
+                  <option value="bounce">Bounce</option>
+                </select>
+              </Field>
+
+              {/* Blend Mode */}
+              <Field label="Blend Mode" stack={true}>
                 <select value={currentTransition?.blendMode || 'normal'} onChange={(e) => handleTransitionChange({ blendMode: e.target.value })} className={inputClass}>
                   {BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</option>)}
                 </select>
               </Field>
 
-              {currentTransition?.type === 'WASH_COLOR' && (
-                <Group title="Wash Color">
-                  <Field label="Color" stack={true}>
-                    <ColorPicker value={currentTransition.color || '#ff0000'} onChange={(v) => handleTransitionChange({ color: v })} />
-                  </Field>
-                </Group>
-              )}
+              {/* Dynamic parameters from catalog */}
+              {def?.paramSchema.map(param => (
+                <React.Fragment key={param.key}>
+                  {param.type === 'range' && (
+                    <Field label={param.label} rightLabel={`${(currentTransition as any)?.[param.key] ?? param.default ?? param.min ?? 0}`} stack={true}>
+                      <input type="range" min={param.min ?? 0} max={param.max ?? 100} step={param.step ?? 1}
+                        value={(currentTransition as any)?.[param.key] ?? param.default ?? param.min ?? 0}
+                        onChange={(e) => handleTransitionChange({ [param.key]: parseFloat(e.target.value) } as any)}
+                        className={rangeClass} />
+                    </Field>
+                  )}
+                  {param.type === 'select' && (
+                    <Field label={param.label} stack={true}>
+                      <select value={(currentTransition as any)?.[param.key] ?? param.default ?? ''} onChange={(e) => handleTransitionChange({ [param.key]: e.target.value } as any)} className={inputClass}>
+                        {param.options?.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                      </select>
+                    </Field>
+                  )}
+                  {param.type === 'color' && (
+                    <Field label={param.label} stack={true}>
+                      <ColorPicker value={(currentTransition as any)?.[param.key] ?? param.default ?? '#000000'} onChange={(v) => handleTransitionChange({ [param.key]: v } as any)} />
+                    </Field>
+                  )}
+                </React.Fragment>
+              ))}
 
               <div className="pt-4 border-t border-[#333]">
                 <button onClick={removeTransition} className="w-full py-2 bg-red-900/20 text-red-400 border border-red-900/50 rounded-md hover:bg-red-900/40 text-[11px] font-bold tracking-widest uppercase transition-colors">
@@ -810,7 +851,8 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               </div>
             </div>
           </Accordion>
-        )}
+          );
+        })()}
 
         {/* CLIP MODE */}
         {!isTitleSelected && !selectedDialogue && !selectedTransition && selectedSegment && (

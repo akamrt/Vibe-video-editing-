@@ -1,6 +1,7 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { Segment, VideoAnalysis, Transition, TitleLayer } from '../types';
 import { getAudioBuffer, getWaveformPeaks } from '../utils/audioAnalysis';
+import { getTransitionDef, TRANSITION_CATEGORY_COLORS } from '../utils/transitionCatalog';
 
 interface TimelineProps {
   duration: number;
@@ -653,18 +654,10 @@ const Timeline: React.FC<TimelineProps> = ({
     return events;
   }, [analyses, layoutSegments, duration, scrollLeft, viewportWidth, zoom]);
 
-  // Helper to generate gradients for clips
+  // Helper to generate gradients for clips based on transition category
   const getSegmentGradient = (t: Transition, isStart: boolean) => {
-    let color = 'rgba(0,0,0,0.5)';
-    if (t.type === 'FADE' || t.type === 'CROSSFADE') {
-      color = 'rgba(59,130,246,0.6)';
-    } else if (t.type === 'WASH_BLACK') {
-      color = '#000000';
-    } else if (t.type === 'WASH_WHITE') {
-      color = '#ffffff';
-    } else if (t.type === 'WASH_COLOR') {
-      color = t.color || '#ff0000';
-    }
+    const def = getTransitionDef(t.type);
+    const color = def ? TRANSITION_CATEGORY_COLORS[def.category] + '99' : 'rgba(0,0,0,0.5)';
     return isStart
       ? `linear-gradient(90deg, ${color}, transparent)`
       : `linear-gradient(90deg, transparent, ${color})`;
@@ -923,27 +916,15 @@ const Timeline: React.FC<TimelineProps> = ({
 
                   {/* LAYER 2: OVERLAP ZONES */}
                   {overlapZones.filter(z => z.track === trackId).map((zone, i) => {
-                    // ... rendering logic same ...
+                    const def = zone.transition ? getTransitionDef(zone.transition.type) : null;
+                    const catColor = def ? TRANSITION_CATEGORY_COLORS[def.category] : '#3b82f6';
                     let bgStyle = 'repeating-linear-gradient(45deg, #00000088, #00000088 10px, #ffffff22 10px, #ffffff22 20px)';
                     let borderStyle = '2px solid rgba(255,255,255,0.3)';
                     let label = '';
                     if (zone.transition) {
-                      const t = zone.transition;
-                      label = `${t.duration.toFixed(1)}s`;
-                      if (t.type === 'WASH_BLACK') {
-                        bgStyle = 'linear-gradient(90deg, transparent, #000000, transparent)';
-                        borderStyle = '2px solid #000';
-                      } else if (t.type === 'WASH_WHITE') {
-                        bgStyle = 'linear-gradient(90deg, transparent, #ffffff, transparent)';
-                        borderStyle = '2px solid #fff';
-                      } else if (t.type === 'WASH_COLOR') {
-                        const c = t.color || '#ff0000';
-                        bgStyle = `linear-gradient(90deg, transparent, ${c}, transparent)`;
-                        borderStyle = `2px solid ${c}`;
-                      } else if (t.type === 'CROSSFADE' || t.type === 'FADE') {
-                        bgStyle = 'linear-gradient(90deg, rgba(59,130,246,0.1), rgba(59,130,246,0.4), rgba(59,130,246,0.1))';
-                        borderStyle = '2px solid #3b82f6';
-                      }
+                      label = `${zone.transition.duration.toFixed(1)}s`;
+                      bgStyle = `linear-gradient(90deg, ${catColor}15, ${catColor}50, ${catColor}15)`;
+                      borderStyle = `2px solid ${catColor}`;
                     }
 
                     return (
@@ -962,36 +943,51 @@ const Timeline: React.FC<TimelineProps> = ({
                           borderBottom: borderStyle,
                           borderRadius: 4
                         }}
-                        title={zone.transition ? `${zone.transition.type}` : "Edit Transition"}
+                        title={zone.transition ? `${def?.name || zone.transition.type} (${label})` : "Edit Transition"}
                       >
-                        <div className="bg-black/80 rounded-full p-1 border border-white/30 shadow-lg transform transition-transform group-hover/zone:scale-110">
-                          <svg className="w-2 h-2 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg>
+                        <div className="bg-black/80 rounded-full px-1.5 py-0.5 border border-white/30 shadow-lg transform transition-transform group-hover/zone:scale-110 flex items-center gap-1">
+                          <span className="text-[9px] text-white">{def?.icon || '⇄'}</span>
+                          {zone.transition && <span className="text-[8px] text-white/60">{label}</span>}
                         </div>
                       </div>
                     );
                   })}
 
                   {/* LAYER 3: HANDLES */}
-                  {layoutSegments.filter(s => s.track === trackId).map((seg) => (
+                  {layoutSegments.filter(s => s.track === trackId).map((seg) => {
+                    const segData = segments.find(s => s.id === seg.id);
+                    const hasTransIn = !!segData?.transitionIn;
+                    const hasTransOut = !!segData?.transitionOut;
+                    return (
                     <React.Fragment key={`handles-${seg.id}`}>
                       {!hiddenHandles.has(`${seg.id}-in`) && (
                         <button
-                          className="absolute top-1 w-3 h-3 bg-white hover:bg-blue-400 border border-black shadow-md z-30 transform -translate-x-1/2 rotate-45 flex items-center justify-center cursor-pointer opacity-0 hover:opacity-100 transition-opacity"
+                          className={`absolute top-1 w-3.5 h-3.5 border shadow-md z-30 transform -translate-x-1/2 rotate-45 flex items-center justify-center cursor-pointer transition-all ${
+                            hasTransIn
+                              ? 'bg-cyan-400 border-cyan-600 opacity-90 hover:opacity-100 hover:scale-125'
+                              : 'bg-white/70 border-gray-500 opacity-40 hover:opacity-100 hover:bg-blue-400 hover:border-blue-600 hover:scale-125'
+                          }`}
                           style={{ left: `${seg.leftPercent}%` }}
                           onMouseDown={(e) => e.stopPropagation()}
                           onClick={(e) => { e.stopPropagation(); onEditTransition(seg.id, 'in', e.clientX, e.clientY); }}
+                          title={hasTransIn ? `Intro: ${segData?.transitionIn?.type}` : 'Add intro transition'}
                         >
-                          <div className="w-1 h-1 bg-black rounded-full" />
+                          <div className={`w-1 h-1 rounded-full ${hasTransIn ? 'bg-white' : 'bg-black/50'}`} />
                         </button>
                       )}
                       {!hiddenHandles.has(`${seg.id}-out`) && (
                         <button
-                          className="absolute top-1 w-3 h-3 bg-white hover:bg-blue-400 border border-black shadow-md z-30 transform -translate-x-1/2 rotate-45 flex items-center justify-center cursor-pointer opacity-0 hover:opacity-100 transition-opacity"
+                          className={`absolute top-1 w-3.5 h-3.5 border shadow-md z-30 transform -translate-x-1/2 rotate-45 flex items-center justify-center cursor-pointer transition-all ${
+                            hasTransOut
+                              ? 'bg-cyan-400 border-cyan-600 opacity-90 hover:opacity-100 hover:scale-125'
+                              : 'bg-white/70 border-gray-500 opacity-40 hover:opacity-100 hover:bg-blue-400 hover:border-blue-600 hover:scale-125'
+                          }`}
                           style={{ left: `${seg.leftPercent + seg.widthPercent}%` }}
                           onMouseDown={(e) => e.stopPropagation()}
                           onClick={(e) => { e.stopPropagation(); onEditTransition(seg.id, 'out', e.clientX, e.clientY); }}
+                          title={hasTransOut ? `Outro: ${segData?.transitionOut?.type}` : 'Add outro transition'}
                         >
-                          <div className="w-1 h-1 bg-black rounded-full" />
+                          <div className={`w-1 h-1 rounded-full ${hasTransOut ? 'bg-white' : 'bg-black/50'}`} />
                         </button>
                       )}
                       <button
@@ -1002,7 +998,8 @@ const Timeline: React.FC<TimelineProps> = ({
                         <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M6 18L18 6M6 6l12 12" /></svg>
                       </button>
                     </React.Fragment>
-                  ))}
+                  );
+                  })}
                 </div>
               </div>
 

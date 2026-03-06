@@ -10,6 +10,8 @@ import GraphEditor from './components/GraphEditor';
 import { ProjectState, Segment, ChatMessage, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord } from './types';
 import RemotionPreview from './components/remotion/RemotionPreview';
 import TemplateManager from './components/remotion/TemplateManager';
+import TransitionPanel from './components/TransitionPanel';
+import { renderTransition as renderTransitionCanvas } from './utils/transitionRenderer';
 import AnimatedText from './components/remotion/AnimatedText';
 import { analyzeVideoContent, generateVibeEdit, chatWithVideoContext, transcribeAudio, performDeepAnalysis, detectPersonPosition, detectFillerWords, detectFillersFromTranscript, redetectFillerWords, redetectFillersFromTranscript, FillerDetection } from './services/geminiService';
 import FillerConfirmModal from './components/FillerConfirmModal';
@@ -220,7 +222,7 @@ function App() {
   const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'properties'>('media');
 
   // Right Panel State
-  const [activeRightTab, setActiveRightTab] = useState<'chat' | 'transcript' | 'templates' | 'tracking'>('chat');
+  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions'>('transitions');
 
   // Reset zoom/pan when leaving tracking tab
   useEffect(() => {
@@ -250,6 +252,9 @@ function App() {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [isSaving, setIsSaving] = useState(false);
+  const [showProjectMenu, setShowProjectMenu] = useState(false);
+  const [savedProjects, setSavedProjects] = useState<Array<{ id: string; name: string; savedAt: number; segmentCount: number; duration: number }>>([]);
+  const [projectName, setProjectName] = useState('');
   const [showYoutubeModal, setShowYoutubeModal] = useState(false);
   const [showFillerModal, setShowFillerModal] = useState(false);
   const [fillerDetections, setFillerDetections] = useState<FillerDetectionWithMedia[]>([]);
@@ -314,6 +319,7 @@ function App() {
   // We now manage a map of video refs for multi-track playback
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const overlayRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const transitionCanvasRef = useRef<HTMLCanvasElement>(null);
 
   // Audio Context for Export
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -522,6 +528,9 @@ function App() {
 
   // Sync Video Elements & Handle Transitions
   useEffect(() => {
+    // Track whether any segment needs canvas-based transition rendering this frame
+    let canvasUsed = false;
+
     renderedSegments.forEach(seg => {
       const videoEl = videoRefs.current.get(seg.id);
       const overlayEl = overlayRefs.current.get(seg.id);
@@ -540,14 +549,11 @@ function App() {
 
         if (!isActive) {
           // --- PRELOADING STATE ---
-          // Seek to start and pause, hide it.
-          // Check if we need to seek (only if significantly off to avoid thrashing)
           if (Math.abs(videoEl.currentTime - seg.startTime) > 0.1) {
             videoEl.currentTime = seg.startTime;
           }
           if (!videoEl.paused) videoEl.pause();
           videoEl.style.opacity = '0';
-          // Keep display block so it buffers
           return;
         }
 
@@ -556,16 +562,13 @@ function App() {
 
         if (project.isPlaying) {
           if (videoEl.paused) videoEl.play().catch(() => { });
-
-          // Drift correction: Only seek if SIGNIFICANTLY off (e.g. > 0.5s) to prevent micro-stutter loops
           if (Math.abs(videoEl.currentTime - sourceTime) > 0.5) {
             videoEl.currentTime = sourceTime;
           }
         } else {
           if (!videoEl.paused) videoEl.pause();
-          // Don't fight the tracking service's seeks or auto-centering seeks
           if (trackingMode !== 'tracking' && !autoCenteringRef.current) {
-            videoEl.currentTime = sourceTime; // Force sync when paused
+            videoEl.currentTime = sourceTime;
           }
         }
 
@@ -573,54 +576,123 @@ function App() {
         let opacity = 1;
         let overlayOpacity = 0;
         let overlayColor = 'white';
-        let videoBlendMode = 'normal'; // Blend mode for the video itself (Photoshop mode)
-        let overlayBlendMode = 'normal'; // Blend mode for the solid color wash
+        let videoBlendMode = 'normal';
+        let overlayBlendMode = 'normal';
+        let segUsedCanvas = false;
 
         const relTime = project.currentTime - seg.timelineStart;
 
-        // Intro Transition
+        // Determine active transition
+        let activeTransition: Transition | null = null;
+        let activeProgress = 0;
+        let isIntro = true;
+
         if (seg.transitionIn && relTime < seg.transitionIn.duration) {
-          const progress = Math.max(0, Math.min(1, relTime / seg.transitionIn.duration));
+          activeTransition = seg.transitionIn;
+          activeProgress = Math.max(0, Math.min(1, relTime / seg.transitionIn.duration));
+          isIntro = true;
+        }
+        if (seg.transitionOut && relTime > (duration - seg.transitionOut.duration)) {
+          const remaining = duration - relTime;
+          activeTransition = seg.transitionOut;
+          activeProgress = Math.max(0, Math.min(1, remaining / seg.transitionOut.duration));
+          isIntro = false;
+        }
 
-          if (seg.transitionIn.type === 'FADE' || seg.transitionIn.type === 'CROSSFADE') {
-            opacity = progress;
-          } else if (seg.transitionIn.type.startsWith('WASH')) {
-            opacity = 1;
-            overlayOpacity = 1 - progress;
-            if (seg.transitionIn.type === 'WASH_BLACK') overlayColor = 'black';
-            else if (seg.transitionIn.type === 'WASH_WHITE') overlayColor = 'white';
-            else if (seg.transitionIn.type === 'WASH_COLOR') overlayColor = seg.transitionIn.color || '#ff0000';
+        if (activeTransition) {
+          const type = activeTransition.type;
+          // Simple DOM-based transitions: fades, dips, dissolves
+          const isSimpleDom = type === 'FADE' || type === 'CROSSFADE' || type === 'NONE'
+            || type === 'DIP_TO_BLACK' || type === 'DIP_TO_WHITE'
+            || type === 'FADE_BLACK' || type === 'FADE_WHITE'
+            || type.startsWith('DISSOLVE_');
 
-            overlayBlendMode = seg.transitionIn.blendMode || 'normal';
-          }
+          if (isSimpleDom) {
+            if (type === 'DIP_TO_BLACK' || type === 'DIP_TO_WHITE' || type === 'FADE_BLACK' || type === 'FADE_WHITE') {
+              const color = activeTransition.color || (type.includes('BLACK') ? '#000000' : '#ffffff');
+              overlayColor = color;
+              overlayOpacity = 1 - Math.abs(activeProgress * 2 - 1);
+              overlayBlendMode = activeTransition.blendMode || 'normal';
+            } else if (type === 'FADE' || type === 'CROSSFADE') {
+              opacity = activeProgress;
+            } else if (type.startsWith('DISSOLVE_')) {
+              opacity = activeProgress;
+              videoBlendMode = activeTransition.blendMode || 'screen';
+            }
+          } else {
+            // Complex transition — render on canvas
+            const tCanvas = transitionCanvasRef.current;
+            if (tCanvas && videoEl.readyState >= 2) {
+              const ctx = tCanvas.getContext('2d');
+              if (ctx) {
+                canvasUsed = true;
+                segUsedCanvas = true;
 
-          // Apply custom blend mode to the video if specified (e.g. Screen/Multiply on entrance)
-          if (seg.transitionIn.blendMode && !seg.transitionIn.type.startsWith('WASH')) {
-            videoBlendMode = seg.transitionIn.blendMode;
+                // Size canvas to viewport
+                const cw = tCanvas.clientWidth;
+                const ch = tCanvas.clientHeight;
+                if (tCanvas.width !== cw || tCanvas.height !== ch) {
+                  tCanvas.width = cw;
+                  tCanvas.height = ch;
+                }
+
+                // Capture video frame to offscreen canvas
+                const frameCanvas = document.createElement('canvas');
+                frameCanvas.width = cw;
+                frameCanvas.height = ch;
+                const frameCtx = frameCanvas.getContext('2d')!;
+                // Draw video with object-contain behavior
+                const vw = videoEl.videoWidth;
+                const vh = videoEl.videoHeight;
+                const videoAR = vw / vh;
+                const canvasAR = cw / ch;
+                let drawW: number, drawH: number, drawX: number, drawY: number;
+                if (canvasAR > videoAR) {
+                  drawH = ch;
+                  drawW = ch * videoAR;
+                  drawX = (cw - drawW) / 2;
+                  drawY = 0;
+                } else {
+                  drawW = cw;
+                  drawH = cw / videoAR;
+                  drawX = 0;
+                  drawY = (ch - drawH) / 2;
+                }
+                frameCtx.fillStyle = '#000';
+                frameCtx.fillRect(0, 0, cw, ch);
+                frameCtx.drawImage(videoEl, drawX, drawY, drawW, drawH);
+
+                // For intro: null → video (outFrame=null, inFrame=video)
+                // For outro: video → null (outFrame=video, inFrame=null)
+                renderTransitionCanvas({
+                  ctx,
+                  width: cw,
+                  height: ch,
+                  outFrame: isIntro ? null : frameCanvas,
+                  inFrame: isIntro ? frameCanvas : null,
+                  progress: activeProgress,
+                  transition: activeTransition,
+                });
+
+                // Show canvas, hide video during canvas transition
+                tCanvas.style.display = 'block';
+                tCanvas.style.zIndex = '50';
+                videoEl.style.opacity = '0';
+              }
+            }
           }
         }
 
-        // Outro Transition
-        if (seg.transitionOut && relTime > (duration - seg.transitionOut.duration)) {
-          const remaining = duration - relTime;
-          const progress = Math.max(0, Math.min(1, remaining / seg.transitionOut.duration)); // 1 -> 0
+        // Apply DOM-based video styles (only when canvas isn't handling this segment's transition)
+        if (!segUsedCanvas) {
+          videoEl.style.opacity = opacity.toString();
+          videoEl.style.mixBlendMode = videoBlendMode;
+        }
 
-          if (seg.transitionOut.type === 'FADE' || seg.transitionOut.type === 'CROSSFADE') {
-            opacity = progress;
-          } else if (seg.transitionOut.type.startsWith('WASH')) {
-            opacity = 1;
-            overlayOpacity = 1 - progress;
-            if (seg.transitionOut.type === 'WASH_BLACK') overlayColor = 'black';
-            else if (seg.transitionOut.type === 'WASH_WHITE') overlayColor = 'white';
-            else if (seg.transitionOut.type === 'WASH_COLOR') overlayColor = seg.transitionOut.color || '#ff0000';
-
-            overlayBlendMode = seg.transitionOut.blendMode || 'normal';
-          }
-
-          // Apply custom blend mode to the video if specified (e.g. Screen/Multiply on exit)
-          if (seg.transitionOut.blendMode && !seg.transitionOut.type.startsWith('WASH')) {
-            videoBlendMode = seg.transitionOut.blendMode;
-          }
+        if (overlayEl) {
+          overlayEl.style.opacity = overlayOpacity.toString();
+          overlayEl.style.backgroundColor = overlayColor;
+          overlayEl.style.mixBlendMode = overlayBlendMode;
         }
 
         // --- Audio: keyframed volume + micro-fade at cut boundaries ---
@@ -637,17 +709,14 @@ function App() {
           audioVolume *= Math.max(0, (duration - relTime) / AUDIO_FADE_SEC);
         }
         videoEl.volume = Math.max(0, Math.min(1, audioVolume));
-
-        videoEl.style.opacity = opacity.toString();
-        videoEl.style.mixBlendMode = videoBlendMode;
-
-        if (overlayEl) {
-          overlayEl.style.opacity = overlayOpacity.toString();
-          overlayEl.style.backgroundColor = overlayColor;
-          overlayEl.style.mixBlendMode = overlayBlendMode;
-        }
       }
     });
+
+    // Hide transition canvas if no segment needed it this frame
+    const tCanvas = transitionCanvasRef.current;
+    if (tCanvas && !canvasUsed) {
+      tCanvas.style.display = 'none';
+    }
   }, [project.currentTime, renderedSegments, project.isPlaying, project.library]);
 
   // Clean up refs
@@ -1212,20 +1281,76 @@ function App() {
         if (vid && vid.readyState >= 2) {
           // Transform logic
           const clipTime = currentTime - activeSeg.timelineStart;
+          const segDuration = activeSeg.endTime - activeSeg.startTime;
           const transform = getCombinedTransform(activeSeg.keyframes, clipTime, currentTime);
 
-          ctx.save();
-          const coverScale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
-          const drawWidth = vid.videoWidth * coverScale;
-          const drawHeight = vid.videoHeight * coverScale;
-          ctx.translate(outputWidth / 2, outputHeight / 2);
-          // Translate in cover-scaled video space (keyframes are % of video native dims)
-          ctx.translate(transform.translateX * drawWidth / 100, transform.translateY * drawHeight / 100);
-          ctx.scale(transform.scale, transform.scale);
-          ctx.rotate(transform.rotation * Math.PI / 180);
+          // --- Transition handling for export ---
+          let transitionActive = false;
+          let transitionProgress = 0;
+          let activeTransition: Transition | undefined;
+          let isTransitionIn = false;
 
-          ctx.drawImage(vid, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
-          ctx.restore();
+          // Check intro transition
+          if (activeSeg.transitionIn && clipTime < activeSeg.transitionIn.duration) {
+            transitionActive = true;
+            transitionProgress = Math.max(0, Math.min(1, clipTime / activeSeg.transitionIn.duration));
+            activeTransition = activeSeg.transitionIn;
+            isTransitionIn = true;
+          }
+          // Check outro transition
+          if (activeSeg.transitionOut && clipTime > (segDuration - activeSeg.transitionOut.duration)) {
+            transitionActive = true;
+            const remaining = segDuration - clipTime;
+            transitionProgress = 1 - Math.max(0, Math.min(1, remaining / activeSeg.transitionOut.duration));
+            activeTransition = activeSeg.transitionOut;
+            isTransitionIn = false;
+          }
+
+          if (transitionActive && activeTransition && activeTransition.type !== 'NONE') {
+            // Create a temporary canvas with the video frame (with transforms applied)
+            const tmpCanvas = document.createElement('canvas');
+            tmpCanvas.width = outputWidth;
+            tmpCanvas.height = outputHeight;
+            const tmpCtx = tmpCanvas.getContext('2d')!;
+            const coverScale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
+            const drawWidth = vid.videoWidth * coverScale;
+            const drawHeight = vid.videoHeight * coverScale;
+            tmpCtx.save();
+            tmpCtx.translate(outputWidth / 2, outputHeight / 2);
+            tmpCtx.translate(transform.translateX * drawWidth / 100, transform.translateY * drawHeight / 100);
+            tmpCtx.scale(transform.scale, transform.scale);
+            tmpCtx.rotate(transform.rotation * Math.PI / 180);
+            tmpCtx.drawImage(vid, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+            tmpCtx.restore();
+
+            // For transitionIn: null → frame (incoming from black)
+            // For transitionOut: frame → null (outgoing to black)
+            if (isTransitionIn) {
+              renderTransitionCanvas({
+                ctx, width: outputWidth, height: outputHeight,
+                outFrame: null, inFrame: tmpCanvas,
+                progress: transitionProgress, transition: activeTransition,
+              });
+            } else {
+              renderTransitionCanvas({
+                ctx, width: outputWidth, height: outputHeight,
+                outFrame: tmpCanvas, inFrame: null,
+                progress: transitionProgress, transition: activeTransition,
+              });
+            }
+          } else {
+            // Normal draw (no transition)
+            ctx.save();
+            const coverScale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
+            const drawWidth = vid.videoWidth * coverScale;
+            const drawHeight = vid.videoHeight * coverScale;
+            ctx.translate(outputWidth / 2, outputHeight / 2);
+            ctx.translate(transform.translateX * drawWidth / 100, transform.translateY * drawHeight / 100);
+            ctx.scale(transform.scale, transform.scale);
+            ctx.rotate(transform.rotation * Math.PI / 180);
+            ctx.drawImage(vid, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
+            ctx.restore();
+          }
 
           // Draw Subtitles (with animation support)
           const media = projectRef.current.library.find(m => m.id === activeSeg.mediaId);
@@ -2347,7 +2472,7 @@ function App() {
     setSelectedTransition(null);
     setSelectedDialogues([]); // Deselect dialogue
     setIsTitleSelected(false); // Deselect title
-    setActiveRightTab('properties');
+    // Don't change right tab — keep whatever the user has open
     if (isMulti) {
       setSelectedSegmentIds(prev => prev.includes(seg.id) ? prev.filter(id => id !== seg.id) : [...prev, seg.id]);
     } else {
@@ -2362,7 +2487,8 @@ function App() {
     setSelectedDialogues([]); // Deselect dialogue
     setIsTitleSelected(false); // Deselect title
     setSelectedTransition({ segId, side });
-    setActiveRightTab('properties');
+    setActiveRightTab('transitions');
+    setActiveLeftTab('properties');
   };
 
   const handleDialogueSelect = (mediaId: string, index: number, isShift?: boolean) => {
@@ -2383,7 +2509,7 @@ function App() {
     if (activeBottomTab === 'graph') {
       setTransformTarget(`subtitle_${mediaId}_${index}`);
     }
-    setActiveRightTab('properties');
+    // (right tab stays on whatever the user has open)
   };
 
   const handleTitleSelect = (title: TitleLayer) => {
@@ -2392,7 +2518,7 @@ function App() {
     setSelectedTransition(null);
     setSelectedDialogues([]);
     setIsTitleSelected(true);
-    setActiveRightTab('properties');
+    // (right tab stays on whatever the user has open)
   };
 
   // Helper to update specific event properties deep in the library structure
@@ -4361,6 +4487,7 @@ function App() {
           <div className="flex-1 bg-black flex flex-col relative overflow-hidden">
             {/* Top Navigation Bar */}
             <div className="absolute top-0 right-0 z-50 flex gap-2 p-2 bg-[#1a1a1a]/90 rounded-bl-lg border-l border-b border-[#333]">
+              {/* Quick Save */}
               <button
                 onClick={async () => {
                   setIsSaving(true);
@@ -4376,8 +4503,149 @@ function App() {
                 disabled={isSaving}
                 className={`px-3 py-1 text-xs rounded font-medium flex items-center gap-1 ${isSaving ? 'bg-green-600 text-white' : 'bg-[#333] text-gray-300 hover:text-white hover:bg-[#444]'}`}
               >
-                {isSaving ? '💾 Saving...' : '💾 Save Project'}
+                {isSaving ? 'Saved!' : 'Save'}
               </button>
+              {/* Project Menu */}
+              <div className="relative">
+                <button
+                  onClick={async () => {
+                    if (!showProjectMenu) {
+                      const list = await contentDB.listProjects();
+                      setSavedProjects(list);
+                    }
+                    setShowProjectMenu(p => !p);
+                  }}
+                  className="px-2 py-1 text-xs rounded font-medium bg-[#333] text-gray-300 hover:text-white hover:bg-[#444]"
+                >
+                  Projects ▾
+                </button>
+                {showProjectMenu && (
+                  <>
+                  <div className="fixed inset-0 z-[99]" onClick={() => setShowProjectMenu(false)} />
+                  <div className="absolute top-full right-0 mt-1 w-72 bg-[#1a1a1a] border border-[#444] rounded-lg shadow-2xl z-[100] overflow-hidden" onClick={e => e.stopPropagation()}>
+                    {/* Save As */}
+                    <div className="p-3 border-b border-[#333]">
+                      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Save As</div>
+                      <div className="flex gap-1.5">
+                        <input
+                          value={projectName}
+                          onChange={e => setProjectName(e.target.value)}
+                          placeholder="Project name..."
+                          className="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-xs text-white focus:border-blue-500 outline-none"
+                          onKeyDown={e => {
+                            if (e.key === 'Enter' && projectName.trim()) {
+                              contentDB.saveNamedProject(projectName.trim(), project).then(() => {
+                                setProjectName('');
+                                contentDB.listProjects().then(setSavedProjects);
+                              });
+                            }
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            if (!projectName.trim()) return;
+                            contentDB.saveNamedProject(projectName.trim(), project).then(() => {
+                              setProjectName('');
+                              contentDB.listProjects().then(setSavedProjects);
+                            });
+                          }}
+                          disabled={!projectName.trim()}
+                          className="px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 font-medium"
+                        >
+                          Save
+                        </button>
+                      </div>
+                    </div>
+                    {/* Saved Projects List */}
+                    <div className="max-h-48 overflow-y-auto">
+                      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-3 pt-2 pb-1">Saved Projects</div>
+                      {savedProjects.length === 0 ? (
+                        <div className="px-3 pb-3 text-xs text-gray-600">No saved projects yet</div>
+                      ) : (
+                        savedProjects.map(p => (
+                          <div key={p.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-[#252525] group">
+                            <button
+                              onClick={async () => {
+                                const loaded = await contentDB.loadNamedProject(p.id);
+                                if (loaded) {
+                                  setProject({ ...INITIAL_STATE, ...loaded });
+                                  setShowProjectMenu(false);
+                                }
+                              }}
+                              className="flex-1 text-left min-w-0"
+                            >
+                              <div className="text-xs text-gray-200 font-medium truncate">{p.name}</div>
+                              <div className="text-[10px] text-gray-500">
+                                {p.segmentCount} clips &middot; {p.duration.toFixed(1)}s &middot; {new Date(p.savedAt).toLocaleDateString()}
+                              </div>
+                            </button>
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                await contentDB.deleteNamedProject(p.id);
+                                const list = await contentDB.listProjects();
+                                setSavedProjects(list);
+                              }}
+                              className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 text-xs px-1"
+                              title="Delete"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    {/* File Import/Export */}
+                    <div className="border-t border-[#333] p-2 flex gap-1.5">
+                      <button
+                        onClick={() => {
+                          const data = JSON.stringify(
+                            { ...project, isPlaying: false, library: project.library.map(m => ({ ...m, file: undefined })) },
+                            null,
+                            2
+                          );
+                          const blob = new Blob([data], { type: 'application/json' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `vibecut-project-${new Date().toISOString().slice(0, 10)}.json`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                          setShowProjectMenu(false);
+                        }}
+                        className="flex-1 px-2 py-1.5 text-xs rounded bg-[#252525] text-gray-300 hover:text-white hover:bg-[#333] font-medium text-center"
+                      >
+                        Export .json
+                      </button>
+                      <button
+                        onClick={() => {
+                          const input = document.createElement('input');
+                          input.type = 'file';
+                          input.accept = '.json';
+                          input.onchange = async (e) => {
+                            const file = (e.target as HTMLInputElement).files?.[0];
+                            if (!file) return;
+                            try {
+                              const text = await file.text();
+                              const imported = JSON.parse(text) as ProjectState;
+                              setProject({ ...INITIAL_STATE, ...imported, isPlaying: false });
+                              setShowProjectMenu(false);
+                            } catch (err) {
+                              console.error('Import failed:', err);
+                              alert('Failed to import project file');
+                            }
+                          };
+                          input.click();
+                        }}
+                        className="flex-1 px-2 py-1.5 text-xs rounded bg-[#252525] text-gray-300 hover:text-white hover:bg-[#333] font-medium text-center"
+                      >
+                        Import .json
+                      </button>
+                    </div>
+                  </div>
+                  </>
+                )}
+              </div>
               <div className="w-px h-6 bg-[#444] mx-1"></div>
               <button
                 onClick={() => setActivePage('editor')}
@@ -4500,6 +4768,13 @@ function App() {
                   ) : (
                     <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-sm">No Active Clip</div>
                   )}
+
+                  {/* Transition Canvas Overlay — renders complex transitions (wipes, shapes, etc.) */}
+                  <canvas
+                    ref={transitionCanvasRef}
+                    className="absolute inset-0 w-full h-full pointer-events-none"
+                    style={{ display: 'none', zIndex: 50 }}
+                  />
 
                   {/* Tracker Overlay — interactive tracker placement & visualization */}
                   {primarySelectedSegment && (primarySelectedSegment.trackers?.length || trackingMode === 'placing-stabilizer' || trackingMode === 'placing-parent') ? (
@@ -4937,13 +5212,12 @@ function App() {
           <div className="w-80 border-l border-[#333] flex flex-col bg-[#1e1e1e]">
             <div className="flex-1 flex flex-col min-h-0">
               <div className="flex border-b border-[#333] bg-[#252525]">
-                <button onClick={() => setActiveRightTab('chat')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'chat' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>CHAT</button>
-                <button onClick={() => setActiveRightTab('transcript')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'transcript' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>TRANSCRIPT</button>
-                <button onClick={() => setActiveRightTab('templates')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'templates' ? 'bg-[#333] text-purple-400 border-b-2 border-purple-400' : 'text-gray-400'}`}>TEMPLATES</button>
-                <button onClick={() => setActiveRightTab('tracking')} className={`flex-1 py-2 text-xs font-bold ${activeRightTab === 'tracking' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400'}`}>TRACKING</button>
+                <button onClick={() => setActiveRightTab('transcript')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'transcript' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>TRANSCRIPT</button>
+                <button onClick={() => setActiveRightTab('templates')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'templates' ? 'bg-[#333] text-purple-400 border-b-2 border-purple-400' : 'text-gray-400'}`}>TEMPLATES</button>
+                <button onClick={() => setActiveRightTab('transitions')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'transitions' ? 'bg-[#333] text-cyan-400 border-b-2 border-cyan-400' : 'text-gray-400'}`}>TRANS.</button>
+                <button onClick={() => setActiveRightTab('tracking')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'tracking' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400'}`}>TRACKING</button>
               </div>
               <div className="flex-1 overflow-hidden">
-                {activeRightTab === 'chat' && <ChatPanel messages={messages} onSendMessage={handleChat} isLoading={isChatLoading} />}
                 {activeRightTab === 'templates' && (
                   <TemplateManager
                     currentSubtitleStyle={project.subtitleStyle}
@@ -4970,6 +5244,16 @@ function App() {
                         setProject(p => ({ ...p, activeSubtitleTemplate: null }));
                       }
                     }}
+                  />
+                )}
+                {activeRightTab === 'transitions' && (
+                  <TransitionPanel
+                    selectedSegment={primarySelectedSegment || null}
+                    selectedTransition={selectedTransition}
+                    segments={project.segments}
+                    onApplyTransition={(segId, side, t) => handleUpdateTransition(segId, side, t)}
+                    onRemoveTransition={(segId, side) => handleUpdateTransition(segId, side, undefined)}
+                    onSelectTransitionEdge={(segId, side) => setSelectedTransition({ segId, side })}
                   />
                 )}
                 {activeRightTab === 'transcript' && (() => {
@@ -5058,9 +5342,6 @@ function App() {
             </div>
             {activeBottomTab === 'timeline' && (
               <>
-                <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">AI Vibe Editor</div>
-                <input value={editPrompt} onChange={e => setEditPrompt(e.target.value)} placeholder="E.g. 'Shorten the video to highlights'" className="flex-1 bg-[#121212] border border-[#333] rounded px-3 py-1 text-xs text-white focus:border-blue-500 outline-none" />
-                <button onClick={handleVibeEdit} disabled={status !== ProcessingStatus.IDLE} className="px-3 py-1 bg-blue-600 rounded text-xs font-bold hover:bg-blue-500 disabled:opacity-50">Generate Sequence</button>
                 {selectedDialogues.length >= 2 && (
                   <button onClick={handleMergeDialogues} className="px-2 py-1 text-xs font-bold bg-purple-600 text-white rounded hover:bg-purple-500">
                     Merge {selectedDialogues.length} Subtitles
