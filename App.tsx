@@ -389,6 +389,37 @@ function App() {
     }).sort((a, b) => a.track - b.track);
   }, [project.segments, project.currentTime]);
 
+  // Compute z-indices for overlapping segments — outgoing (left) clip must be on top
+  // This ensures z-index survives React re-renders (vs dynamic DOM manipulation)
+  const segmentZIndices = useMemo(() => {
+    const zMap = new Map<string, number>();
+    renderedSegments.forEach(seg => {
+      zMap.set(seg.id, (seg.track || 0) * 10);
+    });
+
+    // For each segment that overlaps the next clip, boost its z-index (outgoing on top)
+    renderedSegments.forEach(seg => {
+      if (seg.type === 'audio' || seg.type === 'blank') return;
+      const segEnd = seg.timelineStart + (seg.endTime - seg.startTime);
+
+      // Find overlapping neighbor (incoming clip that starts before this clip ends)
+      const neighbor = renderedSegments.find(s =>
+        s.id !== seg.id && s.type !== 'audio' && s.type !== 'blank' &&
+        (s.track || 0) === (seg.track || 0) &&
+        s.timelineStart > seg.timelineStart && s.timelineStart < segEnd
+      );
+
+      if (neighbor && project.currentTime >= neighbor.timelineStart) {
+        // During the overlap region: outgoing (left/earlier) clip on top
+        const baseZ = (seg.track || 0) * 10;
+        zMap.set(seg.id, baseZ + 2);
+        zMap.set(neighbor.id, baseZ + 1);
+      }
+    });
+
+    return zMap;
+  }, [renderedSegments, project.currentTime]);
+
   // Find the top-most visual media for "Main" analysis/transcript context
   const currentTopMedia = useMemo(() => {
     if (selectedSegmentIds.length === 1) {
@@ -621,18 +652,19 @@ function App() {
         // KEY PRINCIPLE: Only the OUTGOING (left) clip drives cross-transitions.
         // It renders ON TOP and the transition reveals the incoming clip below.
         // The incoming clip just renders at full opacity underneath — no transition processing.
+        // When clips overlap with NO explicit transition, a default crossfade is applied.
         let activeTransition: Transition | null = null;
         let activeProgress = 0;
         let isIntro = true;
         let overlapNeighborEl: HTMLVideoElement | null = null;
         let isCrossTransitionDriver = false;
 
-        // Find overlapping neighbor AFTER this clip on same track (this clip is outgoing)
-        const overlapNeighborOut = seg.transitionOut ? project.segments.find(s =>
+        // Find ANY overlapping neighbor AFTER this clip on same track (this clip would be outgoing)
+        const overlapNeighborOut = project.segments.find(s =>
           s.id !== seg.id && s.type !== 'audio' && s.type !== 'blank' &&
           s.track === seg.track &&
           s.timelineStart > seg.timelineStart && s.timelineStart < segEnd
-        ) : null;
+        ) || null;
 
         // Check if this clip is the INCOMING clip in an overlap (a previous clip overlaps us)
         const overlappingPredecessor = project.segments.find(s =>
@@ -641,16 +673,18 @@ function App() {
           s.timelineStart < seg.timelineStart &&
           (s.timelineStart + (s.endTime - s.startTime)) > seg.timelineStart
         );
-        const isIncomingInCrossTransition = !!overlappingPredecessor && !!overlappingPredecessor.transitionOut;
+        // The incoming clip is passive if the predecessor is driving the cross-transition
+        const isIncomingInCrossTransition = !!overlappingPredecessor;
 
-        if (seg.transitionOut && overlapNeighborOut) {
+        if (overlapNeighborOut) {
           // THIS CLIP IS THE OUTGOING (LEFT) CLIP — it drives the cross-transition
           const overlapStart = overlapNeighborOut.timelineStart;
           const overlapEnd = segEnd;
           const overlapDuration = overlapEnd - overlapStart;
           if (overlapDuration > 0 && project.currentTime >= overlapStart) {
             const overlapProgress = (project.currentTime - overlapStart) / overlapDuration;
-            activeTransition = seg.transitionOut;
+            // Use explicit transition if set, otherwise default to a crossfade
+            activeTransition = seg.transitionOut || { type: 'CROSSFADE' as any, duration: overlapDuration };
             // Progress 0→1 where 0 = outgoing fully visible, 1 = incoming fully revealed
             activeProgress = Math.max(0, Math.min(1, overlapProgress));
             isIntro = false;
@@ -660,9 +694,7 @@ function App() {
         } else if (isIncomingInCrossTransition) {
           // THIS CLIP IS THE INCOMING (RIGHT) CLIP — skip transition, just render at full opacity
           // The outgoing clip handles the cross-transition.
-          // Just make sure we're BELOW the outgoing clip in z-order.
-          const container = videoEl.closest('.absolute.inset-0') as HTMLElement;
-          if (container) container.style.zIndex = '1';
+          // Z-index is handled by segmentZIndices in the JSX render.
           // No active transition — render at full opacity
         } else if (seg.transitionIn && relTime < seg.transitionIn.duration) {
           // SOLO TRANSITION IN (no overlap — fade from black)
@@ -677,11 +709,8 @@ function App() {
           isIntro = false;
         }
 
-        // Ensure the outgoing clip in a cross-transition is ON TOP
-        if (isCrossTransitionDriver) {
-          const container = videoEl.closest('.absolute.inset-0') as HTMLElement;
-          if (container) container.style.zIndex = '10';
-        }
+        // Z-index for cross-transitions is handled by segmentZIndices in the JSX render
+        // (dynamic DOM manipulation was unreliable — React re-renders would overwrite it)
 
         if (activeTransition) {
           const type = activeTransition.type;
@@ -4898,7 +4927,7 @@ function App() {
                       }
 
                       return (
-                        <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: seg.track * 10 }}>
+                        <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: segmentZIndices.get(seg.id) ?? (seg.track || 0) * 10 }}>
                           {seg.type === 'blank' ? (
                             <div
                               className="w-full h-full flex items-center justify-center p-8 text-center"
