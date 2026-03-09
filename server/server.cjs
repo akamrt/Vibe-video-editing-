@@ -687,7 +687,7 @@ app.post('/api/ai/generate-short', async (req, res) => {
 
         const userPromptSection = prompt?.trim()
             ? `USER'S CREATIVE DIRECTION: "${prompt}"`
-            : `USER'S CREATIVE DIRECTION: None given — auto-detect the single most powerful, viral-worthy moment.`;
+            : `USER'S CREATIVE DIRECTION: None given — auto-detect the single most powerful, scroll-stopping moment. Prioritize emotional peaks, counterintuitive statements, and mic-drop lines.`;
 
         const refinementSection = refinementInstruction?.trim()
             ? `\nREFINEMENT (this overrides the original direction): "${refinementInstruction}"`
@@ -697,30 +697,45 @@ app.post('/api/ai/generate-short', async (req, res) => {
             ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
             : '';
 
-        const aiPrompt = `You are an expert short-form video editor creating a ${duration}-second clip from a sermon.
+        const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
+
+Create a ${duration}-second short from this content.
 
 ${userPromptSection}${refinementSection}${existingShortsSection}
 
-SERMON: "${videoTitle}"
+"${videoTitle}"
 
 TRANSCRIPT (grouped into ~30-second passages):
 ${groupedTranscript.substring(0, 15000)}
 
 EDITING RULES:
-1. NARRATIVE ARC — Every short must follow this structure:
-   - HOOK (0-5s): An attention-grabbing opening that makes viewers stop scrolling. Pick the most provocative, emotional, or surprising statement.
-   - BUILD (middle): Context and rising tension. Let the speaker develop the idea.
-   - PAYOFF (end): A satisfying conclusion, "mic drop" moment, or call to action.
-2. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
-3. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds. Never select clips shorter than 10s.
-4. CHRONOLOGICAL — Clips must appear in the order they occur in the sermon.
-5. TOTAL DURATION — All clips combined should be approximately ${duration} seconds.
-6. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
-7. KEYWORDS — For each clip, identify 2-4 words that are PIVOTAL to the narrative arc of this short.
-   These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
-   NOT generic spiritual words (avoid "God", "love", "hope" unless they ARE the narrative crux).
-   Pick words the viewer needs to FEEL — the word that makes the hook provocative, the build tense,
-   or the payoff land. Return them in lowercase.
+1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
+2. BUILD (middle) — Context and rising tension. Let the speaker develop the idea. Maintain momentum — no tangents, no repeated points, no filler.
+3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
+4. PRECISION TRIMMING — Start each clip at the exact moment compelling content begins. End at the exact peak. Common traps to avoid:
+   - Including warm-up sentences before the hook
+   - Trailing past the punchline into softening or restating
+   - Including "and another thing..." transitions
+   When in doubt, shorter and punchier beats longer and complete.
+5. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
+6. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds.
+7. CHRONOLOGICAL — Clips must appear in the order they occur in the source.
+8. TOTAL DURATION — All clips combined ≈ ${duration} seconds.
+9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
+10. KEYWORDS — For each clip, identify 2-4 words PIVOTAL to the narrative arc.
+    These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
+    NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
+    Pick words the viewer needs to FEEL. Return in lowercase.
+
+PLATFORM STRATEGY:
+Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
+
+GENRE-SPECIFIC STRATEGY:
+- Sermons/faith content: emotional crescendos, counterintuitive theology, personal vulnerability, prophetic declarations, conviction
+- Podcasts/interviews: hot takes, disagreements, surprising revelations, relatable stories, "I've never told anyone this"
+- Lectures/educational: "aha" moments, counterintuitive facts, powerful analogies, myth-busting
+- Motivational: universal truths, emotional breakthroughs, call-to-action moments
+- General: emotional peaks, humor, controversy, vulnerability, universal relatability
 
 Return JSON only:
 {
@@ -805,7 +820,7 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
 
         const userPromptSection = prompt?.trim()
             ? `USER'S CREATIVE DIRECTION: "${prompt}"`
-            : `USER'S CREATIVE DIRECTION: None given — auto-detect the single most powerful, viral-worthy moment.`;
+            : `USER'S CREATIVE DIRECTION: None given — auto-detect the single most powerful, scroll-stopping moment. Prioritize emotional peaks, counterintuitive statements, and mic-drop lines.`;
 
         const refinementSection = refinementInstruction?.trim()
             ? `\nREFINEMENT (this overrides the original direction): "${refinementInstruction}"`
@@ -815,30 +830,45 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
             ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
             : '';
 
-        const aiPrompt = `You are an expert short-form video editor creating a ${duration}-second clip from a sermon.
+        const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
+
+Create a ${duration}-second short from this content.
 
 ${userPromptSection}${refinementSection}${existingShortsSection}
 
-SERMON: "${videoTitle}"
+"${videoTitle}"
 
 TRANSCRIPT (grouped into ~30-second passages):
 ${groupedTranscript.substring(0, 15000)}
 
 EDITING RULES:
-1. NARRATIVE ARC — Every short must follow this structure:
-   - HOOK (0-5s): An attention-grabbing opening that makes viewers stop scrolling. Pick the most provocative, emotional, or surprising statement.
-   - BUILD (middle): Context and rising tension. Let the speaker develop the idea.
-   - PAYOFF (end): A satisfying conclusion, "mic drop" moment, or call to action.
-2. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
-3. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds. Never select clips shorter than 10s.
-4. CHRONOLOGICAL — Clips must appear in the order they occur in the sermon.
-5. TOTAL DURATION — All clips combined should be approximately ${duration} seconds.
-6. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
-7. KEYWORDS — For each clip, identify 2-4 words that are PIVOTAL to the narrative arc of this short.
-   These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
-   NOT generic spiritual words (avoid "God", "love", "hope" unless they ARE the narrative crux).
-   Pick words the viewer needs to FEEL — the word that makes the hook provocative, the build tense,
-   or the payoff land. Return them in lowercase.
+1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
+2. BUILD (middle) — Context and rising tension. Let the speaker develop the idea. Maintain momentum — no tangents, no repeated points, no filler.
+3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
+4. PRECISION TRIMMING — Start each clip at the exact moment compelling content begins. End at the exact peak. Common traps to avoid:
+   - Including warm-up sentences before the hook
+   - Trailing past the punchline into softening or restating
+   - Including "and another thing..." transitions
+   When in doubt, shorter and punchier beats longer and complete.
+5. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
+6. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds.
+7. CHRONOLOGICAL — Clips must appear in the order they occur in the source.
+8. TOTAL DURATION — All clips combined ≈ ${duration} seconds.
+9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
+10. KEYWORDS — For each clip, identify 2-4 words PIVOTAL to the narrative arc.
+    These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
+    NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
+    Pick words the viewer needs to FEEL. Return in lowercase.
+
+PLATFORM STRATEGY:
+Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
+
+GENRE-SPECIFIC STRATEGY:
+- Sermons/faith content: emotional crescendos, counterintuitive theology, personal vulnerability, prophetic declarations, conviction
+- Podcasts/interviews: hot takes, disagreements, surprising revelations, relatable stories, "I've never told anyone this"
+- Lectures/educational: "aha" moments, counterintuitive facts, powerful analogies, myth-busting
+- Motivational: universal truths, emotional breakthroughs, call-to-action moments
+- General: emotional peaks, humor, controversy, vulnerability, universal relatability
 
 return JSON only:
 {
@@ -1066,8 +1096,38 @@ app.post('/api/tracking/analyze', async (req, res) => {
                 console.error(`[Tracking] stderr: ${stderr.substring(0, 500)}`);
                 return res.status(500).json({ success: false, error: `Tracker exited with code ${code}`, stderr: stderr.substring(0, 500), fallback: true });
             }
+
+            // Try to parse JSON result from stdout first.
+            // PyInstaller on Windows can sometimes redirect stdout to stderr,
+            // so if stdout is empty/invalid, also check stderr for the result.
+            let resultJson = stdout.trim();
+
+            // If stdout is empty or not valid JSON, check stderr for backup result marker
+            if (!resultJson || !resultJson.startsWith('{')) {
+                const marker = stderr.match(/__RESULT__(.+?)__END_RESULT__/);
+                if (marker) {
+                    console.log('[Tracking] stdout empty, recovered result from stderr backup marker');
+                    resultJson = marker[1];
+                } else {
+                    // Last resort: try to find a JSON object in stderr
+                    // (PyInstaller may route print() to stderr on Windows)
+                    const lines = stderr.split('\n').filter(l => l.trim());
+                    for (let i = lines.length - 1; i >= 0; i--) {
+                        const line = lines[i].trim();
+                        if (line.startsWith('{') && line.endsWith('}')) {
+                            try {
+                                JSON.parse(line);
+                                console.log('[Tracking] stdout empty, recovered JSON result from stderr');
+                                resultJson = line;
+                                break;
+                            } catch {}
+                        }
+                    }
+                }
+            }
+
             try {
-                const result = JSON.parse(stdout);
+                const result = JSON.parse(resultJson);
                 if (result.success === false) {
                     console.error(`[Tracking] Tracker returned error: ${result.error}`);
                 } else {
@@ -1076,7 +1136,8 @@ app.post('/api/tracking/analyze', async (req, res) => {
                 if (stderr.trim()) console.log(`[Tracking] stderr: ${stderr.substring(0, 1000)}`);
                 res.json(result);
             } catch (e) {
-                console.error('[Tracking] Invalid tracker output:', stdout.substring(0, 200));
+                console.error('[Tracking] Invalid tracker output. stdout:', stdout.substring(0, 200));
+                console.error('[Tracking] stderr:', stderr.substring(0, 500));
                 res.status(500).json({ success: false, error: 'Invalid tracker output', fallback: true });
             }
         });
