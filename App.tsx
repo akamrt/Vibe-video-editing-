@@ -195,6 +195,7 @@ function App() {
     { id: '1', role: 'model', text: 'Welcome to VibeCut Pro. Upload clips to the Media Bin to begin editing.', timestamp: new Date() }
   ]);
   const [status, setStatus] = useState<ProcessingStatus>(ProcessingStatus.IDLE);
+  const [isExporting, setIsExporting] = useState(false);
   const [centeringProgress, setCenteringProgress] = useState('');
   const [outOfZoneThreshold, setOutOfZoneThreshold] = useState(0); // % distance from center before centering (0=always follow)
   const [scanSmooth, setScanSmooth] = useState(false);             // Apply Gaussian smoothing after scan
@@ -377,7 +378,11 @@ function App() {
   }, [project.segments, project.currentTime]);
 
   // Identify segments to render (Active + Preload) to avoid black frames on cut
+  // During export, render ALL segments so audio sources can be connected upfront
   const renderedSegments = useMemo(() => {
+    if (isExporting) {
+      return [...project.segments].sort((a, b) => a.track - b.track);
+    }
     const LOOKAHEAD = 2.0; // Preload 2s ahead
     return project.segments.filter(s => {
       const duration = s.endTime - s.startTime;
@@ -387,7 +392,7 @@ function App() {
       const isUpcoming = s.timelineStart > project.currentTime && s.timelineStart < (project.currentTime + LOOKAHEAD);
       return isActive || isUpcoming;
     }).sort((a, b) => a.track - b.track);
-  }, [project.segments, project.currentTime]);
+  }, [project.segments, project.currentTime, isExporting]);
 
   // Compute z-indices for overlapping segments — outgoing (left) clip must be on top
   // This ensures z-index survives React re-renders (vs dynamic DOM manipulation)
@@ -1304,6 +1309,10 @@ function App() {
   const handleExportVideo = async (settings: ExportSettings) => {
     console.log('[Export] Starting REAL-TIME export:', settings);
 
+    // 0. Render ALL segments so their video elements exist for audio connection
+    setIsExporting(true);
+    await new Promise(r => setTimeout(r, 300)); // Wait for React to render all video elements
+
     // 1. Audio Setup
     if (!audioContextRef.current) {
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -1313,8 +1322,9 @@ function App() {
 
     const dest = actx.createMediaStreamDestination();
 
-    // Connect videos to destination
-    videoRefs.current.forEach((vid) => {
+    // Connect videos to destination (all segments rendered due to isExporting=true)
+    let audioConnected = 0;
+    videoRefs.current.forEach((vid, segId) => {
       let source;
       if (audioSourcesRef.current.has(vid)) {
         source = audioSourcesRef.current.get(vid);
@@ -1324,15 +1334,17 @@ function App() {
           audioSourcesRef.current.set(vid, source);
           source.connect(actx.destination); // Keep output to speakers
         } catch (e) {
-          // Already connected or error
-          console.warn('[Export] Audio connect warning:', e);
+          console.warn('[Export] Audio source creation failed for segment', segId, e);
         }
       }
       // Connect to export stream
       if (source) {
-        try { source.connect(dest); } catch (e) { }
+        try { source.connect(dest); audioConnected++; } catch (e) {
+          console.warn('[Export] Audio dest connect failed for segment', segId, e);
+        }
       }
     });
+    console.log(`[Export] Audio: ${audioConnected}/${videoRefs.current.size} sources connected to export stream`);
 
     // 2. Visual Setup
     const preset = ASPECT_RATIO_PRESETS[settings.aspectRatio];
@@ -1392,6 +1404,7 @@ function App() {
       URL.revokeObjectURL(url);
 
       // Cleanup: revert to start
+      setIsExporting(false);
       setProject(p => ({ ...p, isPlaying: false, currentTime: 0 }));
     };
 
