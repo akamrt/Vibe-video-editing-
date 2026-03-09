@@ -532,8 +532,8 @@ function getTextForTimeRange(transcriptLines, startTime, endTime) {
     return overlapping.map(l => l.text).join(' ').trim() || '';
 }
 
-// Group granular transcript lines into ~30-second passages for better AI comprehension
-function groupIntoPassages(transcriptLines, targetSeconds = 30) {
+// Group granular transcript lines into short passages for AI clip selection
+function groupIntoPassages(transcriptLines, targetSeconds = 5) {
     const passages = [];
     let current = { start: 0, end: 0, texts: [] };
 
@@ -545,13 +545,13 @@ function groupIntoPassages(transcriptLines, targetSeconds = 30) {
         current.texts.push(line.text);
 
         if (current.end - current.start >= targetSeconds) {
-            passages.push(`[${Math.round(current.start)}s - ${Math.round(current.end)}s]\n${current.texts.join(' ')}`);
+            passages.push(`[${current.start.toFixed(1)}s - ${current.end.toFixed(1)}s]\n${current.texts.join(' ')}`);
             current = { start: 0, end: 0, texts: [] };
         }
     }
     // Flush remaining
     if (current.texts.length > 0) {
-        passages.push(`[${Math.round(current.start)}s - ${Math.round(current.end)}s]\n${current.texts.join(' ')}`);
+        passages.push(`[${current.start.toFixed(1)}s - ${current.end.toFixed(1)}s]\n${current.texts.join(' ')}`);
     }
     return passages.join('\n\n');
 }
@@ -681,7 +681,7 @@ app.post('/api/ai/generate-short', async (req, res) => {
 
         // Parse transcript and group into readable passages
         const transcriptLines = parseTranscriptLines(transcript);
-        const groupedTranscript = groupIntoPassages(transcriptLines, 30);
+        const groupedTranscript = groupIntoPassages(transcriptLines, 5);
 
         const duration = targetDuration || 60;
 
@@ -705,7 +705,7 @@ ${userPromptSection}${refinementSection}${existingShortsSection}
 
 "${videoTitle}"
 
-TRANSCRIPT (grouped into ~30-second passages):
+TRANSCRIPT (with timestamps):
 ${groupedTranscript.substring(0, 15000)}
 
 EDITING RULES:
@@ -814,7 +814,7 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
 
         // Parse transcript and group into readable passages
         const transcriptLines = parseTranscriptLines(transcript);
-        const groupedTranscript = groupIntoPassages(transcriptLines, 30);
+        const groupedTranscript = groupIntoPassages(transcriptLines, 5);
 
         const duration = targetDuration || 60;
 
@@ -838,7 +838,7 @@ ${userPromptSection}${refinementSection}${existingShortsSection}
 
 "${videoTitle}"
 
-TRANSCRIPT (grouped into ~30-second passages):
+TRANSCRIPT (with timestamps):
 ${groupedTranscript.substring(0, 15000)}
 
 EDITING RULES:

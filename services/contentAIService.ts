@@ -162,7 +162,7 @@ export async function generateShort(
 
     // 2. Format transcript with timestamps (Use SECONDS to help AI avoid math errors)
     const transcriptWithTimestamps = segments.map(seg =>
-        `[${Math.floor(seg.start)} - ${Math.floor(seg.start + seg.duration)}] ${seg.text}`
+        `[${seg.start.toFixed(1)} - ${(seg.start + seg.duration).toFixed(1)}] ${seg.text}`
     ).join('\n');
 
     try {
@@ -266,7 +266,7 @@ export async function buildShortPrompt(
     if (segments.length === 0) return { success: false, error: "No transcript found for this video" };
 
     const transcriptWithTimestamps = segments.map(seg =>
-        `[${Math.floor(seg.start)} - ${Math.floor(seg.start + seg.duration)}] ${seg.text}`
+        `[${seg.start.toFixed(1)} - ${(seg.start + seg.duration).toFixed(1)}] ${seg.text}`
     ).join('\n');
 
     try {
