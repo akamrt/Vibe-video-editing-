@@ -379,8 +379,24 @@ export async function importManualShort(
             }
 
             const shortSegments: ShortSegment[] = shortData.clips.map((clip: any) => {
-                const startTime = parseTime(clip.startTime);
-                const endTime = parseTime(clip.endTime);
+                let startTime = parseTime(clip.startTime);
+                let endTime = parseTime(clip.endTime);
+
+                // Snap clip boundaries to word boundaries so the last word isn't cut off.
+                // LLMs return the START timestamp of the last word they want, but the clip
+                // needs to extend past that word's audio for natural playback.
+                // Snap startTime to the nearest word start at-or-before
+                const startWord = [...transcriptLines].reverse().find(l => l.start <= startTime + 0.01);
+                if (startWord) startTime = startWord.start;
+                // Snap endTime: find the first word AFTER endTime, use its end time
+                // (captures target word + ~1 word buffer for natural speech trailing)
+                const nextWordIdx = transcriptLines.findIndex(l => l.start > endTime + 0.01);
+                if (nextWordIdx >= 0) {
+                    endTime = transcriptLines[nextWordIdx].end;
+                } else {
+                    endTime = endTime + 0.5;
+                }
+
                 let text = clip.text;
 
                 // Look up text if missing

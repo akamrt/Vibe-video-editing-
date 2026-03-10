@@ -532,6 +532,47 @@ function getTextForTimeRange(transcriptLines, startTime, endTime) {
     return overlapping.map(l => l.text).join(' ').trim() || '';
 }
 
+/**
+ * Snap a clip's endTime forward so the word AT or nearest-before that timestamp
+ * is fully included. LLMs typically return the START timestamp of the last word
+ * they want, but the clip needs to extend past that word's audio to avoid cutoff.
+ *
+ * Strategy: find the first word that starts AFTER endTime, and return its END
+ * time. This captures both the target word AND allows for natural speech trailing
+ * (LLMs are often ~1 word imprecise with end boundaries).
+ * Falls back to endTime + 0.5s if no next word.
+ */
+function snapClipEndTime(transcriptLines, endTime) {
+    // Find the first word that starts AFTER endTime
+    const nextIdx = transcriptLines.findIndex(line => line.start > endTime + 0.01);
+
+    if (nextIdx >= 0) {
+        // Return the end time of the next word — this gives the LLM's target word
+        // its full duration and adds a natural ~1 word buffer for speech trailing
+        return transcriptLines[nextIdx].end;
+    }
+
+    // No next word (end of transcript) — add a buffer
+    return endTime + 0.5;
+}
+
+/**
+ * Snap a clip's startTime backward so it begins at the start of the word
+ * AT or nearest-before that timestamp (not mid-word).
+ */
+function snapClipStartTime(transcriptLines, startTime) {
+    // Find the last word that starts at or before the given startTime
+    let bestLine = null;
+    for (const line of transcriptLines) {
+        if (line.start <= startTime + 0.01) {
+            bestLine = line;
+        } else {
+            break;
+        }
+    }
+    return bestLine ? bestLine.start : startTime;
+}
+
 // Group granular transcript lines into short passages for AI clip selection
 function groupIntoPassages(transcriptLines, targetSeconds = 5) {
     const passages = [];
@@ -769,6 +810,9 @@ Return JSON only:
         // Fill in clip text from transcript (AI only returns time ranges)
         if (result.clips && Array.isArray(result.clips)) {
             for (const clip of result.clips) {
+                // Snap clip boundaries to word boundaries so the last word isn't cut off
+                clip.startTime = snapClipStartTime(transcriptLines, clip.startTime);
+                clip.endTime = snapClipEndTime(transcriptLines, clip.endTime);
                 clip.text = getTextForTimeRange(transcriptLines, clip.startTime, clip.endTime);
                 if (clip.keywords && Array.isArray(clip.keywords) && clip.text) {
                     const words = clip.text.split(/\s+/);
