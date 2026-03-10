@@ -2500,9 +2500,19 @@ function App() {
       // 7. Create timeline segments from the short clips
       // startTime/endTime = position in SOURCE VIDEO (for playback)
       // timelineStart = position on TIMELINE (for display)
+      const clipCount = snappedShortSegments.length;
       let timelinePosition = 0;
       const newSegments: Segment[] = snappedShortSegments.map((clipSeg, index) => {
         const clipDuration = clipSeg.endTime - clipSeg.startTime;
+        // Apply fade/crossfade transitions between clips
+        const transitionIn: Transition | undefined =
+          index === 0
+            ? { type: 'FADE' as TransitionType, duration: 0.5, easing: 'easeOut' }   // First clip: fade from black
+            : { type: 'CROSSFADE' as TransitionType, duration: 0.4, easing: 'easeInOut' }; // Middle clips: crossfade
+        const transitionOut: Transition | undefined =
+          index === clipCount - 1
+            ? { type: 'FADE' as TransitionType, duration: 0.5, easing: 'easeIn' }    // Last clip: fade to black
+            : undefined; // Crossfade is handled by the next clip's transitionIn
         const segment: Segment = {
           id: Math.random().toString(36).substr(2, 9),
           mediaId: newMediaItem.id,
@@ -2513,7 +2523,9 @@ function App() {
           timelineStart: timelinePosition,
           track: 0,
           description: `${short.title} - Clip ${index + 1}`,
-          color: `hsl(${280 + index * 20}, 60%, 40%)` // Purple-ish gradient
+          color: `hsl(${280 + index * 20}, 60%, 40%)`, // Purple-ish gradient
+          transitionIn,
+          transitionOut,
         };
         timelinePosition += clipDuration;
         return segment;
@@ -2531,10 +2543,29 @@ function App() {
         keyframes: []
       };
 
+      // 7.6. Set default subtitle animation if none is active
+      // "Fade Up" — gentle fade with upward slide, renders well on short-form content
+      const defaultSubtitleTemplate = !project.activeSubtitleTemplate ? {
+        id: `preset_live_short_${Date.now()}`,
+        name: 'Fade Up',
+        animation: {
+          id: `anim_short_${Date.now()}`,
+          name: 'Fade Up Animation',
+          duration: 1.5,
+          scope: 'line' as const,
+          stagger: 0.2,
+          effects: [
+            { id: 'su1', type: 'opacity' as const, from: 0, to: 1, startAt: 0, endAt: 0.6, easing: 'easeOut' as const },
+            { id: 'su2', type: 'translateY' as const, from: 20, to: 0, startAt: 0, endAt: 0.6, easing: 'easeOut' as const },
+          ],
+        },
+      } : null;
+
       setProject(prev => ({
         ...prev,
         segments: [...prev.segments, ...newSegments],
-        titleLayer: titleLayer
+        titleLayer: titleLayer,
+        ...(defaultSubtitleTemplate ? { activeSubtitleTemplate: defaultSubtitleTemplate } : {}),
       }));
 
       // Switch to editor view so user sees the imported clips
