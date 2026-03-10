@@ -334,6 +334,7 @@ export async function importManualShort(
         let json;
         try {
             json = JSON.parse(cleanJsonString);
+            console.log('[ImportJSON] Parsed JSON type:', Array.isArray(json) ? 'array' : typeof json, 'keys:', typeof json === 'object' && json ? Object.keys(json).join(', ') : 'n/a');
         } catch (parseErr) {
             // If the parse fails, see if we can do a more aggressive cleanup or just fail gracefully with the original error
             console.warn("First JSON parse attempt failed, trying aggressive cleanup...", parseErr);
@@ -355,15 +356,52 @@ export async function importManualShort(
             return 0;
         };
 
-        let shortsToProcess = [];
+        // ── Flexible JSON structure detection ──
+        // Supports many formats that AI models commonly return:
+        //   { "shorts": [{ "clips": [...] }] }         ← standard
+        //   { "shorts": [{ "segments": [...] }] }      ← common alternative
+        //   { "clips": [...] }                          ← single short with clips
+        //   { "segments": [...] }                       ← single short with segments
+        //   [{ "clips": [...] }]                        ← array of shorts
+        //   [{ "startTime": ..., "endTime": ... }]      ← flat array of clips
+        //   { "startTime": ..., "endTime": ... }         ← single clip object
+
+        const getClipsArray = (obj: any): any[] | null => {
+            if (obj.clips && Array.isArray(obj.clips)) return obj.clips;
+            if (obj.segments && Array.isArray(obj.segments)) return obj.segments;
+            if (obj.content && Array.isArray(obj.content)) return obj.content;
+            // Object itself looks like a single clip (has startTime/endTime)
+            if (obj.startTime !== undefined && obj.endTime !== undefined) return [obj];
+            return null;
+        };
+
+        const isClipLike = (obj: any): boolean =>
+            obj && typeof obj === 'object' && (obj.startTime !== undefined || obj.start_time !== undefined) && (obj.endTime !== undefined || obj.end_time !== undefined);
+
+        let shortsToProcess: any[] = [];
+
         if (json.shorts && Array.isArray(json.shorts)) {
             shortsToProcess = json.shorts;
-        } else if (Array.isArray(json)) {
-            shortsToProcess = json;
-        } else if (json.clips) {
+        } else if (json.clips && Array.isArray(json.clips)) {
             shortsToProcess = [json];
+        } else if (json.segments && Array.isArray(json.segments)) {
+            shortsToProcess = [{ ...json, clips: json.segments }];
+        } else if (json.content && Array.isArray(json.content)) {
+            shortsToProcess = [{ ...json, clips: json.content }];
+        } else if (Array.isArray(json)) {
+            // Could be array of shorts (each with clips) or flat array of clips
+            if (json.length > 0 && isClipLike(json[0])) {
+                // Flat array of clips → wrap as single short
+                shortsToProcess = [{ clips: json }];
+            } else {
+                shortsToProcess = json;
+            }
+        } else if (isClipLike(json)) {
+            // Single clip object
+            shortsToProcess = [{ clips: [json] }];
         } else {
-            return { success: false, error: "JSON must contain a 'shorts' array or a valid 'clips' array" };
+            console.error('[ImportJSON] Unrecognized JSON structure. Keys:', Object.keys(json));
+            return { success: false, error: `Unrecognized JSON structure. Expected 'shorts', 'clips', or 'segments' array. Found keys: ${Object.keys(json).join(', ')}` };
         }
 
         if (shortsToProcess.length === 0) {
@@ -373,14 +411,19 @@ export async function importManualShort(
         const generatedShorts: GeneratedShort[] = [];
 
         for (const [index, shortData] of shortsToProcess.entries()) {
-            if (!shortData.clips || !Array.isArray(shortData.clips)) {
-                console.warn(`Skipping short at index ${index} due to missing clips array.`);
+            // Try to find clips under any common key name
+            const clips = getClipsArray(shortData);
+            if (!clips || clips.length === 0) {
+                console.warn(`[ImportJSON] Skipping short at index ${index}: no clips/segments found. Keys: ${Object.keys(shortData).join(', ')}`);
                 continue;
             }
+            // Normalize: ensure shortData.clips is set for downstream processing
+            shortData.clips = clips;
 
             const shortSegments: ShortSegment[] = shortData.clips.map((clip: any) => {
-                let startTime = parseTime(clip.startTime);
-                let endTime = parseTime(clip.endTime);
+                // Support both camelCase and snake_case time fields
+                let startTime = parseTime(clip.startTime ?? clip.start_time ?? clip.start ?? 0);
+                let endTime = parseTime(clip.endTime ?? clip.end_time ?? clip.end ?? 0);
 
                 // Step 1: Phrase-based matching (most accurate when available)
                 let phraseMatchedStart = false;
@@ -473,7 +516,9 @@ export async function importManualShort(
         }
 
         if (generatedShorts.length === 0) {
-            return { success: false, error: "Failed to parse any valid shorts from JSON" };
+            const sampleKeys = shortsToProcess.length > 0 ? Object.keys(shortsToProcess[0]).join(', ') : 'empty';
+            console.error(`[ImportJSON] No valid shorts parsed. ${shortsToProcess.length} entries checked. First entry keys: ${sampleKeys}`);
+            return { success: false, error: `Failed to parse any valid shorts. Found ${shortsToProcess.length} entries but none had clips. First entry keys: [${sampleKeys}]. Expected each short to contain a 'clips' or 'segments' array.` };
         }
 
         return { success: true, short: generatedShorts[0], shorts: generatedShorts };
