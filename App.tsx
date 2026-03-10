@@ -1800,19 +1800,27 @@ function App() {
     const duration = item.duration;
     const isAudio = !!item.isAudioOnly;
 
-    // For audio-only clips, only check collisions against other audio segments on same track
-    // For video clips, check against non-audio segments (video occupies the video lane)
+    // For audio-only clips: always place on a brand-new layer above all existing audio tracks.
+    // Each audio import gets its own dedicated track (A2, A3, A4…) so they never stack on A1
+    // or collide with existing audio. For video clips, find the first available track as before.
     let targetTrack = 0;
-    while (true) {
-      const collision = project.segments.some(s =>
-        s.track === targetTrack &&
-        (isAudio ? s.type === 'audio' : s.type !== 'audio') &&
-        !(s.timelineStart + (s.endTime - s.startTime) <= insertionTime + 0.01 ||
-          s.timelineStart >= insertionTime + duration - 0.01)
-      );
-      if (!collision) break;
-      targetTrack++;
-      if (targetTrack > 10) break;
+    if (isAudio) {
+      const existingAudioTracks = project.segments
+        .filter(s => s.type === 'audio')
+        .map(s => s.track);
+      targetTrack = existingAudioTracks.length > 0 ? Math.max(...existingAudioTracks) + 1 : 1;
+    } else {
+      while (true) {
+        const collision = project.segments.some(s =>
+          s.track === targetTrack &&
+          s.type !== 'audio' &&
+          !(s.timelineStart + (s.endTime - s.startTime) <= insertionTime + 0.01 ||
+            s.timelineStart >= insertionTime + duration - 0.01)
+        );
+        if (!collision) break;
+        targetTrack++;
+        if (targetTrack > 10) break;
+      }
     }
 
     const newSeg: Segment = {
