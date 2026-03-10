@@ -382,20 +382,36 @@ export async function importManualShort(
                 let startTime = parseTime(clip.startTime);
                 let endTime = parseTime(clip.endTime);
 
-                // Snap clip boundaries to word boundaries so the last word isn't cut off.
-                // LLMs return the START timestamp of the last word they want, but the clip
-                // needs to extend past that word's audio for natural playback.
-                // Snap startTime to the nearest word start at-or-before
-                const startWord = [...transcriptLines].reverse().find(l => l.start <= startTime + 0.01);
-                if (startWord) startTime = startWord.start;
-                // Snap endTime: find the first word AFTER endTime, use its end time
-                // (captures target word + ~1 word buffer for natural speech trailing)
-                const nextWordIdx = transcriptLines.findIndex(l => l.start > endTime + 0.01);
-                if (nextWordIdx >= 0) {
-                    endTime = transcriptLines[nextWordIdx].end;
-                } else {
-                    endTime = endTime + 0.5;
+                // Step 1: Phrase-based matching (most accurate when available)
+                let phraseMatchedStart = false;
+                let phraseMatchedEnd = false;
+
+                if (clip.startPhrase) {
+                    const matched = matchPhraseToTimestamp(transcriptLines, clip.startPhrase, startTime, 'start');
+                    if (matched !== null) { startTime = matched; phraseMatchedStart = true; }
                 }
+                if (clip.endPhrase) {
+                    const matched = matchPhraseToTimestamp(transcriptLines, clip.endPhrase, endTime, 'end');
+                    if (matched !== null) { endTime = matched; phraseMatchedEnd = true; }
+                }
+
+                // Step 2: Fall back to word-boundary snap if phrase matching didn't work
+                if (!phraseMatchedStart) {
+                    const startWord = [...transcriptLines].reverse().find(l => l.start <= startTime + 0.01);
+                    if (startWord) startTime = startWord.start;
+                }
+                if (!phraseMatchedEnd) {
+                    const nextWordIdx = transcriptLines.findIndex(l => l.start > endTime + 0.01);
+                    if (nextWordIdx >= 0) {
+                        endTime = transcriptLines[nextWordIdx].end;
+                    } else {
+                        endTime = endTime + 0.5;
+                    }
+                }
+
+                // Step 3: Trim preamble/trailer filler words
+                startTime = trimPreambleWords(transcriptLines, startTime, endTime);
+                endTime = trimTrailerWords(transcriptLines, startTime, endTime);
 
                 let text = clip.text;
 
@@ -464,6 +480,136 @@ export async function importManualShort(
     } catch (error) {
         return { success: false, error: "JSON Parse error: " + (error instanceof Error ? error.message : "Invalid JSON format") };
     }
+}
+
+// ==================== Phrase Matching & Trimming ====================
+
+/**
+ * Match a phrase against word-level transcript to find precise timestamp.
+ * mode = 'start' returns the start time of the first matching word.
+ * mode = 'end' returns the end time of the last matching word.
+ */
+function matchPhraseToTimestamp(
+    transcriptLines: { start: number; end: number; text: string }[],
+    phrase: string,
+    approxTime: number,
+    mode: 'start' | 'end'
+): number | null {
+    if (!phrase || !phrase.trim()) return null;
+
+    const normalizeWord = (w: string) => w.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '').trim();
+    const phraseWords = phrase.split(/\s+/).map(normalizeWord).filter(w => w.length > 0);
+    if (phraseWords.length === 0) return null;
+
+    const searchWindow = 30;
+    const candidates = transcriptLines.filter(l =>
+        l.start >= approxTime - searchWindow && l.start <= approxTime + searchWindow
+    );
+    if (candidates.length === 0) return null;
+
+    const candidateWords = candidates.map(l => normalizeWord(l.text));
+
+    // Exact sequence match
+    for (let i = 0; i <= candidateWords.length - phraseWords.length; i++) {
+        let match = true;
+        for (let j = 0; j < phraseWords.length; j++) {
+            if (candidateWords[i + j] !== phraseWords[j]) { match = false; break; }
+        }
+        if (match) {
+            return mode === 'start'
+                ? candidates[i].start
+                : candidates[i + phraseWords.length - 1].end;
+        }
+    }
+
+    // Fuzzy fallback (≥60%)
+    let bestScore = 0, bestIdx = -1;
+    for (let i = 0; i <= candidateWords.length - phraseWords.length; i++) {
+        let matching = 0;
+        for (let j = 0; j < phraseWords.length; j++) {
+            if (candidateWords[i + j] === phraseWords[j]) matching++;
+        }
+        const score = matching / phraseWords.length;
+        if (score > bestScore) { bestScore = score; bestIdx = i; }
+    }
+
+    if (bestScore >= 0.6 && bestIdx >= 0) {
+        return mode === 'start'
+            ? candidates[bestIdx].start
+            : candidates[bestIdx + phraseWords.length - 1].end;
+    }
+
+    return null;
+}
+
+const PREAMBLE_STARTERS = new Set(['so', 'and', 'but', 'well', 'now', 'like', 'okay', 'ok', 'alright', 'um', 'uh', 'yeah']);
+const PREAMBLE_PHRASES = ['you know', 'i mean', 'as i was saying', 'you know what', 'and i think', 'and so'];
+const TRAILER_ENDERS = new Set(['right', 'amen', 'yeah', 'okay', 'ok', 'huh']);
+const TRAILER_PHRASES_LIST = ['so yeah', 'you know', 'right right', 'you know what i mean'];
+
+function trimPreambleWords(
+    transcriptLines: { start: number; end: number; text: string }[],
+    startTime: number, endTime: number
+): number {
+    const clipWords = transcriptLines.filter(l => l.start >= startTime - 0.01 && l.end <= endTime + 0.01);
+    if (clipWords.length <= 3) return startTime;
+
+    let trimCount = 0;
+    const maxTrim = Math.min(3, Math.floor(clipWords.length * 0.15));
+
+    for (let i = 0; i < maxTrim && i < clipWords.length; i++) {
+        const word = clipWords[i].text.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '');
+        if (PREAMBLE_STARTERS.has(word)) { trimCount = i + 1; } else { break; }
+    }
+
+    if (trimCount === 0 && clipWords.length >= 2) {
+        const twoWords = clipWords.slice(0, 2).map(w =>
+            w.text.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '')
+        ).join(' ');
+        for (const phrase of PREAMBLE_PHRASES) {
+            if (twoWords === phrase || twoWords.startsWith(phrase)) { trimCount = 2; break; }
+        }
+    }
+
+    if (trimCount > 0 && trimCount < clipWords.length) {
+        console.log(`[TrimPreamble] Trimming ${trimCount} word(s): "${clipWords.slice(0, trimCount).map(w => w.text).join(' ')}"`);
+        return clipWords[trimCount].start;
+    }
+    return startTime;
+}
+
+function trimTrailerWords(
+    transcriptLines: { start: number; end: number; text: string }[],
+    startTime: number, endTime: number
+): number {
+    const clipWords = transcriptLines.filter(l => l.start >= startTime - 0.01 && l.end <= endTime + 0.01);
+    if (clipWords.length <= 3) return endTime;
+
+    let trimCount = 0;
+    const maxTrim = Math.min(3, Math.floor(clipWords.length * 0.15));
+
+    for (let i = clipWords.length - 1; i >= clipWords.length - maxTrim && i >= 0; i--) {
+        const word = clipWords[i].text.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '');
+        if (TRAILER_ENDERS.has(word)) { trimCount = clipWords.length - i; } else { break; }
+    }
+
+    if (trimCount === 0 && clipWords.length >= 2) {
+        const lastTwo = clipWords.slice(-2).map(w =>
+            w.text.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '')
+        ).join(' ');
+        for (const phrase of TRAILER_PHRASES_LIST) {
+            if (lastTwo === phrase) { trimCount = 2; break; }
+        }
+    }
+
+    if (trimCount > 0) {
+        const lastKeepIdx = clipWords.length - trimCount - 1;
+        if (lastKeepIdx >= 0) {
+            console.log(`[TrimTrailer] Trimming ${trimCount} word(s): "${clipWords.slice(-trimCount).map(w => w.text).join(' ')}"`);
+            return clipWords[lastKeepIdx].end;
+        }
+    }
+    return endTime;
 }
 
 // ==================== Helpers ====================

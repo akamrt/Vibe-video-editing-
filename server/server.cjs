@@ -573,6 +573,164 @@ function snapClipStartTime(transcriptLines, startTime) {
     return bestLine ? bestLine.start : startTime;
 }
 
+/**
+ * Match a phrase against word-level transcript to find precise timestamp.
+ * mode = 'start' returns the start time of the first matching word.
+ * mode = 'end' returns the end time of the last matching word.
+ * Returns null if no match found.
+ */
+function matchPhraseToTimestamp(transcriptLines, phrase, approxTime, mode) {
+    if (!phrase || !phrase.trim()) return null;
+
+    const normalizeWord = w => w.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '').trim();
+    const phraseWords = phrase.split(/\s+/).map(normalizeWord).filter(w => w.length > 0);
+    if (phraseWords.length === 0) return null;
+
+    // Search in a window around the approximate time (±30s)
+    const searchWindow = 30;
+    const candidates = transcriptLines.filter(l =>
+        l.start >= approxTime - searchWindow && l.start <= approxTime + searchWindow
+    );
+    if (candidates.length === 0) return null;
+
+    const candidateWords = candidates.map(l => normalizeWord(l.text));
+
+    // Exact sequence match
+    for (let i = 0; i <= candidateWords.length - phraseWords.length; i++) {
+        let match = true;
+        for (let j = 0; j < phraseWords.length; j++) {
+            if (candidateWords[i + j] !== phraseWords[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            const time = mode === 'start'
+                ? candidates[i].start
+                : candidates[i + phraseWords.length - 1].end;
+            console.log(`[PhraseMatch] Exact match: "${phrase}" → ${time.toFixed(2)}s (${mode})`);
+            return time;
+        }
+    }
+
+    // Fuzzy fallback: find best partial match (≥60% words matching)
+    let bestScore = 0;
+    let bestIdx = -1;
+    for (let i = 0; i <= candidateWords.length - phraseWords.length; i++) {
+        let matching = 0;
+        for (let j = 0; j < phraseWords.length; j++) {
+            if (candidateWords[i + j] === phraseWords[j]) matching++;
+        }
+        const score = matching / phraseWords.length;
+        if (score > bestScore) {
+            bestScore = score;
+            bestIdx = i;
+        }
+    }
+
+    if (bestScore >= 0.6 && bestIdx >= 0) {
+        const time = mode === 'start'
+            ? candidates[bestIdx].start
+            : candidates[bestIdx + phraseWords.length - 1].end;
+        console.log(`[PhraseMatch] Fuzzy match (${(bestScore * 100).toFixed(0)}%): "${phrase}" → ${time.toFixed(2)}s (${mode})`);
+        return time;
+    }
+
+    console.log(`[PhraseMatch] No match for "${phrase}" near ${approxTime.toFixed(1)}s`);
+    return null;
+}
+
+// Filler/preamble words that commonly start clips but shouldn't
+const PREAMBLE_STARTERS = new Set(['so', 'and', 'but', 'well', 'now', 'like', 'okay', 'ok', 'alright', 'um', 'uh', 'yeah']);
+const PREAMBLE_PHRASES = ['you know', 'i mean', 'as i was saying', 'you know what', 'and i think', 'and so'];
+const TRAILER_ENDERS = new Set(['right', 'amen', 'yeah', 'okay', 'ok', 'huh']);
+const TRAILER_PHRASES = ['so yeah', 'you know', 'right right', 'you know what i mean'];
+
+/**
+ * Trim preamble filler words from the start of a clip.
+ * Returns the adjusted startTime or the original if no trimming needed.
+ */
+function trimPreambleWords(transcriptLines, startTime, endTime) {
+    const clipWords = transcriptLines.filter(l => l.start >= startTime - 0.01 && l.end <= endTime + 0.01);
+    if (clipWords.length <= 3) return startTime; // Don't trim very short clips
+
+    let trimCount = 0;
+    const maxTrim = Math.min(3, Math.floor(clipWords.length * 0.15)); // At most 3 words or 15%
+
+    // Check single-word preambles
+    for (let i = 0; i < maxTrim && i < clipWords.length; i++) {
+        const word = clipWords[i].text.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '');
+        if (PREAMBLE_STARTERS.has(word)) {
+            trimCount = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Check 2-word preamble phrases
+    if (trimCount === 0 && clipWords.length >= 2) {
+        const twoWords = clipWords.slice(0, 2).map(w =>
+            w.text.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '')
+        ).join(' ');
+        for (const phrase of PREAMBLE_PHRASES) {
+            if (twoWords === phrase || twoWords.startsWith(phrase)) {
+                trimCount = 2;
+                break;
+            }
+        }
+    }
+
+    if (trimCount > 0 && trimCount < clipWords.length) {
+        console.log(`[TrimPreamble] Trimming ${trimCount} word(s): "${clipWords.slice(0, trimCount).map(w => w.text).join(' ')}"`);
+        return clipWords[trimCount].start;
+    }
+    return startTime;
+}
+
+/**
+ * Trim trailing filler words from the end of a clip.
+ * Returns the adjusted endTime or the original if no trimming needed.
+ */
+function trimTrailerWords(transcriptLines, startTime, endTime) {
+    const clipWords = transcriptLines.filter(l => l.start >= startTime - 0.01 && l.end <= endTime + 0.01);
+    if (clipWords.length <= 3) return endTime;
+
+    let trimCount = 0;
+    const maxTrim = Math.min(3, Math.floor(clipWords.length * 0.15));
+
+    // Check single-word trailers (from end)
+    for (let i = clipWords.length - 1; i >= clipWords.length - maxTrim && i >= 0; i--) {
+        const word = clipWords[i].text.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '');
+        if (TRAILER_ENDERS.has(word)) {
+            trimCount = clipWords.length - i;
+        } else {
+            break;
+        }
+    }
+
+    // Check 2-word trailer phrases
+    if (trimCount === 0 && clipWords.length >= 2) {
+        const lastTwo = clipWords.slice(-2).map(w =>
+            w.text.toLowerCase().replace(/[.,!?;:'"()\-—]/g, '')
+        ).join(' ');
+        for (const phrase of TRAILER_PHRASES) {
+            if (lastTwo === phrase) {
+                trimCount = 2;
+                break;
+            }
+        }
+    }
+
+    if (trimCount > 0) {
+        const lastKeepIdx = clipWords.length - trimCount - 1;
+        if (lastKeepIdx >= 0) {
+            console.log(`[TrimTrailer] Trimming ${trimCount} word(s): "${clipWords.slice(-trimCount).map(w => w.text).join(' ')}"`);
+            return clipWords[lastKeepIdx].end;
+        }
+    }
+    return endTime;
+}
+
 // Group granular transcript lines into short passages for AI clip selection
 function groupIntoPassages(transcriptLines, targetSeconds = 5) {
     const passages = [];
@@ -767,6 +925,7 @@ EDITING RULES:
     These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
+11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -785,7 +944,7 @@ Return JSON only:
   "hook": "the opening hook line that grabs attention",
   "resolution": "the closing payoff line",
   "clips": [
-    { "startTime": number, "endTime": number, "keywords": ["word1", "word2"] }
+    { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
   ],
   "totalDuration": number
 }`;
@@ -810,9 +969,38 @@ Return JSON only:
         // Fill in clip text from transcript (AI only returns time ranges)
         if (result.clips && Array.isArray(result.clips)) {
             for (const clip of result.clips) {
-                // Snap clip boundaries to word boundaries so the last word isn't cut off
-                clip.startTime = snapClipStartTime(transcriptLines, clip.startTime);
-                clip.endTime = snapClipEndTime(transcriptLines, clip.endTime);
+                // Step 1: Phrase-based matching (most accurate — uses AI's text selection)
+                let phraseMatchedStart = false;
+                let phraseMatchedEnd = false;
+
+                if (clip.startPhrase) {
+                    const matched = matchPhraseToTimestamp(transcriptLines, clip.startPhrase, clip.startTime, 'start');
+                    if (matched !== null) {
+                        clip.startTime = matched;
+                        phraseMatchedStart = true;
+                    }
+                }
+                if (clip.endPhrase) {
+                    const matched = matchPhraseToTimestamp(transcriptLines, clip.endPhrase, clip.endTime, 'end');
+                    if (matched !== null) {
+                        clip.endTime = matched;
+                        phraseMatchedEnd = true;
+                    }
+                }
+
+                // Step 2: Fall back to word-boundary snap if phrase matching didn't work
+                if (!phraseMatchedStart) {
+                    clip.startTime = snapClipStartTime(transcriptLines, clip.startTime);
+                }
+                if (!phraseMatchedEnd) {
+                    clip.endTime = snapClipEndTime(transcriptLines, clip.endTime);
+                }
+
+                // Step 3: Trim preamble/trailer filler words
+                clip.startTime = trimPreambleWords(transcriptLines, clip.startTime, clip.endTime);
+                clip.endTime = trimTrailerWords(transcriptLines, clip.startTime, clip.endTime);
+
+                // Fill text from the refined time range
                 clip.text = getTextForTimeRange(transcriptLines, clip.startTime, clip.endTime);
                 if (clip.keywords && Array.isArray(clip.keywords) && clip.text) {
                     const words = clip.text.split(/\s+/);
@@ -905,6 +1093,7 @@ EDITING RULES:
     These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
+11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -925,7 +1114,7 @@ return JSON only:
       "hook": "the opening hook line that grabs attention",
       "resolution": "the closing payoff line",
       "clips": [
-        { "startTime": number, "endTime": number, "keywords": ["word1", "word2"] }
+        { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
       ],
       "totalDuration": number
     }

@@ -2340,6 +2340,24 @@ function App() {
       });
       const duration = video.duration || short.totalDuration || 60;
 
+      // 3.5. Snap clip boundaries to audio silence for cleaner cuts
+      let snappedShortSegments = short.segments;
+      try {
+        const audioBuffer = await getAudioBuffer(`short_export_${short.id}`, file);
+        snappedShortSegments = short.segments.map(seg => {
+          const startResult = findNearestSilence(audioBuffer, seg.startTime, 0.15);
+          const endResult = findNearestSilence(audioBuffer, seg.endTime, 0.15);
+          return {
+            ...seg,
+            startTime: Math.abs(startResult.offset) <= 0.15 ? startResult.time : seg.startTime,
+            endTime: Math.abs(endResult.offset) <= 0.15 ? endResult.time : seg.endTime,
+          };
+        });
+        console.log('[Export Short] Snapped clip boundaries to silence');
+      } catch (e) {
+        console.warn('[Export Short] Skipping snap-to-silence:', e instanceof Error ? e.message : e);
+      }
+
       // 4. Get granular transcript segments and GROUP them into slides (Karaoke style)
       const allVideoSegments = await contentDB.getSegmentsByVideoId(short.videoId);
       console.log('[ExportShort] VideoId:', short.videoId);
@@ -2347,7 +2365,7 @@ function App() {
       console.log('[ExportShort] short.segments (clips):', short.segments);
 
       // Pre-clean segments: apply word removal before processing
-      const cleanedSegments = short.segments.map(seg => {
+      const cleanedSegments = snappedShortSegments.map(seg => {
         const cleaned = cleanSegmentText(seg.text, seg.removedWordIndices, seg.keywords);
         return { ...seg, text: cleaned.text, keywords: cleaned.keywords };
       });
@@ -2482,7 +2500,7 @@ function App() {
       // startTime/endTime = position in SOURCE VIDEO (for playback)
       // timelineStart = position on TIMELINE (for display)
       let timelinePosition = 0;
-      const newSegments: Segment[] = short.segments.map((clipSeg, index) => {
+      const newSegments: Segment[] = snappedShortSegments.map((clipSeg, index) => {
         const clipDuration = clipSeg.endTime - clipSeg.startTime;
         const segment: Segment = {
           id: Math.random().toString(36).substr(2, 9),
