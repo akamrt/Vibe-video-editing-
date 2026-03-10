@@ -370,8 +370,10 @@ export async function importManualShort(
             if (obj.clips && Array.isArray(obj.clips)) return obj.clips;
             if (obj.segments && Array.isArray(obj.segments)) return obj.segments;
             if (obj.content && Array.isArray(obj.content)) return obj.content;
-            // Object itself looks like a single clip (has startTime/endTime)
-            if (obj.startTime !== undefined && obj.endTime !== undefined) return [obj];
+            if (obj.captions && Array.isArray(obj.captions)) return obj.captions;
+            // Object itself looks like a single clip (has startTime/endTime or start_time/end_time)
+            if ((obj.startTime !== undefined || obj.start_time !== undefined) &&
+                (obj.endTime !== undefined || obj.end_time !== undefined)) return [obj];
             return null;
         };
 
