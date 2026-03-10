@@ -826,10 +826,17 @@ const Timeline: React.FC<TimelineProps> = ({
           </div>
 
           {/* TRACKS (Video + Audio Pairs) */}
-          {tracks.slice().reverse().map(trackId => (
+          {tracks.slice().reverse().map(trackId => {
+            const hasVideoOnTrack = layoutSegments.some(s => s.track === trackId && s.type !== 'audio');
+            const hasAudioOnTrack = layoutSegments.some(s => s.track === trackId && (s.type === 'audio' || (s.type !== 'blank' && s.audioLinked !== false)));
+            // Always show at least one track pair for track 0 (main timeline)
+            const showVideoTrack = hasVideoOnTrack || trackId === 0;
+            const showAudioTrack = hasAudioOnTrack || trackId === 0;
+            return (
             <div key={`track-group-${trackId}`} className="flex flex-col w-full border-b border-[#333]">
 
-              {/* VIDEO TRACK */}
+              {/* VIDEO TRACK — only render if track has video segments (or is track 0) */}
+              {showVideoTrack && (
               <div className="h-32 relative w-full flex bg-[#151515] border-b border-[#222]">
                 {/* Sidebar Label (Sticky Left) */}
                 <div className="sticky left-0 w-12 min-w-[3rem] h-full bg-[#202020] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-blue-400 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)]">V{trackId + 1}</div>
@@ -1009,8 +1016,10 @@ const Timeline: React.FC<TimelineProps> = ({
                   })}
                 </div>
               </div>
+              )}
 
-              {/* AUDIO TRACK */}
+              {/* AUDIO TRACK — only render if track has audio segments (or is track 0) */}
+              {showAudioTrack && (
               <div className="h-16 relative w-full flex bg-[#111111]">
                 <div className="sticky left-0 w-12 min-w-[3rem] h-full bg-[#181818] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-green-500 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)]">A{trackId + 1}</div>
                 <div className="relative flex-1 h-full">
@@ -1116,9 +1125,11 @@ const Timeline: React.FC<TimelineProps> = ({
                   })}
                 </div>
               </div>
+              )}
 
             </div>
-          ))}
+          );
+          })}
 
           {/* PLAYHEAD */}
           <div className="absolute top-0 bottom-0 w-[2px] bg-red-500 z-[80] pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.8)]" style={{ left: `calc(3rem + (100% - 3rem) * ${(currentTime / (duration || 1))})` }}>

@@ -441,7 +441,11 @@ function App() {
     }
 
     if (activeSegments.length > 0) {
-      const topSeg = activeSegments[activeSegments.length - 1];
+      // Use top-most VISUAL segment (ignore audio-only) for subtitle/analysis context
+      const visualSegments = activeSegments.filter(s => s.type !== 'audio');
+      const topSeg = visualSegments.length > 0
+        ? visualSegments[visualSegments.length - 1]
+        : activeSegments[activeSegments.length - 1];
       return project.library.find(m => m.id === topSeg.mediaId);
     }
     return project.library.find(m => m.id === selectedMediaId);
@@ -473,13 +477,16 @@ function App() {
     return media?.analysis || null;
   }, [primarySelectedSegment, project.library]);
 
-  // Subtitles (from top-most media)
+  // Subtitles (from top-most VISUAL media, not audio-only)
   const activeSubtitleEvent = useMemo(() => {
     if (!currentTopMedia || !currentTopMedia.analysis) return null;
-    const topSeg = activeSegments[activeSegments.length - 1];
+    const visualSegments = activeSegments.filter(s => s.type !== 'audio');
+    const topSeg = visualSegments.length > 0
+      ? visualSegments[visualSegments.length - 1]
+      : activeSegments[activeSegments.length - 1];
     if (!topSeg) return null;
 
-    // Calculate source time for the top segment
+    // Calculate source time for the top visual segment
     const sourceTime = topSeg.startTime + (project.currentTime - topSeg.timelineStart);
 
     const match = currentTopMedia.analysis.events.find(e =>
