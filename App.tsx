@@ -1590,16 +1590,20 @@ function App() {
     const newItems: MediaItem[] = [];
     for (const file of files) {
       const url = URL.createObjectURL(file);
-      const video = document.createElement('video');
-      video.src = url;
-      await new Promise(r => video.onloadedmetadata = r);
+      const isAudioOnly = file.type.startsWith('audio/');
+
+      // Use <audio> for audio files, <video> for video files
+      const el = document.createElement(isAudioOnly ? 'audio' : 'video');
+      el.src = url;
+      await new Promise(r => el.onloadedmetadata = r);
       newItems.push({
         id: Math.random().toString(36).substr(2, 9),
         file,
         url,
-        duration: (video.duration && isFinite(video.duration)) ? video.duration : 10, // Default to 10s if unknown
+        duration: (el.duration && isFinite(el.duration)) ? el.duration : 10, // Default to 10s if unknown
         name: file.name,
-        analysis: null
+        analysis: null,
+        isAudioOnly,
       });
     }
     setProject(prev => ({ ...prev, library: [...prev.library, ...newItems] }));
@@ -1794,11 +1798,15 @@ function App() {
   const handleAddToTimeline = (item: MediaItem) => {
     const insertionTime = project.currentTime;
     const duration = item.duration;
+    const isAudio = !!item.isAudioOnly;
 
+    // For audio-only clips, only check collisions against other audio segments on same track
+    // For video clips, check against non-audio segments (video occupies the video lane)
     let targetTrack = 0;
     while (true) {
       const collision = project.segments.some(s =>
         s.track === targetTrack &&
+        (isAudio ? s.type === 'audio' : s.type !== 'audio') &&
         !(s.timelineStart + (s.endTime - s.startTime) <= insertionTime + 0.01 ||
           s.timelineStart >= insertionTime + duration - 0.01)
       );
@@ -1809,6 +1817,7 @@ function App() {
 
     const newSeg: Segment = {
       id: Math.random().toString(36).substr(2, 9),
+      type: isAudio ? 'audio' : undefined,
       mediaId: item.id,
       startTime: 0,
       endTime: item.duration,
@@ -1821,7 +1830,7 @@ function App() {
     safeSetTimelineZoom(1);
 
     // Auto-center person at start and end of the clip (if enabled)
-    if (autoCenterOnImport) {
+    if (autoCenterOnImport && !isAudio) {
       setTimeout(() => autoCenterSegment(newSeg.id, newSeg.startTime, newSeg.endTime, newSeg.timelineStart), 0);
     }
   };

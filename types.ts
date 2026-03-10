@@ -91,6 +91,7 @@ export interface MediaItem {
   name: string;
   analysis: VideoAnalysis | null;
   isCached?: boolean;
+  isAudioOnly?: boolean; // true when file is audio/* with no video track
   fillerDetections?: CachedFillerDetection[];
 }
 

@@ -44,7 +44,11 @@ const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, o
           >
             <div className="flex items-center gap-3">
               <div className="w-12 h-8 bg-black rounded flex items-center justify-center overflow-hidden">
-                <video src={item.url} className="w-full h-full object-cover opacity-60" />
+                {item.isAudioOnly ? (
+                  <svg className="w-5 h-5 text-indigo-400 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2z" /></svg>
+                ) : (
+                  <video src={item.url} className="w-full h-full object-cover opacity-60" />
+                )}
               </div>
               <div className="flex-1 min-w-0">
                 <div className="text-[11px] font-medium truncate text-gray-200">{item.name}</div>
