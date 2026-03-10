@@ -366,19 +366,22 @@ export async function importManualShort(
         //   [{ "startTime": ..., "endTime": ... }]      ← flat array of clips
         //   { "startTime": ..., "endTime": ... }         ← single clip object
 
+        const isClipLike = (obj: any): boolean =>
+            obj && typeof obj === 'object' && (obj.startTime !== undefined || obj.start_time !== undefined || obj.start !== undefined) && (obj.endTime !== undefined || obj.end_time !== undefined || obj.end !== undefined);
+
+        // Only treat an array as clips if its first element looks like a clip (has time fields)
+        const getValidatedArray = (arr: any[]): any[] | null =>
+            arr.length > 0 && isClipLike(arr[0]) ? arr : null;
+
         const getClipsArray = (obj: any): any[] | null => {
-            if (obj.clips && Array.isArray(obj.clips)) return obj.clips;
-            if (obj.segments && Array.isArray(obj.segments)) return obj.segments;
-            if (obj.content && Array.isArray(obj.content)) return obj.content;
-            if (obj.captions && Array.isArray(obj.captions)) return obj.captions;
-            // Object itself looks like a single clip (has startTime/endTime or start_time/end_time)
-            if ((obj.startTime !== undefined || obj.start_time !== undefined) &&
-                (obj.endTime !== undefined || obj.end_time !== undefined)) return [obj];
+            // Check named array properties — but ONLY if their elements look like clips
+            if (obj.clips && Array.isArray(obj.clips)) return getValidatedArray(obj.clips) ?? obj.clips;
+            if (obj.segments && Array.isArray(obj.segments)) return getValidatedArray(obj.segments);
+            if (obj.content && Array.isArray(obj.content)) return getValidatedArray(obj.content);
+            // Object itself looks like a single clip (has time fields directly)
+            if (isClipLike(obj)) return [obj];
             return null;
         };
-
-        const isClipLike = (obj: any): boolean =>
-            obj && typeof obj === 'object' && (obj.startTime !== undefined || obj.start_time !== undefined) && (obj.endTime !== undefined || obj.end_time !== undefined);
 
         let shortsToProcess: any[] = [];
 
