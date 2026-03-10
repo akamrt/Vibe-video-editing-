@@ -29,6 +29,7 @@ import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
 import { getAudioBuffer, findNearestSilence, snapFillerRange, clearAudioBufferCache } from './utils/audioAnalysis';
 import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
+import { loadGoogleFont } from './services/googleFontsService';
 
 const INITIAL_SUBTITLE_STYLE: SubtitleStyle = {
   fontFamily: 'Arial',
@@ -186,6 +187,13 @@ function App() {
           activeTitleTemplate: saved.activeTitleTemplate ?? null,
           activeKeywordAnimation: saved.activeKeywordAnimation ?? null,
         });
+        // Pre-load any Google Fonts used in the saved project
+        if (saved.subtitleStyle?.fontFamily) loadGoogleFont(saved.subtitleStyle.fontFamily);
+        if (saved.titleLayers) {
+          for (const tl of saved.titleLayers) {
+            if (tl.style?.fontFamily) loadGoogleFont(tl.style.fontFamily);
+          }
+        }
         console.log('Project loaded from storage');
       }
     });
@@ -4213,6 +4221,7 @@ function App() {
       color: s.color,
       fontWeight: s.bold ? 'bold' : 'normal',
       fontStyle: s.italic ? 'italic' : 'normal',
+      textTransform: (s.textTransform && s.textTransform !== 'none') ? s.textTransform : undefined,
       lineHeight: 1.4,
       padding: '8px 16px',
       whiteSpace: 'pre-wrap',
@@ -4313,6 +4322,7 @@ function App() {
       color: s.color,
       fontWeight: s.bold ? 'bold' : 'normal',
       fontStyle: s.italic ? 'italic' : 'normal',
+      textTransform: (s.textTransform && s.textTransform !== 'none') ? s.textTransform : undefined,
       lineHeight: 1.4,
       padding: '12px 24px',
       whiteSpace: 'pre-wrap',

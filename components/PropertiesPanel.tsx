@@ -4,6 +4,7 @@ import { migrateGradientColors } from '../utils/gradientUtils';
 import { TRANSITION_CATALOG, TRANSITION_CATEGORIES, getTransitionDef } from '../utils/transitionCatalog';
 import AnimationControls from './AnimationControls';
 import GradientEditor from './GradientEditor';
+import FontPicker from './FontPicker';
 
 interface PropertiesPanelProps {
   selectedSegment: Segment | null;
@@ -45,8 +46,6 @@ const LAYER_BLEND_MODES = [
   'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion',
   'hue', 'saturation', 'color', 'luminosity'
 ];
-
-const FONTS = ['Arial', 'Verdana', 'Helvetica', 'Times New Roman', 'Courier New', 'Georgia', 'Impact', 'Inter', 'Roboto', 'Montserrat', 'Open Sans', 'Lato', 'Poppins', 'Oswald', 'Raleway', 'Nunito', 'Ubuntu', 'Playfair Display', 'Merriweather', 'Bebas Neue'];
 
 const Accordion: React.FC<{ title: string; defaultOpen?: boolean; children: React.ReactNode }> = ({ title, defaultOpen = true, children }) => {
   const [isOpen, setIsOpen] = useState(defaultOpen);
@@ -221,9 +220,7 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               <div className="space-y-4">
                 <div className="flex gap-3">
                   <Field label="Font" stack={true}>
-                    <select value={subtitleStyle.fontFamily} onChange={(e) => onUpdateSubtitleStyle({ fontFamily: e.target.value })} className={inputClass}>
-                      {FONTS.map(f => <option key={f} value={f}>{f}</option>)}
-                    </select>
+                    <FontPicker value={subtitleStyle.fontFamily} onChange={(f) => onUpdateSubtitleStyle({ fontFamily: f })} />
                   </Field>
                   <div className="w-20">
                     <Field label="Size" stack={true}>
@@ -235,6 +232,17 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 <div className="flex gap-2">
                   <button onClick={() => onUpdateSubtitleStyle({ bold: !subtitleStyle.bold })} className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors border ${subtitleStyle.bold ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'}`}>Bold</button>
                   <button onClick={() => onUpdateSubtitleStyle({ italic: !subtitleStyle.italic })} className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors border ${subtitleStyle.italic ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'}`}>Italic</button>
+                </div>
+
+                <div className="flex bg-[#222] p-1 rounded border border-[#333]">
+                  {([
+                    { value: 'none' as const, label: 'Aa' },
+                    { value: 'uppercase' as const, label: 'AA' },
+                    { value: 'lowercase' as const, label: 'aa' },
+                    { value: 'capitalize' as const, label: 'Ab' },
+                  ]).map(opt => (
+                    <button key={opt.value} onClick={() => onUpdateSubtitleStyle({ textTransform: opt.value })} className={`flex-1 py-1.5 rounded text-[10px] font-bold transition-colors ${(subtitleStyle.textTransform || 'none') === opt.value ? 'bg-[#333] text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}>{opt.label}</button>
+                  ))}
                 </div>
 
                 <div className="flex bg-[#222] p-1 rounded border border-[#333]">
@@ -543,9 +551,7 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               <div className="space-y-4">
                 <div className="flex gap-3">
                   <Field label="Font" stack={true}>
-                    <select value={titleLayer.style.fontFamily} onChange={(e) => handleTitleStyleUpdate({ fontFamily: e.target.value })} className={inputClass}>
-                      {FONTS.map(f => <option key={f} value={f}>{f}</option>)}
-                    </select>
+                    <FontPicker value={titleLayer.style.fontFamily} onChange={(f) => handleTitleStyleUpdate({ fontFamily: f })} />
                   </Field>
                   <div className="w-20">
                     <Field label="Size" stack={true}>
@@ -557,6 +563,17 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 <div className="flex gap-2">
                   <button onClick={() => handleTitleStyleUpdate({ bold: !titleLayer.style!.bold })} className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors border ${titleLayer.style!.bold ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'}`}>Bold</button>
                   <button onClick={() => handleTitleStyleUpdate({ italic: !titleLayer.style!.italic })} className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors border ${titleLayer.style!.italic ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-[#222] border-[#333] text-gray-400 hover:bg-[#2a2a2a]'}`}>Italic</button>
+                </div>
+
+                <div className="flex bg-[#222] p-1 rounded border border-[#333]">
+                  {([
+                    { value: 'none' as const, label: 'Aa' },
+                    { value: 'uppercase' as const, label: 'AA' },
+                    { value: 'lowercase' as const, label: 'aa' },
+                    { value: 'capitalize' as const, label: 'Ab' },
+                  ]).map(opt => (
+                    <button key={opt.value} onClick={() => handleTitleStyleUpdate({ textTransform: opt.value })} className={`flex-1 py-1.5 rounded text-[10px] font-bold transition-colors ${(titleLayer.style!.textTransform || 'none') === opt.value ? 'bg-[#333] text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}>{opt.label}</button>
+                  ))}
                 </div>
 
                 <div className="flex bg-[#222] p-1 rounded border border-[#333]">

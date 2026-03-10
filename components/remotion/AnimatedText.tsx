@@ -103,14 +103,15 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
   // For non-word scopes (line/element), compute the cumulative word offset per element
   // so we can map words inside each element back to global word indices
   const wordOffsets = useMemo(() => {
-    if (animation.scope === 'word' || !emphasisMap) return [];
+    if (animation.scope === 'word') return [];
+    if (!emphasisMap && !onWordClick) return [];
     let offset = 0;
     return elements.map(el => {
       const curr = offset;
       offset += el.split(/\s+/).filter(w => w.length > 0).length;
       return curr;
     });
-  }, [elements, animation.scope, emphasisMap]);
+  }, [elements, animation.scope, emphasisMap, onWordClick]);
 
   // Separate container styles (font, color, background) from transform styles
   const { padding, ...allContainerStyle } = style;
@@ -267,7 +268,10 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
 
         // For non-word scopes without dual-stack, still color keywords per-word
         const renderContent = () => {
-          if (animation.scope === 'word' || !emphasisMap) return el;
+          // Word scope: outer span handles clicks directly
+          if (animation.scope === 'word') return el;
+          // No interactivity needed and no keywords to highlight
+          if (!emphasisMap && !onWordClick) return el;
           const tokens = el.split(/(\s+)/);
           let localWordIdx = 0;
           const baseOffset = wordOffsets[rawIndex] ?? 0;
@@ -275,7 +279,7 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
             if (/^\s+$/.test(token)) return <span key={ti}>{token}</span>;
             const globalIdx = baseOffset + localWordIdx;
             localWordIdx++;
-            const kwEntry = emphasisMap.get(globalIdx);
+            const kwEntry = emphasisMap?.get(globalIdx);
             return (
               <span
                 key={ti}

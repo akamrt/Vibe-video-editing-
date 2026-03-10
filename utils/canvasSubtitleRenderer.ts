@@ -109,6 +109,16 @@ function toCompositeOp(blendMode?: string): GlobalCompositeOperation {
     return validOps[blendMode] || 'source-over';
 }
 
+// ─── Text Transform Helper (canvas doesn't support CSS textTransform) ────────
+
+function applyTextTransform(text: string, transform?: string): string {
+    if (!transform || transform === 'none') return text;
+    if (transform === 'uppercase') return text.toUpperCase();
+    if (transform === 'lowercase') return text.toLowerCase();
+    if (transform === 'capitalize') return text.replace(/\b\w/g, c => c.toUpperCase());
+    return text;
+}
+
 // ─── Per-element animation values ────────────────────────────────────────────
 
 interface ElementAnimValues {
@@ -255,12 +265,15 @@ interface DrawSubtitleOptions {
  */
 export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     const {
-        ctx, text, style, animation,
+        ctx, text: rawText, style, animation,
         frame, fps, outputWidth, outputHeight,
         viewportSafeZoneHeight,
         totalTx, totalTy, totalScale, totalRotation,
         wordEmphases,
     } = opts;
+
+    // Apply text transform (canvas doesn't support CSS textTransform)
+    const text = applyTextTransform(rawText, (style as any).textTransform);
 
     // Scale factor: maps viewport CSS pixels to export canvas pixels
     // e.g. viewport is 360px tall, export is 1080px → scale = 3x

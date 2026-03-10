@@ -266,7 +266,7 @@ export async function buildShortPrompt(
     if (segments.length === 0) return { success: false, error: "No transcript found for this video" };
 
     const transcriptWithTimestamps = segments.map(seg =>
-        `[${seg.start.toFixed(1)} - ${(seg.start + seg.duration).toFixed(1)}] ${seg.text}`
+        `[${seg.start.toFixed(2)} - ${(seg.start + seg.duration).toFixed(2)}] ${seg.text}`
     ).join('\n');
 
     try {

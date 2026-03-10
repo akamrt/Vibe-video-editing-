@@ -812,9 +812,11 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
             return res.status(400).json({ error: 'Missing transcript or videoTitle' });
         }
 
-        // Parse transcript and group into readable passages
+        // Parse transcript and preserve raw per-line timestamps (karaoke-level precision)
         const transcriptLines = parseTranscriptLines(transcript);
-        const groupedTranscript = groupIntoPassages(transcriptLines, 5);
+        const rawTranscript = transcriptLines
+            .map(line => `[${line.start.toFixed(2)}s] ${line.text}`)
+            .join('\n');
 
         const duration = targetDuration || 60;
 
@@ -838,8 +840,8 @@ ${userPromptSection}${refinementSection}${existingShortsSection}
 
 "${videoTitle}"
 
-TRANSCRIPT (with timestamps):
-${groupedTranscript.substring(0, 15000)}
+TRANSCRIPT (with precise timestamps):
+${rawTranscript.substring(0, 50000)}
 
 EDITING RULES:
 1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).

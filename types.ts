@@ -203,6 +203,7 @@ export interface SubtitleStyle {
   textAlign: 'left' | 'center' | 'right';
   bold: boolean;
   italic: boolean;
+  textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
 
   // Customization expansions
   textShadowColor?: string;
@@ -258,6 +259,7 @@ export interface TitleStyle {
   textAlign: 'left' | 'center' | 'right';
   bold: boolean;
   italic: boolean;
+  textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
 
   // Customization expansions
   textShadowColor?: string;
