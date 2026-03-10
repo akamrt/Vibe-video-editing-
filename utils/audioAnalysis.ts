@@ -25,11 +25,21 @@ const audioBufferCache = new Map<string, AudioBuffer>();
  * Decode audio from a video File into a Web Audio AudioBuffer.
  * Results are cached by mediaId so subsequent calls are instant.
  */
+// Maximum file size for in-memory audio decode (150 MB).
+// Larger files (e.g. uncompressed or very long recordings) would consume
+// too much RAM (ArrayBuffer + decoded PCM) and crash the browser tab.
+const MAX_DECODE_SIZE_BYTES = 150 * 1024 * 1024;
+
 export async function getAudioBuffer(mediaId: string, file: File): Promise<AudioBuffer> {
   const cached = audioBufferCache.get(mediaId);
   if (cached) return cached;
 
-  console.log(`[AudioAnalysis] Decoding audio for ${mediaId} (${(file.size / 1024 / 1024).toFixed(1)} MB)...`);
+  const sizeMB = file.size / 1024 / 1024;
+  if (file.size > MAX_DECODE_SIZE_BYTES) {
+    throw new Error(`File too large for audio decode (${sizeMB.toFixed(0)} MB > ${MAX_DECODE_SIZE_BYTES / 1024 / 1024} MB limit). Waveform and snap-to-silence unavailable for this clip.`);
+  }
+
+  console.log(`[AudioAnalysis] Decoding audio for ${mediaId} (${sizeMB.toFixed(1)} MB)...`);
   const arrayBuffer = await file.arrayBuffer();
   const audioContext = new OfflineAudioContext(1, 1, 44100);
   const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
