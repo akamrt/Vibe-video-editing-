@@ -457,6 +457,14 @@ export async function importManualShort(
                     }
                 }
 
+                // Step 2.5: Safety padding for transcript timestamp imprecision (~100ms).
+                // YouTube word timestamps can lag the actual phoneme onset by 50-100ms.
+                // This padding ensures we don't lose word edges. Export-time audio snap
+                // will refine these to actual silence gaps. Placed before preamble trim
+                // so the trimmer can still strip filler words from the padded window.
+                startTime = Math.max(0, startTime - 0.08);
+                endTime = endTime + 0.08;
+
                 // Step 3: Trim preamble/trailer filler words
                 startTime = trimPreambleWords(transcriptLines, startTime, endTime);
                 endTime = trimTrailerWords(transcriptLines, startTime, endTime);

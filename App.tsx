@@ -27,7 +27,7 @@ import { fullScanAndCenter } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
-import { getAudioBuffer, findNearestSilence, snapFillerRange, clearAudioBufferCache } from './utils/audioAnalysis';
+import { getAudioBuffer, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache } from './utils/audioAnalysis';
 import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
 import { loadGoogleFont } from './services/googleFontsService';
 
@@ -2340,20 +2340,21 @@ function App() {
       });
       const duration = video.duration || short.totalDuration || 60;
 
-      // 3.5. Snap clip boundaries to audio silence for cleaner cuts
+      // 3.5. Snap clip boundaries to audio silence using directional search
+      // Searches BEFORE clip start and AFTER clip end for silence gaps,
+      // with 20ms padding to preserve word onset/release phonemes.
       let snappedShortSegments = short.segments;
       try {
         const audioBuffer = await getAudioBuffer(`short_export_${short.id}`, file);
         snappedShortSegments = short.segments.map(seg => {
-          const startResult = findNearestSilence(audioBuffer, seg.startTime, 0.15);
-          const endResult = findNearestSilence(audioBuffer, seg.endTime, 0.15);
+          const snapped = snapClipBoundaries(audioBuffer, seg.startTime, seg.endTime, 0.4);
           return {
             ...seg,
-            startTime: Math.abs(startResult.offset) <= 0.15 ? startResult.time : seg.startTime,
-            endTime: Math.abs(endResult.offset) <= 0.15 ? endResult.time : seg.endTime,
+            startTime: snapped.startTime,
+            endTime: snapped.endTime,
           };
         });
-        console.log('[Export Short] Snapped clip boundaries to silence');
+        console.log('[Export Short] Snapped clip boundaries to silence (directional)');
       } catch (e) {
         console.warn('[Export Short] Skipping snap-to-silence:', e instanceof Error ? e.message : e);
       }

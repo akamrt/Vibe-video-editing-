@@ -996,6 +996,12 @@ Return JSON only:
                     clip.endTime = snapClipEndTime(transcriptLines, clip.endTime);
                 }
 
+                // Step 2.5: Safety padding for transcript timestamp imprecision (~100ms).
+                // YouTube word timestamps can lag the actual phoneme onset by 50-100ms.
+                // This ensures we don't lose word edges. Client-side audio snap refines later.
+                clip.startTime = Math.max(0, clip.startTime - 0.08);
+                clip.endTime = clip.endTime + 0.08;
+
                 // Step 3: Trim preamble/trailer filler words
                 clip.startTime = trimPreambleWords(transcriptLines, clip.startTime, clip.endTime);
                 clip.endTime = trimTrailerWords(transcriptLines, clip.startTime, clip.endTime);

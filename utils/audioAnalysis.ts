@@ -310,6 +310,77 @@ export function snapFillerRange(
   return { startTime: snappedStart, endTime: snappedEnd };
 }
 
+// ── Clip Boundary Snapping ───────────────────────────────
+
+export interface SnappedClipRange {
+  startTime: number;
+  endTime: number;
+}
+
+/**
+ * Snap clip boundaries to silence gaps using DIRECTIONAL search.
+ *
+ * Unlike the symmetric findNearestSilence, this function searches
+ * BEFORE the clip start and AFTER the clip end — ensuring cuts land
+ * in the silence gaps surrounding the clip's speech, not inside it.
+ *
+ * For clip START: find silence in the gap BEFORE the first word.
+ *   → Pad 20ms earlier (deeper into pre-speech silence)
+ * For clip END: find silence in the gap AFTER the last word.
+ *   → Pad 20ms later (deeper into post-speech silence)
+ *
+ * This prevents cutting off the first/last phonemes of words.
+ */
+export function snapClipBoundaries(
+  audioBuffer: AudioBuffer,
+  clipStart: number,
+  clipEnd: number,
+  maxSnapSec: number = 0.4
+): SnappedClipRange {
+  const PADDING_SEC = 0.02; // 20ms padding into silence (preserves word onset/release)
+
+  // For start: search the region BEFORE the clip start
+  // This finds the silence gap between preceding content and the clip's first word
+  const startSearchCenter = clipStart - maxSnapSec / 2;
+  const startResult = findNearestSilence(audioBuffer,
+    Math.max(0, startSearchCenter),
+    maxSnapSec / 2 + 0.05 // asymmetric — mostly looking before clipStart
+  );
+  // Accept only if the silence is at or before the clip start (+30ms tolerance)
+  let snappedStart: number;
+  if (startResult.time <= clipStart + 0.03) {
+    // Pad earlier: move deeper into pre-speech silence, away from first word
+    snappedStart = Math.max(startResult.time - PADDING_SEC, 0);
+  } else {
+    snappedStart = clipStart;
+  }
+
+  // For end: search the region AFTER the clip end
+  // This finds the silence gap between the clip's last word and following content
+  const endSearchCenter = clipEnd + maxSnapSec / 2;
+  const endResult = findNearestSilence(audioBuffer,
+    Math.min(audioBuffer.duration, endSearchCenter),
+    maxSnapSec / 2 + 0.05 // asymmetric — mostly looking after clipEnd
+  );
+  // Accept only if the silence is at or after the clip end (-30ms tolerance)
+  let snappedEnd: number;
+  if (endResult.time >= clipEnd - 0.03) {
+    // Pad later: move deeper into post-speech silence, away from last word
+    snappedEnd = Math.min(endResult.time + PADDING_SEC, audioBuffer.duration);
+  } else {
+    snappedEnd = clipEnd;
+  }
+
+  // Safety: don't create an inverted or zero-length range
+  if (snappedStart >= snappedEnd) {
+    return { startTime: clipStart, endTime: clipEnd };
+  }
+
+  console.log(`[AudioAnalysis] Clip snap: [${clipStart.toFixed(3)} - ${clipEnd.toFixed(3)}] → [${snappedStart.toFixed(3)} - ${snappedEnd.toFixed(3)}]`);
+
+  return { startTime: snappedStart, endTime: snappedEnd };
+}
+
 // ── Waveform Peak Extraction ─────────────────────────────
 
 export interface WaveformPeak {
