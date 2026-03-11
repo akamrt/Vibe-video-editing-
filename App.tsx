@@ -1434,6 +1434,18 @@ function App() {
 
     const totalDuration = contentDuration;
 
+    // Pre-allocate reusable tmpCanvas for transition rendering (avoid creating per-frame)
+    const tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width = outputWidth;
+    tmpCanvas.height = outputHeight;
+    const tmpCtx = tmpCanvas.getContext('2d')!;
+
+    // Track previous segment's last frame for crossfade transitions
+    let prevSegmentFrame: ImageData | null = null;
+    let prevSegmentCanvas: HTMLCanvasElement | null = null;
+
+    let exportFrameCount = 0;
+
     const renderLoop = () => {
       // Check current time from fresh project ref
       const currentTime = projectRef.current.currentTime;
@@ -1447,6 +1459,8 @@ function App() {
         return;
       }
 
+      exportFrameCount++;
+
       // Draw!
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, outputWidth, outputHeight);
@@ -1456,12 +1470,19 @@ function App() {
         .filter(s => currentTime >= s.timelineStart && currentTime < (s.timelineStart + (s.endTime - s.startTime)))
         .sort((a, b) => (a.track || 0) - (b.track || 0));
 
+      // Diagnostic logging (first 5 frames + every 60th frame)
+      const shouldLog = exportFrameCount <= 5 || exportFrameCount % 60 === 0;
+      if (shouldLog) {
+        console.log(`[Export Frame ${exportFrameCount}] t=${currentTime.toFixed(3)}s, activeSegs=${activeSegments.length}, template=${projectRef.current.activeSubtitleTemplate?.name || 'NONE'}`);
+      }
+
       activeSegments.forEach(activeSeg => {
         const vid = videoRefs.current.get(activeSeg.id);
+        const clipTime = currentTime - activeSeg.timelineStart;
+        const segDuration = activeSeg.endTime - activeSeg.startTime;
+
+        // --- VIDEO DRAWING ---
         if (vid && vid.readyState >= 2) {
-          // Transform logic
-          const clipTime = currentTime - activeSeg.timelineStart;
-          const segDuration = activeSeg.endTime - activeSeg.startTime;
           const transform = getCombinedTransform(activeSeg.keyframes, clipTime, currentTime);
 
           // --- Transition handling for export ---
@@ -1487,11 +1508,9 @@ function App() {
           }
 
           if (transitionActive && activeTransition && activeTransition.type !== 'NONE') {
-            // Create a temporary canvas with the video frame (with transforms applied)
-            const tmpCanvas = document.createElement('canvas');
-            tmpCanvas.width = outputWidth;
-            tmpCanvas.height = outputHeight;
-            const tmpCtx = tmpCanvas.getContext('2d')!;
+            if (shouldLog) console.log(`[Export] Transition: ${activeTransition.type}, progress=${transitionProgress.toFixed(2)}, isIn=${isTransitionIn}`);
+            // Draw video frame to reusable tmpCanvas (with transforms applied)
+            tmpCtx.clearRect(0, 0, outputWidth, outputHeight);
             const coverScale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
             const drawWidth = vid.videoWidth * coverScale;
             const drawHeight = vid.videoHeight * coverScale;
@@ -1503,12 +1522,12 @@ function App() {
             tmpCtx.drawImage(vid, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
             tmpCtx.restore();
 
-            // For transitionIn: null → frame (incoming from black)
-            // For transitionOut: frame → null (outgoing to black)
+            // For crossfade: use previous segment's last frame if available
             if (isTransitionIn) {
+              const outFrame = (activeTransition.type === 'CROSSFADE' && prevSegmentCanvas) ? prevSegmentCanvas : null;
               renderTransitionCanvas({
                 ctx, width: outputWidth, height: outputHeight,
-                outFrame: null, inFrame: tmpCanvas,
+                outFrame, inFrame: tmpCanvas,
                 progress: transitionProgress, transition: activeTransition,
               });
             } else {
@@ -1517,6 +1536,15 @@ function App() {
                 outFrame: tmpCanvas, inFrame: null,
                 progress: transitionProgress, transition: activeTransition,
               });
+              // Capture this frame for potential crossfade into next segment
+              if (!prevSegmentCanvas) {
+                prevSegmentCanvas = document.createElement('canvas');
+                prevSegmentCanvas.width = outputWidth;
+                prevSegmentCanvas.height = outputHeight;
+              }
+              const pCtx = prevSegmentCanvas.getContext('2d')!;
+              pCtx.clearRect(0, 0, outputWidth, outputHeight);
+              pCtx.drawImage(tmpCanvas, 0, 0);
             }
           } else {
             // Normal draw (no transition)
@@ -1530,56 +1558,83 @@ function App() {
             ctx.rotate(transform.rotation * Math.PI / 180);
             ctx.drawImage(vid, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
             ctx.restore();
+
+            // Capture current frame for potential crossfade with next segment
+            if (!prevSegmentCanvas) {
+              prevSegmentCanvas = document.createElement('canvas');
+              prevSegmentCanvas.width = outputWidth;
+              prevSegmentCanvas.height = outputHeight;
+            }
+            const pCtx = prevSegmentCanvas.getContext('2d')!;
+            pCtx.clearRect(0, 0, outputWidth, outputHeight);
+            pCtx.drawImage(ctx.canvas, 0, 0);
+          }
+        }
+
+        // --- SUBTITLE DRAWING (outside vid.readyState guard — subtitles should render even if video is buffering) ---
+        const media = projectRef.current.library.find(m => m.id === activeSeg.mediaId);
+        if (media && media.analysis) {
+          const mediaTime = activeSeg.startTime + clipTime;
+          // Use <= for endTime (matching viewport behavior)
+          const subtitle = media.analysis.events.find(e =>
+            e.type === 'dialogue' && mediaTime >= e.startTime && mediaTime <= e.endTime
+          );
+
+          if (shouldLog) {
+            if (subtitle) {
+              console.log(`[Export] Subtitle found: "${subtitle.details.slice(0, 40)}..." frame=${Math.round((mediaTime - subtitle.startTime) * settings.fps)}`);
+            } else {
+              console.log(`[Export] No subtitle at mediaTime=${mediaTime.toFixed(3)}, events=${media.analysis.events.filter(e => e.type === 'dialogue').length}`);
+            }
           }
 
-          // Draw Subtitles (with animation support)
-          const media = projectRef.current.library.find(m => m.id === activeSeg.mediaId);
-          if (media && media.analysis) {
-            const mediaTime = activeSeg.startTime + (clipTime);
-            const subtitle = media.analysis.events.find(e =>
-              e.type === 'dialogue' && mediaTime >= e.startTime && mediaTime < e.endTime
-            );
+          if (subtitle) {
+            // Resolve template and style (same logic as viewport)
+            const subTemplate = subtitle.templateOverride || projectRef.current.activeSubtitleTemplate;
+            const sourceStyle = subtitle.styleOverride || projectRef.current.subtitleStyle;
 
-            if (subtitle) {
-              // Resolve template and style (same logic as viewport)
-              const subTemplate = subtitle.templateOverride || projectRef.current.activeSubtitleTemplate;
-              const sourceStyle = subtitle.styleOverride || projectRef.current.subtitleStyle;
-
-              // Calculate interpolated transform for this frame
-              let kfTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
-              if (subtitle.keyframes && subtitle.keyframes.length > 0) {
-                const sourceTime = activeSeg.startTime + clipTime;
-                const subTime = sourceTime - subtitle.startTime;
-                kfTransform = getInterpolatedTransform(subtitle.keyframes, subTime);
-              }
-
-              // Base offsets
-              const evtTx = subtitle.translateX || 0;
-              const evtTy = subtitle.translateY || 0;
-
-              // Animation frame (local to subtitle event)
+            // Calculate interpolated transform for this frame
+            let kfTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+            if (subtitle.keyframes && subtitle.keyframes.length > 0) {
               const sourceTime = activeSeg.startTime + clipTime;
-              const localFrame = Math.round((sourceTime - subtitle.startTime) * settings.fps);
-              const subAnim = subTemplate?.animation || null;
-
-              drawSubtitleOnCanvas({
-                ctx,
-                text: subtitle.details,
-                style: sourceStyle,
-                templateStyle: subTemplate?.style || null,
-                animation: subAnim,
-                frame: localFrame,
-                fps: settings.fps,
-                outputWidth,
-                outputHeight,
-                viewportSafeZoneHeight: safeZoneHeight,
-                totalTx: evtTx + kfTransform.translateX,
-                totalTy: evtTy + kfTransform.translateY,
-                totalScale: kfTransform.scale,
-                totalRotation: kfTransform.rotation,
-                wordEmphases: subtitle.wordEmphases,
-              });
+              const subTime = sourceTime - subtitle.startTime;
+              kfTransform = getInterpolatedTransform(subtitle.keyframes, subTime);
             }
+
+            // Base offsets
+            const evtTx = subtitle.translateX || 0;
+            const evtTy = subtitle.translateY || 0;
+
+            // Animation frame (local to subtitle event)
+            const sourceTime = activeSeg.startTime + clipTime;
+            const localFrame = Math.round((sourceTime - subtitle.startTime) * settings.fps);
+            const subAnim = subTemplate?.animation || null;
+
+            if (shouldLog && subAnim) {
+              console.log(`[Export] Animation: "${subTemplate?.name}", effects=${subAnim.effects.length}, localFrame=${localFrame}, duration=${subAnim.duration}s`);
+            }
+
+            // Resolve keyword animation (same cascade as viewport: per-event → template → global)
+            const kwAnim = subtitle.keywordAnimation || subTemplate?.keywordAnimation || projectRef.current.activeKeywordAnimation || null;
+
+            drawSubtitleOnCanvas({
+              ctx,
+              text: subtitle.details,
+              style: sourceStyle,
+              templateStyle: subTemplate?.style || null,
+              animation: subAnim,
+              frame: localFrame,
+              fps: settings.fps,
+              outputWidth,
+              outputHeight,
+              viewportSafeZoneHeight: safeZoneHeight,
+              totalTx: evtTx + kfTransform.translateX,
+              totalTy: evtTy + kfTransform.translateY,
+              totalScale: kfTransform.scale,
+              totalRotation: kfTransform.rotation,
+              wordEmphases: subtitle.wordEmphases,
+              keywordAnimation: kwAnim,
+            });
           }
         }
       });
@@ -2516,18 +2571,27 @@ function App() {
       // startTime/endTime = position in SOURCE VIDEO (for playback)
       // timelineStart = position on TIMELINE (for display)
       const clipCount = snappedShortSegments.length;
+      const XFADE_DURATION = 0.8; // Crossfade duration (must match transitionIn.duration below)
+      const FADE_DURATION = 1.0;  // Fade-from/to-black duration
       let timelinePosition = 0;
       const newSegments: Segment[] = snappedShortSegments.map((clipSeg, index) => {
         const clipDuration = clipSeg.endTime - clipSeg.startTime;
         // Apply fade/crossfade transitions between clips
         const transitionIn: Transition | undefined =
           index === 0
-            ? { type: 'FADE' as TransitionType, duration: 0.5, easing: 'easeOut' }   // First clip: fade from black
-            : { type: 'CROSSFADE' as TransitionType, duration: 0.4, easing: 'easeInOut' }; // Middle clips: crossfade
+            ? { type: 'FADE' as TransitionType, duration: FADE_DURATION, easing: 'easeOut' }       // First clip: fade from black
+            : { type: 'CROSSFADE' as TransitionType, duration: XFADE_DURATION, easing: 'easeInOut' }; // Middle clips: crossfade
         const transitionOut: Transition | undefined =
           index === clipCount - 1
-            ? { type: 'FADE' as TransitionType, duration: 0.5, easing: 'easeIn' }    // Last clip: fade to black
+            ? { type: 'FADE' as TransitionType, duration: FADE_DURATION, easing: 'easeIn' }    // Last clip: fade to black
             : undefined; // Crossfade is handled by the next clip's transitionIn
+
+        // For crossfade clips: start this clip XFADE_DURATION before the previous clip ends,
+        // creating a real timeline overlap so the cross-transition renders correctly in both
+        // the viewport and the export.
+        const xfadeOffset = (index > 0) ? XFADE_DURATION : 0;
+        timelinePosition -= xfadeOffset; // Pull start back to overlap with previous clip
+
         const segment: Segment = {
           id: Math.random().toString(36).substr(2, 9),
           mediaId: newMediaItem.id,
@@ -2542,7 +2606,7 @@ function App() {
           transitionIn,
           transitionOut,
         };
-        timelinePosition += clipDuration;
+        timelinePosition += clipDuration; // Advance to end of this clip
         return segment;
       });
 
@@ -2563,6 +2627,7 @@ function App() {
       const defaultSubtitleTemplate = !project.activeSubtitleTemplate ? {
         id: `preset_live_short_${Date.now()}`,
         name: 'Fade Up',
+        style: {} as import('react').CSSProperties,
         animation: {
           id: `anim_short_${Date.now()}`,
           name: 'Fade Up Animation',
@@ -2744,6 +2809,42 @@ function App() {
 
       return { ...prev, segments: updatedSegments };
     });
+  };
+
+  const handleDeleteTrack = (trackId: number) => {
+    if (trackId === 0) return;
+    pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
+    setProject(prev => {
+      // Collect IDs of segments on the deleted track
+      const deletedIds = new Set(prev.segments.filter(s => (s.track || 0) === trackId).map(s => s.id));
+      // Remove segments on deleted track + orphaned linked segments
+      let newSegments = prev.segments.filter(s => {
+        if ((s.track || 0) === trackId) return false;
+        if (s.linkedSegmentId && deletedIds.has(s.linkedSegmentId)) return false;
+        return true;
+      });
+      // Renumber tracks above the gap to fill it
+      newSegments = newSegments.map(s => {
+        const t = s.track || 0;
+        return t > trackId ? { ...s, track: t - 1 } : s;
+      });
+      return { ...prev, segments: newSegments };
+    });
+    setSelectedSegmentIds([]);
+  };
+
+  const handleSwapTracks = (trackA: number, trackB: number) => {
+    if (trackA === trackB) return;
+    pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s => {
+        const t = s.track || 0;
+        if (t === trackA) return { ...s, track: trackB };
+        if (t === trackB) return { ...s, track: trackA };
+        return s;
+      })
+    }));
   };
 
   const handleSegmentSelect = (seg: Segment, isMulti: boolean) => {
@@ -5725,6 +5826,8 @@ function App() {
                 mediaFiles={mediaFilesMap}
                 onUnlinkAudio={handleUnlinkAudio}
                 onRelinkAudio={handleRelinkAudio}
+                onDeleteTrack={handleDeleteTrack}
+                onSwapTracks={handleSwapTracks}
               />
             )}
             {activeBottomTab === 'graph' && (

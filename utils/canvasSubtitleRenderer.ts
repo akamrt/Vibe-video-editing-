@@ -139,14 +139,110 @@ function computeElementAnimations(
     animation: TextAnimation,
     frame: number,
     fps: number,
-    wordEmphases?: KeywordEmphasis[]
+    wordEmphases?: KeywordEmphasis[],
+    keywordAnimation?: TextAnimation | null
 ): ElementAnimValues[] {
-    // Split text the same way AnimatedText does
+    // Build emphasis map (always word-indexed)
+    const emphasisMap = new Map<number, KeywordEmphasis>();
+    if (wordEmphases) {
+        for (const kw of wordEmphases) {
+            if (kw.enabled) emphasisMap.set(kw.wordIndex, kw);
+        }
+    }
+
+    // For non-word scopes: always render as individual words so keywords
+    // get per-word coloring (matching viewport AnimatedText.renderContent).
+    // The ANIMATION transforms still apply to the whole line/element, but
+    // each word within it can have its own color and keyword animation.
+    if (animation.scope !== 'word' && animation.scope !== 'character') {
+        // Compute the element-level animation (for the whole block)
+        const delaySec = 0 * (animation.stagger ?? 0);
+        const delayFrames = delaySec * fps;
+        const elmLocalFrame = frame - delayFrames;
+
+        let baseOpacity = 1, baseScale = 1, baseTx = 0, baseTy = 0;
+        let baseRotate = 0, baseBlur = 0, baseLs = 0;
+
+        for (const effect of animation.effects) {
+            const val = computeEffectValue(effect, elmLocalFrame, animation.duration, fps);
+            switch (effect.type) {
+                case 'opacity': baseOpacity *= val; break;
+                case 'scale': baseScale *= val; break;
+                case 'translateX': baseTx += val; break;
+                case 'translateY': baseTy += val; break;
+                case 'rotate': baseRotate += val; break;
+                case 'blur': baseBlur = Math.max(0, baseBlur + val); break;
+                case 'letterSpacing': baseLs += val; break;
+            }
+        }
+        baseOpacity = Math.max(0, Math.min(1, baseOpacity));
+
+        // Now split the text into individual words/spaces for per-word keyword coloring
+        const tokens = text.split(/(\s+)/);
+        let globalWordIdx = 0;
+        return tokens.map((token: string) => {
+            if (/^\s+$/.test(token)) {
+                return {
+                    text: token, opacity: baseOpacity, scaleVal: baseScale,
+                    translateX: baseTx, translateY: baseTy, rotate: baseRotate,
+                    blur: baseBlur, letterSpacing: baseLs,
+                    isKeyword: false, keywordColor: null,
+                };
+            }
+            const kwEntry = emphasisMap.get(globalWordIdx);
+            const isKw = !!kwEntry;
+
+            // If keyword has a dedicated animation, apply it on top
+            let kwOpacity = baseOpacity, kwScale = baseScale, kwTx = baseTx, kwTy = baseTy;
+            let kwRotate = baseRotate, kwBlur = baseBlur, kwLs = baseLs;
+            if (isKw && keywordAnimation) {
+                const kwDelay = globalWordIdx * (keywordAnimation.stagger ?? 0) * fps;
+                const kwFrame = frame - kwDelay;
+                // Reset to defaults and apply keyword animation
+                kwOpacity = 1; kwScale = 1; kwTx = 0; kwTy = 0;
+                kwRotate = 0; kwBlur = 0; kwLs = 0;
+                for (const effect of keywordAnimation.effects) {
+                    const val = computeEffectValue(effect, kwFrame, keywordAnimation.duration, fps);
+                    switch (effect.type) {
+                        case 'opacity': kwOpacity *= val; break;
+                        case 'scale': kwScale *= val; break;
+                        case 'translateX': kwTx += val; break;
+                        case 'translateY': kwTy += val; break;
+                        case 'rotate': kwRotate += val; break;
+                        case 'blur': kwBlur = Math.max(0, kwBlur + val); break;
+                        case 'letterSpacing': kwLs += val; break;
+                    }
+                }
+                kwOpacity = Math.max(0, Math.min(1, kwOpacity));
+                // Combine: base line animation + keyword animation
+                kwOpacity *= baseOpacity;
+                kwScale *= baseScale;
+                kwTx += baseTx;
+                kwTy += baseTy;
+                kwRotate += baseRotate;
+            }
+
+            const result: ElementAnimValues = {
+                text: token,
+                opacity: isKw && keywordAnimation ? kwOpacity : baseOpacity,
+                scaleVal: isKw && keywordAnimation ? kwScale : baseScale,
+                translateX: isKw && keywordAnimation ? kwTx : baseTx,
+                translateY: isKw && keywordAnimation ? kwTy : baseTy,
+                rotate: isKw && keywordAnimation ? kwRotate : baseRotate,
+                blur: isKw && keywordAnimation ? kwBlur : baseBlur,
+                letterSpacing: isKw && keywordAnimation ? kwLs : baseLs,
+                isKeyword: isKw,
+                keywordColor: isKw ? (kwEntry!.color || '#FFD700') : null,
+            };
+            globalWordIdx++;
+            return result;
+        });
+    }
+
+    // --- Word scope (or character scope) ---
     let elements: string[];
     if (animation.scope === 'character') elements = text.split('');
-    else if (animation.scope === 'word') elements = text.split(/(\s+)/);
-    else if (animation.scope === 'line') elements = text.split('\n');
-    else elements = [text];
+    else elements = text.split(/(\s+)/); // word scope
 
     // Build stagger indices (skip whitespace tokens for word scope)
     let animatableIndices: number[];
@@ -158,14 +254,6 @@ function computeElementAnimations(
             if (/^\s+$/.test(el)) return -1;
             return idx++;
         });
-    }
-
-    // Build emphasis map
-    const emphasisMap = new Map<number, KeywordEmphasis>();
-    if (wordEmphases) {
-        for (const kw of wordEmphases) {
-            if (kw.enabled) emphasisMap.set(kw.wordIndex, kw);
-        }
     }
 
     return elements.map((el: string, rawIndex: number) => {
@@ -187,7 +275,12 @@ function computeElementAnimations(
             };
         }
 
-        const delaySec = staggerIndex * (animation.stagger ?? 0);
+        // Determine effective animation: keyword words use keywordAnimation if available
+        const isKw = emphasisMap.has(staggerIndex);
+        const useKwAnim = keywordAnimation && animation.scope === 'word' && isKw;
+        const effectiveAnim = useKwAnim ? keywordAnimation! : animation;
+
+        const delaySec = staggerIndex * (effectiveAnim.stagger ?? 0);
         const delayFrames = delaySec * fps;
         const elmLocalFrame = frame - delayFrames;
 
@@ -199,15 +292,15 @@ function computeElementAnimations(
         let blur = 0;
         let letterSpacing = 0;
 
-        for (const effect of animation.effects) {
-            if (effect.wordTarget && emphasisMap.size > 0 && animation.scope === 'word') {
-                const isKw = emphasisMap.has(staggerIndex);
-                if (effect.wordTarget.mode === 'keywords' && !isKw) continue;
-                if (effect.wordTarget.mode === 'non-keywords' && isKw) continue;
+        for (const effect of effectiveAnim.effects) {
+            if (effect.wordTarget && emphasisMap.size > 0 && effectiveAnim.scope === 'word') {
+                const isKeyword = emphasisMap.has(staggerIndex);
+                if (effect.wordTarget.mode === 'keywords' && !isKeyword) continue;
+                if (effect.wordTarget.mode === 'non-keywords' && isKeyword) continue;
                 if (effect.wordTarget.mode === 'indices' &&
                     !effect.wordTarget.indices.includes(staggerIndex)) continue;
             }
-            const val = computeEffectValue(effect, elmLocalFrame, animation.duration, fps);
+            const val = computeEffectValue(effect, elmLocalFrame, effectiveAnim.duration, fps);
 
             switch (effect.type) {
                 case 'opacity': opacity *= val; break;
@@ -222,10 +315,9 @@ function computeElementAnimations(
 
         opacity = Math.max(0, Math.min(1, opacity));
 
-        const isKeyword = emphasisMap.has(staggerIndex);
-        const keywordColor = isKeyword ? (emphasisMap.get(staggerIndex)!.color || '#FFD700') : null;
+        const keywordColor = isKw ? (emphasisMap.get(staggerIndex)!.color || '#FFD700') : null;
 
-        return { text: el, opacity, scaleVal, translateX, translateY, rotate, blur, letterSpacing, isKeyword, keywordColor };
+        return { text: el, opacity, scaleVal, translateX, translateY, rotate, blur, letterSpacing, isKeyword: isKw, keywordColor };
     });
 }
 
@@ -255,11 +347,13 @@ interface DrawSubtitleOptions {
     totalScale: number;
     totalRotation: number;
     wordEmphases?: KeywordEmphasis[];
+    /** Separate animation applied only to keyword words (overrides main animation for those words) */
+    keywordAnimation?: TextAnimation | null;
 }
 
 /**
  * Draws a subtitle on a canvas, with full animation support matching the viewport.
- * 
+ *
  * The scaleFactor is `outputHeight / viewportSafeZoneHeight`, which ensures that
  * a 16px font in a 360px viewport becomes 48px in a 1080p export (same visual ratio).
  */
@@ -269,7 +363,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
         frame, fps, outputWidth, outputHeight,
         viewportSafeZoneHeight,
         totalTx, totalTy, totalScale, totalRotation,
-        wordEmphases,
+        wordEmphases, keywordAnimation,
     } = opts;
 
     // Apply text transform (canvas doesn't support CSS textTransform)
@@ -319,7 +413,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     }
 
     // Compute per-element animation values
-    const elements = computeElementAnimations(text, animation, frame, fps, wordEmphases);
+    const elements = computeElementAnimations(text, animation, frame, fps, wordEmphases, keywordAnimation);
 
     // Measure all elements to compute total width for centering
     const elementWidths = elements.map((el: ElementAnimValues) => {

@@ -33,6 +33,8 @@ interface TimelineProps {
   mediaFiles?: Map<string, File>;
   onUnlinkAudio?: (segId: string) => void;
   onRelinkAudio?: (segId: string) => void;
+  onDeleteTrack?: (trackId: number) => void;
+  onSwapTracks?: (trackA: number, trackB: number) => void;
 }
 
 /** Small canvas component that renders an audio waveform for a segment */
@@ -125,7 +127,9 @@ const Timeline: React.FC<TimelineProps> = ({
   onZoomChange,
   mediaFiles,
   onUnlinkAudio,
-  onRelinkAudio
+  onRelinkAudio,
+  onDeleteTrack,
+  onSwapTracks
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0); // Track scroll for virtualization
@@ -136,6 +140,11 @@ const Timeline: React.FC<TimelineProps> = ({
 
   // Audio context menu state
   const [audioContextMenu, setAudioContextMenu] = useState<{ x: number; y: number; segId: string } | null>(null);
+
+  // Track context menu + drag-to-reorder state
+  const [trackContextMenu, setTrackContextMenu] = useState<{ x: number; y: number; trackId: number } | null>(null);
+  const [trackDragState, setTrackDragState] = useState<{ sourceTrackId: number; initialY: number } | null>(null);
+  const [trackDropTarget, setTrackDropTarget] = useState<number | null>(null);
 
   const [isSeeking, setIsSeeking] = useState(false);
   const [dragState, setDragState] = useState<{
@@ -312,6 +321,23 @@ const Timeline: React.FC<TimelineProps> = ({
         return;
       }
 
+      // Track drag-to-reorder: detect hovered track
+      if (trackDragState) {
+        document.body.style.cursor = 'grabbing';
+        const trackGroups = containerRef.current?.querySelectorAll('[data-track-id]');
+        if (trackGroups) {
+          let hoveredTrack: number | null = null;
+          trackGroups.forEach((el) => {
+            const rect = el.getBoundingClientRect();
+            if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+              hoveredTrack = parseInt(el.getAttribute('data-track-id') || '0', 10);
+            }
+          });
+          setTrackDropTarget(hoveredTrack !== trackDragState.sourceTrackId ? hoveredTrack : null);
+        }
+        return;
+      }
+
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
       const deltaX = e.clientX - ((dragState?.initialX || dialogueDragState?.initialX || titleDragState?.initialX) ?? 0);
@@ -461,6 +487,17 @@ const Timeline: React.FC<TimelineProps> = ({
     };
 
     const handleGlobalMouseUp = (e: MouseEvent) => {
+      // Track drag-to-reorder: complete swap
+      if (trackDragState) {
+        if (trackDropTarget !== null && trackDropTarget !== trackDragState.sourceTrackId) {
+          onSwapTracks?.(trackDragState.sourceTrackId, trackDropTarget);
+        }
+        setTrackDragState(null);
+        setTrackDropTarget(null);
+        document.body.style.cursor = '';
+        return;
+      }
+
       if (dragState && !hasDraggedRef.current) {
         const isMulti = e.shiftKey || e.ctrlKey || e.metaKey;
         if (!isMulti && selectedSegmentIds.includes(dragState.id) && selectedSegmentIds.length > 1) {
@@ -480,7 +517,7 @@ const Timeline: React.FC<TimelineProps> = ({
       window.removeEventListener('mousemove', handleGlobalMouseMove);
       window.removeEventListener('mouseup', handleGlobalMouseUp);
     };
-  }, [isSeeking, dragState, dialogueDragState, titleDragState, duration, segments, snappingEnabled, selectedSegmentIds, onUpdateDialogue, onUpdateTitle, onSegmentSelect]);
+  }, [isSeeking, dragState, dialogueDragState, titleDragState, trackDragState, trackDropTarget, duration, segments, snappingEnabled, selectedSegmentIds, onUpdateDialogue, onUpdateTitle, onSegmentSelect, onSwapTracks]);
 
   const layoutSegments = useMemo(() => {
     return segments.map((seg) => {
@@ -833,13 +870,17 @@ const Timeline: React.FC<TimelineProps> = ({
             const showVideoTrack = hasVideoOnTrack || trackId === 0;
             const showAudioTrack = hasAudioOnTrack || trackId === 0;
             return (
-            <div key={`track-group-${trackId}`} className="flex flex-col w-full border-b border-[#333]">
+            <div key={`track-group-${trackId}`} data-track-id={trackId} className={`flex flex-col w-full border-b transition-colors ${trackDropTarget === trackId ? 'border-blue-400 bg-blue-500/20' : 'border-[#333]'}`}>
 
               {/* VIDEO TRACK — only render if track has video segments (or is track 0) */}
               {showVideoTrack && (
               <div className="h-32 relative w-full flex bg-[#151515] border-b border-[#222]">
                 {/* Sidebar Label (Sticky Left) */}
-                <div className="sticky left-0 w-12 min-w-[3rem] h-full bg-[#202020] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-blue-400 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)]">V{trackId + 1}</div>
+                <div
+                  className={`sticky left-0 w-12 min-w-[3rem] h-full bg-[#202020] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-blue-400 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)] select-none ${trackDragState ? 'cursor-grabbing' : 'cursor-grab'}`}
+                  onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setTrackContextMenu({ x: e.clientX, y: e.clientY, trackId }); }}
+                  onMouseDown={(e) => { if (e.button !== 0) return; e.stopPropagation(); setTrackDragState({ sourceTrackId: trackId, initialY: e.clientY }); }}
+                >V{trackId + 1}</div>
 
                 {/* Track Content */}
                 <div className="relative flex-1 h-full">
@@ -1021,7 +1062,11 @@ const Timeline: React.FC<TimelineProps> = ({
               {/* AUDIO TRACK — only render if track has audio segments (or is track 0) */}
               {showAudioTrack && (
               <div className="h-16 relative w-full flex bg-[#111111]">
-                <div className="sticky left-0 w-12 min-w-[3rem] h-full bg-[#181818] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-green-500 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)]">A{trackId + 1}</div>
+                <div
+                  className={`sticky left-0 w-12 min-w-[3rem] h-full bg-[#181818] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-green-500 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)] select-none ${trackDragState ? 'cursor-grabbing' : 'cursor-grab'}`}
+                  onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setTrackContextMenu({ x: e.clientX, y: e.clientY, trackId }); }}
+                  onMouseDown={(e) => { if (e.button !== 0) return; e.stopPropagation(); setTrackDragState({ sourceTrackId: trackId, initialY: e.clientY }); }}
+                >A{trackId + 1}</div>
                 <div className="relative flex-1 h-full">
                   {/* Base Track Layout lines */}
                   <div className="absolute inset-x-0 top-1/2 h-[1px] bg-white/5" />
@@ -1182,6 +1227,28 @@ const Timeline: React.FC<TimelineProps> = ({
                 </>
               );
             })()}
+          </div>
+        </>
+      )}
+
+      {/* Track Context Menu */}
+      {trackContextMenu && (
+        <>
+          <div className="fixed inset-0 z-[200]" onClick={() => setTrackContextMenu(null)} onContextMenu={(e) => { e.preventDefault(); setTrackContextMenu(null); }} />
+          <div
+            className="fixed z-[201] bg-[#1e1e1e] border border-[#444] rounded-lg shadow-xl py-1 min-w-[160px]"
+            style={{ left: trackContextMenu.x, top: trackContextMenu.y }}
+          >
+            {trackContextMenu.trackId !== 0 ? (
+              <button
+                className="w-full px-3 py-1.5 text-left text-xs text-red-400 hover:bg-white/10 flex items-center gap-2"
+                onClick={() => { onDeleteTrack?.(trackContextMenu.trackId); setTrackContextMenu(null); }}
+              >
+                <span>🗑️</span> Delete Track {trackContextMenu.trackId + 1}
+              </button>
+            ) : (
+              <div className="px-3 py-1.5 text-xs text-gray-500 italic">Cannot delete primary track</div>
+            )}
           </div>
         </>
       )}
