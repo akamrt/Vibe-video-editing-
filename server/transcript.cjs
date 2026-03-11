@@ -25,6 +25,39 @@ function extractVideoId(url) {
 }
 
 const COOKIE_FILE = path.join(__dirname, '..', 'www.youtube.com_cookies.txt');
+const getCookieArg = () => fs.existsSync(COOKIE_FILE) ? ` --cookies "${COOKIE_FILE}"` : '';
+
+// Helper to run yt-dlp commands synchronously with cookie fallback strategy
+function runYtDlpSyncWithFallback(cmdBuilder, execOptions) {
+    const cmdNoCookies = cmdBuilder(false);
+    try {
+        console.log('[Transcript] Running yt-dlp (no cookies):', cmdNoCookies);
+        return execSync(cmdNoCookies, execOptions);
+    } catch (error) {
+        const stderr = (error.stderr || error.message || '').toString().toLowerCase();
+        
+        if (stderr.includes('sign in to confirm you') || stderr.includes('bot') || stderr.includes('login')) {
+            console.log('[Transcript] Bot protection detected. Retrying with cookies if available...');
+            
+            if (!fs.existsSync(COOKIE_FILE)) {
+                throw new Error('YouTube bot protection blocked the subtitle download. Please add a valid www.youtube.com_cookies.txt file.');
+            }
+
+            const cmdWithCookies = cmdBuilder(true);
+            try {
+                console.log('[Transcript] Running yt-dlp (with cookies):', cmdWithCookies);
+                return execSync(cmdWithCookies, execOptions);
+            } catch (cookieError) {
+                const cookieStderr = (cookieError.stderr || cookieError.message || '').toString().toLowerCase();
+                if (cookieStderr.includes('requested format is not available') || cookieStderr.includes('sign in')) {
+                    throw new Error('Your YouTube cookies appear to be expired or invalid. Please update www.youtube.com_cookies.txt by exporting a fresh Netscape cookie file from your browser.');
+                }
+                throw cookieError;
+            }
+        }
+        throw error;
+    }
+}
 
 // ─── HTML entity decoder ───────────────────────────────────────────────────
 function decodeHtml(str) {
@@ -222,13 +255,11 @@ async function getTranscriptViaPackage(videoId) {
 async function getTranscriptViaYtDlp(videoId) {
     const tempPrefix = path.join(os.tmpdir(), `transcript_${videoId}_${Date.now()}`);
 
-    // Don't use cookies for subtitle-only downloads — stale cookies cause yt-dlp
-    // to fail with "Requested format is not available". Subtitles don't need auth.
-    const cmd = `"${YT_DLP}" --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
+    const cmdBuilder = (useCookies) => `"${YT_DLP}" --write-subs --write-auto-sub --write-auto-subs --sub-lang "en" --skip-download --no-warnings${useCookies ? getCookieArg() : ''} --output "${tempPrefix}" https://www.youtube.com/watch?v=${videoId}`;
 
     try {
         console.log('[Transcript] Running yt-dlp...');
-        execSync(cmd, { stdio: 'pipe', env: childEnv });
+        runYtDlpSyncWithFallback(cmdBuilder, { stdio: 'pipe', encoding: 'utf8', env: childEnv });
         console.log('[Transcript] yt-dlp finished.');
     } catch (e) {
         throw new TranscriptError(`yt-dlp failed: ${e.message}`, 'DOWNLOAD_ERROR');

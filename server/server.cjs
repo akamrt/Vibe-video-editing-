@@ -14,6 +14,45 @@ const YT_DLP = getYtDlpPath();
 const childEnv = getEnvWithBinPath();
 console.log(`Using yt-dlp: ${YT_DLP}`);
 
+const COOKIE_FILE = path.join(__dirname, '..', 'www.youtube.com_cookies.txt');
+const getCookieArg = () => fs.existsSync(COOKIE_FILE) ? ` --cookies "${COOKIE_FILE}"` : '';
+
+// Helper to run yt-dlp commands with cookie fallback strategy
+async function runYtDlpWithFallback(cmdBuilder, execOptions) {
+    // 1. Try WITHOUT cookies first (avoids "Requested format not available" from stale cookies)
+    const cmdNoCookies = cmdBuilder(false);
+    try {
+        console.log('Running yt-dlp (no cookies):', cmdNoCookies);
+        return await execAsync(cmdNoCookies, execOptions);
+    } catch (error) {
+        const stderr = (error.stderr || error.message || '').toLowerCase();
+        
+        // 2. If it's a bot protection error, retry WITH cookies
+        if (stderr.includes('sign in to confirm you') || stderr.includes('bot') || stderr.includes('login')) {
+            console.log('Bot protection detected. Retrying with cookies if available...');
+            
+            if (!fs.existsSync(COOKIE_FILE)) {
+                throw new Error('YouTube bot protection blocked the download. Please add a valid www.youtube.com_cookies.txt file.');
+            }
+
+            const cmdWithCookies = cmdBuilder(true);
+            try {
+                console.log('Running yt-dlp (with cookies):', cmdWithCookies);
+                return await execAsync(cmdWithCookies, execOptions);
+            } catch (cookieError) {
+                const cookieStderr = (cookieError.stderr || cookieError.message || '').toLowerCase();
+                if (cookieStderr.includes('requested format is not available') || cookieStderr.includes('sign in')) {
+                    throw new Error('Your YouTube cookies appear to be expired or invalid. Please update www.youtube.com_cookies.txt by exporting a fresh Netscape cookie file from your browser.');
+                }
+                throw cookieError;
+            }
+        }
+        
+        // Not a bot error, just throw the original error
+        throw error;
+    }
+}
+
 const app = express();
 const PORT = 3001; // Changed to 3001 to match Vite proxy
 
@@ -64,13 +103,10 @@ app.get('/api/download', async (req, res) => {
 
         const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
-        // Run without cookies — stale cookies cause "Requested format is not available"
         console.log(`Getting info for: ${videoId}`);
-        const infoCmd = `"${YT_DLP}" --dump-single-json --no-warnings "${youtubeUrl}"`;
+        const infoCmdBuilder = (useCookies) => `"${YT_DLP}" --dump-single-json --no-warnings${useCookies ? getCookieArg() : ''} "${youtubeUrl}"`;
 
-        console.log('Running:', infoCmd);
-
-        const { stdout: infoJson } = await execAsync(infoCmd, {
+        const { stdout: infoJson } = await runYtDlpWithFallback(infoCmdBuilder, {
             encoding: 'utf8',
             maxBuffer: 10 * 1024 * 1024,
             env: childEnv
@@ -87,10 +123,9 @@ app.get('/api/download', async (req, res) => {
         // Download using yt-dlp (async to avoid blocking event loop)
         console.log('Downloading to temp file:', tempFile);
 
-        const downloadCmd = `"${YT_DLP}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 -o "${tempFile}" "${youtubeUrl}"`;
-        console.log('Running:', downloadCmd);
+        const downloadCmdBuilder = (useCookies) => `"${YT_DLP}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 -o "${tempFile}"${useCookies ? getCookieArg() : ''} "${youtubeUrl}"`;
 
-        await execAsync(downloadCmd, {
+        await runYtDlpWithFallback(downloadCmdBuilder, {
             encoding: 'utf8',
             maxBuffer: 50 * 1024 * 1024,
             timeout: 300000, // 5 minute timeout
@@ -162,11 +197,10 @@ app.get('/api/video-info', async (req, res) => {
 
     try {
         const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
-        // Run without cookies — stale cookies cause "Requested format is not available"
-        const cmd = `"${YT_DLP}" --dump-single-json --no-warnings "${youtubeUrl}"`;
-        console.log('Fetching video info:', cmd);
+        const infoCmdBuilder = (useCookies) => `"${YT_DLP}" --dump-single-json --no-warnings${useCookies ? getCookieArg() : ''} "${youtubeUrl}"`;
+        console.log('Fetching video info...');
 
-        const { stdout: infoJson } = await execAsync(cmd, {
+        const { stdout: infoJson } = await runYtDlpWithFallback(infoCmdBuilder, {
             encoding: 'utf8',
             maxBuffer: 10 * 1024 * 1024,
             env: childEnv
@@ -238,8 +272,7 @@ app.post('/api/update-cookies', (req, res) => {
             return res.status(400).json({ error: 'Invalid cookie file format. Must be Netscape HTTP Cookie File.' });
         }
 
-        const cookiesFile = path.join(__dirname, '..', 'www.youtube.com_cookies.txt');
-        fs.writeFileSync(cookiesFile, content, 'utf8');
+        fs.writeFileSync(COOKIE_FILE, content, 'utf8');
 
         console.log('Cookies file updated via API');
         res.json({ success: true, message: 'Cookies updated successfully' });
