@@ -18,6 +18,7 @@ export interface VideoRecord {
     duration: number;     // In seconds
     importedAt: Date;
     categories: string[]; // Category IDs
+    transcriptSource?: 'youtube' | 'assemblyai' | 'none';
 }
 
 export interface TranscriptSegment {
@@ -26,6 +27,7 @@ export interface TranscriptSegment {
     start: number;        // Start time in seconds
     duration: number;     // Duration in seconds
     text: string;
+    wordTimings?: Array<{ text: string; start: number; end: number; confidence: number }>;
 }
 
 export interface Category {
@@ -215,6 +217,14 @@ export class ContentDatabase {
         const video = await this.getVideo(videoId);
         if (video) {
             video.categories = categories;
+            await this.addVideo(video);
+        }
+    }
+
+    async updateVideo(videoId: string, updates: Partial<VideoRecord>): Promise<void> {
+        const video = await this.getVideo(videoId);
+        if (video) {
+            Object.assign(video, updates);
             await this.addVideo(video);
         }
     }

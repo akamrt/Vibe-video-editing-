@@ -1548,10 +1548,12 @@ app.post('/api/transcribe', transcribeUpload.single('file'), async (req, res) =>
         return res.status(400).json({ error: 'ASSEMBLYAI_API_KEY not configured. Add it in Settings.' });
     }
 
-    const { videoId } = req.body || {};
+    const { videoId, youtubeUrl } = req.body || {};
     let videoPath = null;
     let tempAudioPath = null;
+    let tempDownloadPath = null;
     let uploadedFilePath = req.file ? req.file.path : null;
+    let resolvedVideoId = videoId;
 
     // Set up SSE
     res.writeHead(200, {
@@ -1572,10 +1574,48 @@ app.post('/api/transcribe', transcribeUpload.single('file'), async (req, res) =>
                 sendEvent({ status: 'error', detail: 'Video not found in local cache. Re-import from YouTube first.' });
                 return res.end();
             }
+        } else if (youtubeUrl) {
+            // Auto-download YouTube video for transcription
+            resolvedVideoId = extractVideoId(youtubeUrl);
+            if (!resolvedVideoId) {
+                sendEvent({ status: 'error', detail: 'Invalid YouTube URL.' });
+                return res.end();
+            }
+
+            // Check local cache first
+            videoPath = localStore.getLocalVideoPath(resolvedVideoId);
+            if (!videoPath) {
+                sendEvent({ status: 'downloading', detail: 'Downloading video from YouTube...' });
+                const ytUrl = `https://www.youtube.com/watch?v=${resolvedVideoId}`;
+                tempDownloadPath = path.join(os.tmpdir(), `${resolvedVideoId}_${Date.now()}.mp4`);
+
+                const downloadCmdBuilder = (useCookies) => `"${YT_DLP}" -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 -o "${tempDownloadPath}"${useCookies ? getCookieArg() : ''} "${ytUrl}"`;
+
+                await runYtDlpWithFallback(downloadCmdBuilder, {
+                    encoding: 'utf8',
+                    maxBuffer: 50 * 1024 * 1024,
+                    timeout: 300000,
+                    env: childEnv
+                });
+
+                if (!fs.existsSync(tempDownloadPath)) {
+                    sendEvent({ status: 'error', detail: 'Failed to download video from YouTube.' });
+                    return res.end();
+                }
+
+                // Save to local cache
+                try {
+                    localStore.saveVideo(resolvedVideoId, tempDownloadPath);
+                    videoPath = localStore.getLocalVideoPath(resolvedVideoId);
+                } catch (e) {
+                    console.warn('[Transcribe] Failed to cache downloaded video:', e.message);
+                    videoPath = tempDownloadPath;
+                }
+            }
         } else if (uploadedFilePath) {
             videoPath = uploadedFilePath;
         } else {
-            sendEvent({ status: 'error', detail: 'No videoId or file provided.' });
+            sendEvent({ status: 'error', detail: 'No videoId, youtubeUrl, or file provided.' });
             return res.end();
         }
 
@@ -1613,9 +1653,10 @@ app.post('/api/transcribe', transcribeUpload.single('file'), async (req, res) =>
         const events = assemblyAIToAnalysisEvents(result);
 
         // Save transcript locally if this is a YouTube video
-        if (videoId) {
+        const saveId = resolvedVideoId || videoId;
+        if (saveId) {
             try {
-                localStore.saveTranscript(videoId, {
+                localStore.saveTranscript(saveId, {
                     source: 'assemblyai',
                     transcriptId: result.id,
                     text: result.text,
@@ -1646,6 +1687,9 @@ app.post('/api/transcribe', transcribeUpload.single('file'), async (req, res) =>
         }
         if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
             fs.unlink(uploadedFilePath, () => {});
+        }
+        if (tempDownloadPath && fs.existsSync(tempDownloadPath)) {
+            fs.unlink(tempDownloadPath, () => {});
         }
         res.end();
     }

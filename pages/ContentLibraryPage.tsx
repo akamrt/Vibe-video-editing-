@@ -70,6 +70,11 @@ export const ContentLibraryPage: React.FC<{
     const [isDetectingFillers, setIsDetectingFillers] = useState(false);
     const [fillerStatus, setFillerStatus] = useState('');
 
+    // AssemblyAI transcription
+    const [useAssemblyAI, setUseAssemblyAI] = useState(false);
+    const [hasAssemblyAIKey, setHasAssemblyAIKey] = useState(false);
+    const [transcriptionJobs, setTranscriptionJobs] = useState<Map<string, { status: string; detail?: string }>>(new Map());
+
     // TTS Preview State
     const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
     const [previewClipIndex, setPreviewClipIndex] = useState(0);
@@ -94,6 +99,10 @@ export const ContentLibraryPage: React.FC<{
             setCostTotal(getSessionTotal());
             setCostLog(getSessionLog());
         });
+        // Check AssemblyAI key availability
+        fetch('/api/keys').then(r => r.json()).then(keys => {
+            setHasAssemblyAIKey(!!keys.ASSEMBLYAI_API_KEY);
+        }).catch(() => {});
     }, []);
 
     // Subscribe to cost updates
@@ -518,7 +527,8 @@ export const ContentLibraryPage: React.FC<{
 
             const video: VideoRecord = {
                 id: videoId, url, title: videoInfo.title, channelName: videoInfo.channelName,
-                thumbnailUrl: videoInfo.thumbnailUrl, duration, importedAt: new Date(), categories: []
+                thumbnailUrl: videoInfo.thumbnailUrl, duration, importedAt: new Date(), categories: [],
+                transcriptSource: segments.length > 0 ? 'youtube' : 'none',
             };
 
             const dbSegments: TranscriptSegment[] = segments.map((seg: any, index: number) => ({
@@ -529,6 +539,11 @@ export const ContentLibraryPage: React.FC<{
             await contentDB.addSegments(dbSegments);
             setImporting(prev => prev.map(v => v.url === url ? { ...v, status: 'done' } : v));
             loadData();
+
+            // If AssemblyAI checkbox is on, auto-trigger transcription
+            if (useAssemblyAI && hasAssemblyAIKey) {
+                transcribeVideo(videoId, url);
+            }
         } catch (err: any) {
             console.error('Import error:', err);
             setImporting(prev => prev.map(v => v.url === url ? { ...v, status: 'error', error: err.message } : v));
@@ -536,6 +551,85 @@ export const ContentLibraryPage: React.FC<{
     };
 
     const clearCompleted = () => setImporting(prev => prev.filter(v => v.status !== 'done' && v.status !== 'error'));
+
+    // ==================== AssemblyAI Transcription ====================
+
+    const transcribeVideo = async (videoId: string, youtubeUrl: string) => {
+        setTranscriptionJobs(prev => new Map(prev).set(videoId, { status: 'starting' }));
+
+        try {
+            const formData = new FormData();
+            formData.append('youtubeUrl', youtubeUrl);
+
+            const response = await fetch('/api/transcribe', { method: 'POST', body: formData });
+
+            if (!response.ok || !response.body) {
+                throw new Error('Transcription request failed');
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    try {
+                        const data = JSON.parse(line.slice(6));
+
+                        if (data.status === 'error') {
+                            setTranscriptionJobs(prev => new Map(prev).set(videoId, { status: 'error', detail: data.detail }));
+                            return;
+                        }
+
+                        if (data.status === 'completed' && data.events) {
+                            // Convert AssemblyAI events to TranscriptSegments
+                            const newSegments: TranscriptSegment[] = data.events.map((evt: any, idx: number) => ({
+                                id: `${videoId}_${idx}`,
+                                videoId,
+                                start: evt.startTime || 0,
+                                duration: (evt.endTime || 0) - (evt.startTime || 0),
+                                text: evt.text || '',
+                                wordTimings: evt.wordTimings || undefined,
+                            }));
+
+                            // Replace segments in DB (addSegments uses put, so overwrite by matching IDs)
+                            await contentDB.addSegments(newSegments);
+                            await contentDB.updateVideo(videoId, { transcriptSource: 'assemblyai' });
+
+                            setTranscriptionJobs(prev => new Map(prev).set(videoId, { status: 'completed' }));
+                            loadData();
+                            // Refresh segments if this video is currently selected
+                            if (selectedVideoId === videoId) {
+                                contentDB.getSegmentsByVideoId(videoId).then(setSelectedSegments);
+                            }
+                            // Clear job status after 3 seconds
+                            setTimeout(() => {
+                                setTranscriptionJobs(prev => { const m = new Map(prev); m.delete(videoId); return m; });
+                            }, 3000);
+                            return;
+                        }
+
+                        // Progress updates
+                        setTranscriptionJobs(prev => new Map(prev).set(videoId, {
+                            status: data.status,
+                            detail: data.detail || data.status,
+                        }));
+                    } catch { /* skip malformed SSE lines */ }
+                }
+            }
+        } catch (err: any) {
+            console.error('[Transcribe] Error:', err);
+            setTranscriptionJobs(prev => new Map(prev).set(videoId, { status: 'error', detail: err.message }));
+        }
+    };
 
     // ==================== Category Logic ====================
 
@@ -706,6 +800,13 @@ export const ContentLibraryPage: React.FC<{
                                 <textarea value={urlInput} onChange={e => setUrlInput(e.target.value)} placeholder="Paste YouTube URLs here (one per line)" className="flex-1 bg-[#1a1a1a] border border-[#333] rounded-lg p-3 text-sm resize-none focus:border-indigo-500 outline-none" rows={2} />
                                 <button onClick={handleAddUrls} disabled={!urlInput.trim()} className="px-6 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg font-medium">Import</button>
                             </div>
+                            {hasAssemblyAIKey && (
+                                <label className="flex items-center gap-2 mt-2 text-xs cursor-pointer select-none">
+                                    <input type="checkbox" checked={useAssemblyAI} onChange={e => setUseAssemblyAI(e.target.checked)} className="accent-green-500" />
+                                    <span className="text-gray-300">Transcribe with AssemblyAI</span>
+                                    <span className="text-gray-500">(accurate word-level timestamps, downloads video)</span>
+                                </label>
+                            )}
                             {importing.length > 0 && (
                                 <div className="mt-3 space-y-1">
                                     {importing.map((item, i) => (
@@ -741,7 +842,18 @@ export const ContentLibraryPage: React.FC<{
                                                 <div className="flex-1 min-w-0">
                                                     <h3 className="font-medium text-sm truncate">{video.title}</h3>
                                                     <p className="text-xs text-gray-500 truncate">{video.channelName || 'Unknown Channel'}</p>
-                                                    <p className="text-xs text-gray-500 mt-1">{formatDuration(video.duration)}</p>
+                                                    <div className="flex items-center gap-1.5 mt-1">
+                                                        <span className="text-xs text-gray-500">{formatDuration(video.duration)}</span>
+                                                        {video.transcriptSource === 'assemblyai' && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-green-600/80 text-green-100">AssemblyAI</span>}
+                                                        {video.transcriptSource === 'youtube' && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-yellow-600/80 text-yellow-100">YouTube</span>}
+                                                        {(!video.transcriptSource || video.transcriptSource === 'none') && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-gray-600/80 text-gray-300">No transcript</span>}
+                                                        {transcriptionJobs.get(video.id) && (() => {
+                                                            const job = transcriptionJobs.get(video.id)!;
+                                                            if (job.status === 'completed') return <span className="text-[9px] text-green-400">Done!</span>;
+                                                            if (job.status === 'error') return <span className="text-[9px] text-red-400" title={job.detail}>Error</span>;
+                                                            return <span className="text-[9px] text-blue-400 animate-pulse">{job.detail || job.status}</span>;
+                                                        })()}
+                                                    </div>
                                                     {video.categories.length > 0 && (
                                                         <div className="flex gap-1 mt-1 flex-wrap">
                                                             {video.categories.map(catId => {
@@ -766,8 +878,36 @@ export const ContentLibraryPage: React.FC<{
                                 {selectedVideoId ? (
                                     <>
                                         <div className="p-3 border-b border-[#222] flex items-center justify-between">
-                                            <h2 className="font-medium">Transcript</h2>
-                                            <span className="text-xs text-gray-500">{selectedSegments.length} segments</span>
+                                            <div className="flex items-center gap-2">
+                                                <h2 className="font-medium">Transcript</h2>
+                                                {(() => {
+                                                    const v = videos.find(v => v.id === selectedVideoId);
+                                                    if (v?.transcriptSource === 'assemblyai') return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-600/80 text-green-100">AssemblyAI</span>;
+                                                    if (v?.transcriptSource === 'youtube') return <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-yellow-600/80 text-yellow-100">YouTube</span>;
+                                                    return null;
+                                                })()}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-xs text-gray-500">{selectedSegments.length} segments</span>
+                                                {hasAssemblyAIKey && !transcriptionJobs.has(selectedVideoId) && (
+                                                    <button
+                                                        onClick={() => {
+                                                            const v = videos.find(v => v.id === selectedVideoId);
+                                                            if (v) transcribeVideo(v.id, v.url);
+                                                        }}
+                                                        className="text-xs bg-indigo-600/80 hover:bg-indigo-500 px-2.5 py-1 rounded flex items-center gap-1"
+                                                        title="Transcribe with AssemblyAI for accurate word-level timestamps"
+                                                    >
+                                                        🎤 Transcribe
+                                                    </button>
+                                                )}
+                                                {transcriptionJobs.has(selectedVideoId) && (() => {
+                                                    const job = transcriptionJobs.get(selectedVideoId)!;
+                                                    if (job.status === 'completed') return <span className="text-xs text-green-400">Done!</span>;
+                                                    if (job.status === 'error') return <span className="text-xs text-red-400" title={job.detail}>Error</span>;
+                                                    return <span className="text-xs text-blue-400 animate-pulse">{job.detail || job.status}...</span>;
+                                                })()}
+                                            </div>
                                         </div>
                                         <div className="p-3 border-b border-[#222]">
                                             <div className="text-xs text-gray-500 mb-2">Assign Categories:</div>
