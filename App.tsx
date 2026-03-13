@@ -28,6 +28,7 @@ import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
 import { getAudioBuffer, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache } from './utils/audioAnalysis';
+import { crossfadeVolumes } from './utils/audioCrossfade';
 import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
 import { loadGoogleFont } from './services/googleFontsService';
 
@@ -624,25 +625,71 @@ function App() {
           }
         }
 
-        // --- AUDIO-ONLY SEGMENT: skip visual transitions, handle audio only ---
+        // --- AUDIO-ONLY SEGMENT: overlap-aware crossfade + solo fades ---
         if (seg.type === 'audio') {
           const relTime = project.currentTime - seg.timelineStart;
-          const clipTime = project.currentTime - seg.timelineStart;
-          const clipTransform = getInterpolatedTransform(seg.keyframes, clipTime);
+          const segEnd = seg.timelineStart + duration;
+          const clipTransform = getInterpolatedTransform(seg.keyframes, relTime);
           let audioVolume = clipTransform.volume;
 
-          // Audio transitions (fade in/out)
-          if (seg.transitionIn && relTime < seg.transitionIn.duration) {
+          // --- Overlap-aware crossfade (same-track only) ---
+          // Find overlapping audio neighbor AFTER this clip on the same track (this is outgoing)
+          const audioOverlapNext = project.segments.find(s =>
+            s.id !== seg.id && s.type === 'audio' &&
+            (s.track || 0) === (seg.track || 0) &&
+            s.timelineStart > seg.timelineStart && s.timelineStart < segEnd
+          ) || null;
+
+          // Check if a PREVIOUS audio clip on the same track overlaps us (this is incoming)
+          const audioOverlapPrev = project.segments.find(s =>
+            s.id !== seg.id && s.type === 'audio' &&
+            (s.track || 0) === (seg.track || 0) &&
+            s.timelineStart < seg.timelineStart &&
+            (s.timelineStart + (s.endTime - s.startTime)) > seg.timelineStart
+          ) || null;
+
+          let outgoingCrossfade = false;
+          let incomingCrossfade = false;
+
+          if (audioOverlapNext) {
+            // THIS CLIP IS THE OUTGOING (LEFT) — volume fades 1→0 over overlap
+            const overlapStart = audioOverlapNext.timelineStart;
+            const overlapDuration = segEnd - overlapStart;
+            if (overlapDuration > 0 && project.currentTime >= overlapStart) {
+              const progress = (project.currentTime - overlapStart) / overlapDuration;
+              const curve = seg.transitionOut?.audioCurve || 'linear';
+              const { outgoing } = crossfadeVolumes(progress, curve);
+              audioVolume *= outgoing;
+              outgoingCrossfade = true;
+            }
+          }
+
+          if (audioOverlapPrev) {
+            // THIS CLIP IS THE INCOMING (RIGHT) — volume fades 0→1 over overlap
+            const predEnd = audioOverlapPrev.timelineStart + (audioOverlapPrev.endTime - audioOverlapPrev.startTime);
+            const overlapStart = seg.timelineStart;
+            const overlapDuration = predEnd - overlapStart;
+            if (overlapDuration > 0 && project.currentTime < predEnd) {
+              const progress = (project.currentTime - overlapStart) / overlapDuration;
+              const curve = audioOverlapPrev.transitionOut?.audioCurve || 'linear';
+              const { incoming } = crossfadeVolumes(progress, curve);
+              audioVolume *= incoming;
+              incomingCrossfade = true;
+            }
+          }
+
+          // Solo fades (transitionIn/Out) at non-overlapping edges
+          if (!incomingCrossfade && seg.transitionIn && relTime < seg.transitionIn.duration) {
             const progress = Math.max(0, Math.min(1, relTime / seg.transitionIn.duration));
             audioVolume *= progress;
           }
-          if (seg.transitionOut && relTime > (duration - seg.transitionOut.duration)) {
+          if (!outgoingCrossfade && seg.transitionOut && relTime > (duration - seg.transitionOut.duration)) {
             const remaining = duration - relTime;
             const progress = Math.max(0, Math.min(1, remaining / seg.transitionOut.duration));
             audioVolume *= progress;
           }
 
-          // Micro-fades at edges
+          // Micro-fades at edges (always apply for click prevention)
           const AUDIO_FADE_SEC = 0.03;
           if (relTime < AUDIO_FADE_SEC) audioVolume *= relTime / AUDIO_FADE_SEC;
           if (relTime > duration - AUDIO_FADE_SEC) audioVolume *= Math.max(0, (duration - relTime) / AUDIO_FADE_SEC);

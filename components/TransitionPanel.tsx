@@ -339,6 +339,73 @@ const TransitionPanel: React.FC<TransitionPanelProps> = ({
                 />
               </div>
             )}
+
+            {/* Crossfade curve selector — shown when audio segments overlap */}
+            {(() => {
+              if (!effectiveSelection) return null;
+              const seg = segments.find(s => s.id === effectiveSelection.segId);
+              if (!seg) return null;
+              const segEnd = seg.timelineStart + (seg.endTime - seg.startTime);
+
+              // Check for overlapping audio on the same track
+              const overlapsNext = segments.find(s =>
+                s.id !== seg.id && s.type === 'audio' &&
+                (s.track || 0) === (seg.track || 0) &&
+                s.timelineStart > seg.timelineStart && s.timelineStart < segEnd
+              );
+              const overlapsPrev = segments.find(s =>
+                s.id !== seg.id && s.type === 'audio' &&
+                (s.track || 0) === (seg.track || 0) &&
+                s.timelineStart < seg.timelineStart &&
+                (s.timelineStart + (s.endTime - s.startTime)) > seg.timelineStart
+              );
+
+              if (!overlapsNext && !overlapsPrev) return null;
+
+              // The curve is controlled by the outgoing (left) segment's transitionOut
+              const controlSeg = overlapsNext ? seg : overlapsPrev!;
+              const activeCurve = controlSeg.transitionOut?.audioCurve || 'linear';
+
+              const setCurve = (curve: 'linear' | 'equalPower') => {
+                const existing = controlSeg.transitionOut || { type: 'FADE' as TransitionType, duration: 0.5 };
+                onApplyTransition(controlSeg.id, 'out', { ...existing, audioCurve: curve });
+              };
+
+              return (
+                <div className="mt-3 px-1">
+                  <label className="text-[10px] text-gray-400 block mb-1.5">
+                    Crossfade Curve
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setCurve('linear')}
+                      className={`p-2 rounded-lg border text-center transition-all text-[10px] ${
+                        activeCurve === 'linear'
+                          ? 'border-green-500 bg-green-500/10 text-green-300'
+                          : 'border-[#333] bg-[#1a1a1a] text-gray-400 hover:border-green-500/50'
+                      }`}
+                    >
+                      〰 Linear
+                      <div className="text-[8px] text-gray-500 mt-0.5">Constant energy</div>
+                    </button>
+                    <button
+                      onClick={() => setCurve('equalPower')}
+                      className={`p-2 rounded-lg border text-center transition-all text-[10px] ${
+                        activeCurve === 'equalPower'
+                          ? 'border-green-500 bg-green-500/10 text-green-300'
+                          : 'border-[#333] bg-[#1a1a1a] text-gray-400 hover:border-green-500/50'
+                      }`}
+                    >
+                      ⚡ Equal Power
+                      <div className="text-[8px] text-gray-500 mt-0.5">Louder midpoint</div>
+                    </button>
+                  </div>
+                  <div className="text-[9px] text-gray-600 mt-1">
+                    Overlap duration controls crossfade length
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 

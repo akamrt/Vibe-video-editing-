@@ -139,6 +139,7 @@ export interface Transition {
   intensity?: number;          // 0-100 for blur/glitch/pixelate strength
   segments?: number;           // star points, mosaic grid size
   angle?: number;              // degrees for diagonal/radial
+  audioCurve?: 'linear' | 'equalPower'; // crossfade curve for audio overlaps
 }
 
 export interface TransitionParamSchema {

@@ -1071,6 +1071,38 @@ const Timeline: React.FC<TimelineProps> = ({
                   {/* Base Track Layout lines */}
                   <div className="absolute inset-x-0 top-1/2 h-[1px] bg-white/5" />
 
+                  {/* AUDIO OVERLAP ZONES */}
+                  {overlapZones.filter(z => z.track === trackId).map((zone, i) => {
+                    // Only show for audio segment overlaps
+                    const leftSeg = segments.find(s => s.id === zone.leftSegId);
+                    if (!leftSeg || leftSeg.type !== 'audio') return null;
+                    const curve = leftSeg.transitionOut?.audioCurve || 'linear';
+                    return (
+                      <div
+                        key={`audio-overlap-${i}`}
+                        className="absolute top-1 bottom-1 z-20 flex items-center justify-center cursor-pointer group/azone transition-all duration-200"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onEditTransition(zone.leftSegId, 'out', e.clientX, e.clientY);
+                        }}
+                        style={{
+                          left: `${zone.left}%`,
+                          width: `${zone.width}%`,
+                          background: 'linear-gradient(90deg, rgba(34,197,94,0.08), rgba(34,197,94,0.25), rgba(34,197,94,0.08))',
+                          borderTop: '2px solid rgba(34,197,94,0.5)',
+                          borderBottom: '2px solid rgba(34,197,94,0.5)',
+                          borderRadius: 4
+                        }}
+                        title={`Audio crossfade (${curve})`}
+                      >
+                        <div className="bg-black/80 rounded-full px-1.5 py-0.5 border border-green-500/40 shadow-lg transform transition-transform group-hover/azone:scale-110 flex items-center gap-1">
+                          <span className="text-[9px] text-green-300">{curve === 'equalPower' ? '⚡' : '〰'}</span>
+                          <span className="text-[8px] text-green-300/60">xfade</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+
                   {layoutSegments.filter(s => s.track === trackId).map((seg) => {
                     const isSelected = selectedSegmentIds.includes(seg.id);
                     const isUnlinked = seg.audioLinked === false || seg.type === 'audio';
