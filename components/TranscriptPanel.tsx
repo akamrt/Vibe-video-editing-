@@ -11,6 +11,9 @@ interface TranscriptPanelProps {
     removedWords?: RemovedWord[];
     onRemoveWords?: (words: RemovedWord[]) => void;
     onRestoreWord?: (wordId: string) => void;
+    transcriptSource?: 'youtube' | 'assemblyai' | 'gemini' | 'none';
+    transcriptionJob?: { status: string; progress?: string; mediaId: string };
+    onTranscribe?: () => void;
 }
 
 interface ParsedWord {
@@ -23,8 +26,17 @@ interface ParsedWord {
 
 const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
     analysis, mediaId, currentTime, onSeek, onSelect, selectedIndex,
-    removedWords = [], onRemoveWords, onRestoreWord
+    removedWords = [], onRemoveWords, onRestoreWord,
+    transcriptSource, transcriptionJob, onTranscribe
 }) => {
+    const [hasAssemblyAIKey, setHasAssemblyAIKey] = useState<boolean | null>(null);
+
+    // Check if AssemblyAI key is configured
+    React.useEffect(() => {
+        fetch('/api/keys').then(r => r.json()).then(keys => {
+            setHasAssemblyAIKey(!!keys.ASSEMBLYAI_API_KEY);
+        }).catch(() => setHasAssemblyAIKey(false));
+    }, []);
     const scrollRef = useRef<HTMLDivElement>(null);
     const [selectedWordIds, setSelectedWordIds] = useState<Set<string>>(new Set());
     const [activeTab, setActiveTab] = useState<'transcript' | 'removed'>('transcript');
@@ -92,19 +104,49 @@ const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
         setSelectedWordIds(new Set());
     };
 
-    if (!analysis) {
-        return (
-            <div className="flex flex-col h-full items-center justify-center text-gray-500 p-4 text-center">
-                <p className="mb-2">No transcript available.</p>
-                <p className="text-xs">Run "Deep Analyze" to generate a transcript.</p>
-            </div>
-        )
-    }
+    const isTranscribing = !!transcriptionJob && transcriptionJob.status !== 'completed' && transcriptionJob.status !== 'error';
 
-    if (dialogueEvents.length === 0) {
+    const sourceLabel = transcriptSource === 'assemblyai' ? 'AssemblyAI' : transcriptSource === 'youtube' ? 'YouTube' : transcriptSource === 'gemini' ? 'Gemini' : null;
+    const sourceColor = transcriptSource === 'assemblyai' ? 'bg-green-600/80 text-green-100' : transcriptSource === 'youtube' ? 'bg-yellow-600/80 text-yellow-100' : transcriptSource === 'gemini' ? 'bg-purple-600/80 text-purple-100' : '';
+
+    const statusText = transcriptionJob?.status === 'extracting_audio' ? 'Extracting audio...'
+        : transcriptionJob?.status === 'uploading' ? 'Uploading to AssemblyAI...'
+        : transcriptionJob?.status === 'transcribing' ? 'Transcribing...'
+        : transcriptionJob?.status === 'starting' ? 'Starting...'
+        : transcriptionJob?.status === 'error' ? `Error: ${transcriptionJob.progress || 'Unknown'}`
+        : transcriptionJob?.status === 'completed' ? 'Complete!'
+        : null;
+
+    if (!analysis || dialogueEvents.length === 0) {
         return (
             <div className="flex flex-col h-full items-center justify-center text-gray-500 p-4 text-center">
-                <p>No dialogue detected.</p>
+                {isTranscribing ? (
+                    <>
+                        <div className="w-4 h-4 bg-indigo-400 rounded-full animate-pulse mb-3" />
+                        <p className="text-indigo-300 font-medium mb-1">{statusText}</p>
+                        <p className="text-xs text-gray-500">This may take 30-120 seconds depending on video length.</p>
+                    </>
+                ) : (
+                    <>
+                        <p className="mb-3">No transcript available.</p>
+                        {onTranscribe && hasAssemblyAIKey ? (
+                            <button
+                                onClick={onTranscribe}
+                                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold rounded-lg transition-colors"
+                            >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                    <line x1="12" y1="19" x2="12" y2="23"/>
+                                    <line x1="8" y1="23" x2="16" y2="23"/>
+                                </svg>
+                                Transcribe with AssemblyAI
+                            </button>
+                        ) : (
+                            <p className="text-xs">Run "Deep Analyze" or configure AssemblyAI key in Settings.</p>
+                        )}
+                    </>
+                )}
             </div>
         )
     }
@@ -114,6 +156,48 @@ const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
 
     return (
         <div className="flex flex-col h-full bg-[#1e1e1e] overflow-hidden relative">
+            {/* Transcription toolbar */}
+            <div className="flex items-center gap-2 px-3 py-2 border-b border-[#3a3a3a] bg-[#252525]">
+                {sourceLabel && (
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${sourceColor}`}>
+                        {sourceLabel}
+                    </span>
+                )}
+
+                {onTranscribe && hasAssemblyAIKey && !isTranscribing && (
+                    <button
+                        onClick={onTranscribe}
+                        className="ml-auto flex items-center gap-1.5 px-3 py-1 bg-indigo-600/80 hover:bg-indigo-500 text-white text-[11px] font-bold rounded transition-colors"
+                        title="Transcribe with AssemblyAI for accurate word-level timestamps"
+                    >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                            <line x1="12" y1="19" x2="12" y2="23"/>
+                            <line x1="8" y1="23" x2="16" y2="23"/>
+                        </svg>
+                        Transcribe
+                    </button>
+                )}
+
+                {onTranscribe && hasAssemblyAIKey === false && (
+                    <span className="ml-auto text-[10px] text-gray-500" title="Add ASSEMBLYAI_API_KEY in Settings to enable">
+                        No AssemblyAI key
+                    </span>
+                )}
+
+                {isTranscribing && (
+                    <div className="ml-auto flex items-center gap-2">
+                        <div className="w-2 h-2 bg-indigo-400 rounded-full animate-pulse" />
+                        <span className="text-[11px] text-indigo-300 font-medium">{statusText}</span>
+                    </div>
+                )}
+
+                {transcriptionJob?.status === 'completed' && (
+                    <span className="ml-auto text-[11px] text-green-400 font-bold animate-pulse">✓ Transcription complete!</span>
+                )}
+            </div>
+
             <div className="flex border-b border-[#3a3a3a] bg-[#2a2a2a]">
                 <button onClick={() => setActiveTab('transcript')} className={`flex-1 py-2 text-xs font-bold transition-colors ${activeTab === 'transcript' ? 'text-blue-400 border-b-2 border-blue-400 bg-[#333]' : 'text-gray-400 hover:bg-[#333]'}`}>
                     TRANSCRIPT ({activeWordsCount})

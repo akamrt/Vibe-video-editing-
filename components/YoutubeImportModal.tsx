@@ -1,5 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ProcessingStatus } from '../types';
+
+interface LocalCacheInfo {
+  hasVideo: boolean;
+  hasTranscript: boolean;
+  videoSize?: number;
+  wordCount?: number;
+}
 
 interface YoutubeImportModalProps {
   onImport: (url: string, download: boolean, file?: File) => void;
@@ -7,12 +14,53 @@ interface YoutubeImportModalProps {
   status: ProcessingStatus;
 }
 
+// Extract YouTube video ID from URL
+const extractVideoId = (url: string): string | null => {
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+    /^([a-zA-Z0-9_-]{11})$/,
+  ];
+  for (const p of patterns) {
+    const m = url.match(p);
+    if (m) return m[1];
+  }
+  return null;
+};
+
 export const YoutubeImportModal: React.FC<YoutubeImportModalProps> = ({ onImport, onCancel, status }) => {
   const [url, setUrl] = useState('');
   const [mode, setMode] = useState<'download' | 'manual'>('download');
   const [manualFile, setManualFile] = useState<File | null>(null);
-
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [cacheInfo, setCacheInfo] = useState<LocalCacheInfo | null>(null);
+  const [checkingCache, setCheckingCache] = useState(false);
+
+  // Check local cache when URL changes
+  const videoId = extractVideoId(url);
+
+  useEffect(() => {
+    if (!videoId) {
+      setCacheInfo(null);
+      return;
+    }
+
+    let cancelled = false;
+    setCheckingCache(true);
+
+    fetch(`/api/local-cache?videoId=${videoId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (!cancelled) setCacheInfo(data);
+      })
+      .catch(() => {
+        if (!cancelled) setCacheInfo(null);
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingCache(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [videoId]);
 
   const isDisabled = status !== ProcessingStatus.IDLE || !url || (mode === 'manual' && !manualFile);
 
@@ -53,6 +101,27 @@ export const YoutubeImportModal: React.FC<YoutubeImportModalProps> = ({ onImport
             value={url}
             onChange={e => setUrl(e.target.value)}
           />
+
+          {/* Local cache indicator */}
+          {cacheInfo?.hasVideo && (
+            <div className="mt-2 flex items-center gap-2 p-2 bg-green-900/30 border border-green-700/50 rounded text-sm">
+              <span className="text-green-400 font-bold text-xs">📁 Cached locally</span>
+              {cacheInfo.videoSize && (
+                <span className="text-green-300/60 text-xs">
+                  ({(cacheInfo.videoSize / 1024 / 1024).toFixed(0)}MB)
+                </span>
+              )}
+              {cacheInfo.hasTranscript && (
+                <span className="text-green-300/60 text-xs">
+                  + transcript ({cacheInfo.wordCount} words)
+                </span>
+              )}
+              <span className="ml-auto text-[10px] text-green-300/50">Will load from cache — no YouTube download needed</span>
+            </div>
+          )}
+          {checkingCache && videoId && (
+            <div className="mt-1 text-[10px] text-gray-500">Checking local cache...</div>
+          )}
         </div>
 
         <div className="mb-6 flex gap-4">

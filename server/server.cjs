@@ -7,7 +7,9 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { extractVideoId, getTranscript } = require('./transcript.cjs');
-const { getYtDlpPath, getPythonTrackerPath, getEnvWithBinPath } = require('./binpath.cjs');
+const { getYtDlpPath, getPythonTrackerPath, getEnvWithBinPath, getFfmpegPath } = require('./binpath.cjs');
+const { transcribeFile, assemblyAIToAnalysisEvents } = require('./assemblyai.cjs');
+const localStore = require('./localStore.cjs');
 
 // Resolve yt-dlp path once at startup
 const YT_DLP = getYtDlpPath();
@@ -189,10 +191,18 @@ app.get('/api/download', async (req, res) => {
             throw new Error('Downloaded file not found');
         }
 
+        // Persist to local cache (non-blocking — don't delay streaming)
+        try {
+            localStore.saveVideo(videoId, tempFile);
+        } catch (cacheErr) {
+            console.warn('[Download] Failed to cache locally (continuing):', cacheErr.message);
+        }
+
         const stat = fs.statSync(tempFile);
         res.header('Content-Disposition', `attachment; filename="${title}.mp4"`);
         res.header('Content-Type', 'video/mp4');
         res.header('Content-Length', stat.size);
+        res.header('X-Video-Id', videoId);
 
         // Stream the file to response
         const fileStream = fs.createReadStream(tempFile);
@@ -369,6 +379,7 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const KIMI_API_KEY = process.env.KIMI_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
+const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
 
 console.log(`Using Gemini Model: ${GEMINI_MODEL}`);
 console.log(`Using Gemini API Key: ${GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : 'Not Set'}`);
@@ -1478,6 +1489,168 @@ app.post('/api/tracking/analyze', async (req, res) => {
     }
 });
 
+// ==================== AssemblyAI Transcription & Local Cache ====================
+
+// Check local cache for a video
+app.get('/api/local-cache', (req, res) => {
+    const { videoId } = req.query;
+    if (!videoId) return res.status(400).json({ error: 'Missing videoId' });
+    const cache = localStore.hasLocalCache(videoId);
+    res.json(cache);
+});
+
+// Stream locally cached video
+app.get('/api/local-video', (req, res) => {
+    const { videoId } = req.query;
+    if (!videoId) return res.status(400).json({ error: 'Missing videoId' });
+
+    const videoPath = localStore.getLocalVideoPath(videoId);
+    if (!videoPath) return res.status(404).json({ error: 'Video not cached locally' });
+
+    const stat = fs.statSync(videoPath);
+    res.header('Content-Type', 'video/mp4');
+    res.header('Content-Length', stat.size);
+    res.header('X-Video-Id', videoId);
+    fs.createReadStream(videoPath).pipe(res);
+});
+
+// Get locally cached transcript
+app.get('/api/local-transcript', (req, res) => {
+    const { videoId } = req.query;
+    if (!videoId) return res.status(400).json({ error: 'Missing videoId' });
+
+    const transcript = localStore.loadTranscript(videoId);
+    if (!transcript) return res.status(404).json({ error: 'Transcript not cached locally' });
+    res.json(transcript);
+});
+
+// Transcribe using AssemblyAI (SSE for progress)
+// For YouTube videos (with videoId): uses locally cached video
+// For uploaded files: accepts multipart upload
+const transcribeUpload = multer({
+    storage: multer.diskStorage({
+        destination: (req, file, cb) => {
+            const dir = path.join(os.tmpdir(), 'vibecut-transcribe');
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+            cb(null, dir);
+        },
+        filename: (req, file, cb) => {
+            const ext = path.extname(file.originalname) || '.mp4';
+            cb(null, `transcribe_${Date.now()}${ext}`);
+        },
+    }),
+    limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB max
+});
+
+app.post('/api/transcribe', transcribeUpload.single('file'), async (req, res) => {
+    const apiKey = ASSEMBLYAI_API_KEY;
+    if (!apiKey) {
+        return res.status(400).json({ error: 'ASSEMBLYAI_API_KEY not configured. Add it in Settings.' });
+    }
+
+    const { videoId } = req.body || {};
+    let videoPath = null;
+    let tempAudioPath = null;
+    let uploadedFilePath = req.file ? req.file.path : null;
+
+    // Set up SSE
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+    });
+
+    const sendEvent = (data) => {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+        // Resolve video file path
+        if (videoId) {
+            videoPath = localStore.getLocalVideoPath(videoId);
+            if (!videoPath) {
+                sendEvent({ status: 'error', detail: 'Video not found in local cache. Re-import from YouTube first.' });
+                return res.end();
+            }
+        } else if (uploadedFilePath) {
+            videoPath = uploadedFilePath;
+        } else {
+            sendEvent({ status: 'error', detail: 'No videoId or file provided.' });
+            return res.end();
+        }
+
+        // Extract audio via ffmpeg (smaller upload to AssemblyAI)
+        let fileToUpload = videoPath;
+        try {
+            const FFMPEG = getFfmpegPath();
+            tempAudioPath = path.join(os.tmpdir(), `assemblyai_audio_${Date.now()}.wav`);
+            sendEvent({ status: 'extracting_audio' });
+
+            await execAsync(
+                `"${FFMPEG}" -i "${videoPath}" -vn -ac 1 -ar 16000 -f wav "${tempAudioPath}" -y`,
+                { timeout: 120000, env: childEnv }
+            );
+
+            if (fs.existsSync(tempAudioPath) && fs.statSync(tempAudioPath).size > 0) {
+                fileToUpload = tempAudioPath;
+                console.log(`[Transcribe] Extracted audio: ${(fs.statSync(tempAudioPath).size / 1024 / 1024).toFixed(1)}MB`);
+            } else {
+                console.warn('[Transcribe] Audio extraction produced empty file, uploading original video');
+                tempAudioPath = null;
+            }
+        } catch (ffmpegErr) {
+            console.warn('[Transcribe] ffmpeg audio extraction failed, uploading original file:', ffmpegErr.message);
+            tempAudioPath = null;
+            // Fall through — upload original video file instead
+        }
+
+        // Run AssemblyAI transcription with progress updates
+        const result = await transcribeFile(fileToUpload, apiKey, (progress) => {
+            sendEvent(progress);
+        });
+
+        // Convert to app format
+        const events = assemblyAIToAnalysisEvents(result);
+
+        // Save transcript locally if this is a YouTube video
+        if (videoId) {
+            try {
+                localStore.saveTranscript(videoId, {
+                    source: 'assemblyai',
+                    transcriptId: result.id,
+                    text: result.text,
+                    words: result.words,
+                    events: events,
+                    language: result.language_code,
+                    createdAt: new Date().toISOString(),
+                });
+            } catch (saveErr) {
+                console.warn('[Transcribe] Failed to cache transcript:', saveErr.message);
+            }
+        }
+
+        sendEvent({
+            status: 'completed',
+            events: events,
+            wordCount: result.words?.length || 0,
+            language: result.language_code,
+            text: result.text,
+        });
+    } catch (err) {
+        console.error('[Transcribe] Error:', err.message);
+        sendEvent({ status: 'error', detail: err.message });
+    } finally {
+        // Clean up temp files
+        if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+            fs.unlink(tempAudioPath, () => {});
+        }
+        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+            fs.unlink(uploadedFilePath, () => {});
+        }
+        res.end();
+    }
+});
+
 // ==================== API Key Management ====================
 
 // Get current API key status (masked)
@@ -1487,6 +1660,7 @@ app.get('/api/keys', (req, res) => {
         KIMI_API_KEY: KIMI_API_KEY ? '******' + KIMI_API_KEY.slice(-4) : null,
         OPENAI_API_KEY: OPENAI_API_KEY ? '******' + OPENAI_API_KEY.slice(-4) : null,
         MINIMAX_API_KEY: MINIMAX_API_KEY ? '******' + MINIMAX_API_KEY.slice(-4) : null,
+        ASSEMBLYAI_API_KEY: ASSEMBLYAI_API_KEY ? '******' + ASSEMBLYAI_API_KEY.slice(-4) : null,
     });
 });
 

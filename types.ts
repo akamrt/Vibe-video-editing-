@@ -93,6 +93,8 @@ export interface MediaItem {
   isCached?: boolean;
   isAudioOnly?: boolean; // true when file is audio/* with no video track
   fillerDetections?: CachedFillerDetection[];
+  youtubeVideoId?: string; // YouTube video ID for local cache lookups
+  transcriptSource?: 'youtube' | 'assemblyai' | 'gemini' | 'none';
 }
 
 // ============ TRANSITION SYSTEM ============
@@ -327,6 +329,13 @@ export interface AnalysisEvent {
   translateY?: number; // percentage offset from default position
   keyframes?: ClipKeyframe[]; // Animation keyframes for subtitle event transforms
   keywordAnimation?: TextAnimation; // separate animation for keyword words
+  confidence?: number; // Word-level confidence from AssemblyAI (0-1)
+  wordTimings?: Array<{ // Per-word timings for karaoke accuracy (AssemblyAI)
+    text: string;
+    start: number;  // seconds
+    end: number;    // seconds
+    confidence: number;
+  }>;
 }
 
 export interface VideoAnalysis {

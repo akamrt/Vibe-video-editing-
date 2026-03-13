@@ -15,6 +15,7 @@ const API_KEY_LABELS: Record<string, string> = {
   KIMI_API_KEY: 'Kimi (Moonshot)',
   OPENAI_API_KEY: 'OpenAI',
   MINIMAX_API_KEY: 'MiniMax',
+  ASSEMBLYAI_API_KEY: 'AssemblyAI',
 };
 
 const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose }) => {

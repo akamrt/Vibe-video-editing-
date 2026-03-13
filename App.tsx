@@ -204,6 +204,7 @@ function App() {
     { id: '1', role: 'model', text: 'Welcome to VibeCut Pro. Upload clips to the Media Bin to begin editing.', timestamp: new Date() }
   ]);
   const [status, setStatus] = useState<ProcessingStatus>(ProcessingStatus.IDLE);
+  const [transcriptionJobs, setTranscriptionJobs] = useState<Map<string, { status: string; progress?: string; mediaId: string }>>(new Map());
   const [isExporting, setIsExporting] = useState(false);
   const [centeringProgress, setCenteringProgress] = useState('');
   const [outOfZoneThreshold, setOutOfZoneThreshold] = useState(0); // % distance from center before centering (0=always follow)
@@ -1718,95 +1719,122 @@ function App() {
     setProject(prev => ({ ...prev, library: [...prev.library, ...newItems] }));
   };
 
+  // Extract YouTube video ID from URL (client-side helper)
+  const extractYoutubeVideoId = (url: string): string | null => {
+    const patterns = [
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+      /^([a-zA-Z0-9_-]{11})$/,
+    ];
+    for (const p of patterns) {
+      const m = url.match(p);
+      if (m) return m[1];
+    }
+    return null;
+  };
+
   const handleYoutubeImport = async (url: string, download: boolean, manualFile?: File) => {
     console.log('[Import] Starting import...', { url, download, manualFile });
     setStatus(ProcessingStatus.TRANSCRIBING);
     try {
-      // 1. Fetch Transcript (NON-FATAL — video still imports even if transcript fails)
+      const videoId = extractYoutubeVideoId(url);
+
+      // Check local cache first (skip YouTube entirely if cached)
+      if (videoId && download) {
+        try {
+          const cacheRes = await fetch(`/api/local-cache?videoId=${videoId}`);
+          const cache = await cacheRes.json();
+
+          if (cache.hasVideo) {
+            console.log(`[Import] Found local cache for ${videoId}. Loading locally...`);
+
+            // Load video from local cache
+            const localVideoRes = await fetch(`/api/local-video?videoId=${videoId}`);
+            if (localVideoRes.ok) {
+              const blob = await localVideoRes.blob();
+              const videoUrl = URL.createObjectURL(blob);
+              let videoTitle = "YouTube Video";
+
+              // Load cached AssemblyAI transcript if available
+              let processedEvents: AnalysisEvent[] = [];
+              let transcriptSource: 'youtube' | 'assemblyai' | 'none' = 'none';
+
+              if (cache.hasTranscript) {
+                try {
+                  const transcriptRes = await fetch(`/api/local-transcript?videoId=${videoId}`);
+                  const cachedTranscript = await transcriptRes.json();
+                  if (cachedTranscript.events && cachedTranscript.events.length > 0) {
+                    processedEvents = cachedTranscript.events;
+                    transcriptSource = (cachedTranscript.source as any) || 'assemblyai';
+                    console.log(`[Import] Loaded cached ${transcriptSource} transcript: ${processedEvents.length} events`);
+                  }
+                } catch (e) {
+                  console.warn('[Import] Failed to load cached transcript:', e);
+                }
+              }
+
+              // If no cached transcript, try YouTube transcript as fallback
+              if (processedEvents.length === 0) {
+                try {
+                  const ytResult = await fetchYoutubeTranscript(url);
+                  processedEvents = ytResult.events;
+                  videoTitle = ytResult.title;
+                  transcriptSource = 'youtube';
+                } catch { /* will have no transcript */ }
+              }
+
+              // Get duration
+              const video = document.createElement('video');
+              video.src = videoUrl;
+              let duration = 0;
+              try {
+                await new Promise((resolve) => {
+                  const timeout = setTimeout(() => resolve(null), 5000);
+                  video.onloadedmetadata = () => { clearTimeout(timeout); resolve(null); };
+                  video.onerror = () => { clearTimeout(timeout); resolve(null); };
+                });
+                duration = video.duration || 0;
+              } catch { /* ignore */ }
+              if (!duration || isNaN(duration)) {
+                duration = processedEvents.length > 0 ? processedEvents[processedEvents.length - 1].endTime : 10;
+              }
+
+              const file = new File([blob], `${videoTitle}.mp4`, { type: 'video/mp4' });
+              const newItem: MediaItem = {
+                id: Math.random().toString(36).substr(2, 9),
+                file, url: videoUrl, duration, name: videoTitle,
+                youtubeVideoId: videoId,
+                transcriptSource,
+                analysis: processedEvents.length > 0 ? { summary: `Loaded from local cache (${transcriptSource})`, events: processedEvents, generatedAt: new Date() } : null,
+              };
+
+              setProject(prev => ({ ...prev, library: [...prev.library, newItem] }));
+              setSelectedMediaId(newItem.id);
+              setActiveRightTab('transcript');
+              setShowYoutubeModal(false);
+              console.log('[Import] Import from local cache complete!');
+              setStatus(ProcessingStatus.IDLE);
+              return;
+            }
+          }
+        } catch (cacheErr) {
+          console.warn('[Import] Local cache check failed (continuing with YouTube):', cacheErr);
+        }
+      }
+
+      // Standard YouTube import flow (no local cache)
       let processedEvents: AnalysisEvent[] = [];
       let videoTitle = "YouTube Video";
       let transcriptWarning = '';
 
       try {
-        console.log('[Import] Fetching transcript...');
-        const transcriptRes = await fetch(`/api/transcript?url=${encodeURIComponent(url)}&_t=${Date.now()}`);
-        console.log('[Import] Transcript response status:', transcriptRes.status);
-
-        const transcriptData = await transcriptRes.json();
-        console.log('[Import] Transcript data received:', transcriptData);
-
-        if (transcriptData.error) {
-          transcriptWarning = transcriptData.error;
-          console.warn('[Import] Transcript warning from server:', transcriptData.error);
-        } else {
-          videoTitle = transcriptData.title || "YouTube Video";
-
-          // Process segments: Split sentences into words for "One Word" subtitle blocks
-          const events: AnalysisEvent[] = [];
-
-          if (transcriptData.segments && transcriptData.segments.length > 0) {
-            transcriptData.segments.forEach((seg: any) => {
-              // Clean VTT tags: "We<00:00:00.400><c>" -> "We"
-              let text = seg.text || "";
-              text = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-              if (!text) return;
-
-              const words = text.split(/\s+/);
-              const segDurationMs = Math.abs(Number(seg.duration));
-              const segStartMs = Number(seg.start);
-
-              if (words.length > 1) {
-                const durationPerWord = segDurationMs / words.length;
-                words.forEach((w: string, i: number) => {
-                  events.push({ type: 'dialogue', startTime: segStartMs + (i * durationPerWord), endTime: segStartMs + ((i + 1) * durationPerWord), label: 'speech', details: w });
-                });
-              } else {
-                events.push({ type: 'dialogue', startTime: segStartMs, endTime: segStartMs + segDurationMs, label: 'speech', details: text });
-              }
-            });
-            console.log(`[Import] Generated ${events.length} raw word events.`);
-          } else {
-            transcriptWarning = 'No caption segments found for this video.';
-          }
-
-          // Post-Process: Combine rapid/short words into readable "Slides"
-          if (events.length > 0) {
-            let buffer: AnalysisEvent[] = [events[0]];
-
-            for (let i = 1; i < events.length; i++) {
-              const current = events[i];
-              const prev = buffer[buffer.length - 1];
-              const isContiguous = (current.startTime - prev.endTime) < 0.1;
-              const bufferDuration = prev.endTime - buffer[0].startTime;
-              const combinedDuration = current.endTime - buffer[0].startTime;
-              const wordCount = buffer.length;
-
-              // Deduplication
-              const isDuplicate = current.details.trim().toLowerCase() === prev.details.trim().toLowerCase();
-              const isOverlap = current.startTime < prev.endTime;
-              if (isDuplicate && isOverlap) {
-                prev.endTime = Math.max(prev.endTime, current.endTime);
-                continue;
-              }
-
-              if (isContiguous && (bufferDuration < 0.5 || wordCount < 3) && combinedDuration < 1.2) {
-                buffer.push(current);
-              } else {
-                processedEvents.push({ type: 'dialogue', startTime: buffer[0].startTime, endTime: buffer[buffer.length - 1].endTime, label: 'speech', details: buffer.map(e => e.details).join(' ') });
-                buffer = [current];
-              }
-            }
-            if (buffer.length > 0) {
-              processedEvents.push({ type: 'dialogue', startTime: buffer[0].startTime, endTime: buffer[buffer.length - 1].endTime, label: 'speech', details: buffer.map(e => e.details).join(' ') });
-            }
-          }
-          console.log(`[Import] Post-processed into ${processedEvents.length} slides.`);
-        }
+        const ytResult = await fetchYoutubeTranscript(url);
+        processedEvents = ytResult.events;
+        videoTitle = ytResult.title;
+        if (ytResult.warning) transcriptWarning = ytResult.warning;
       } catch (transcriptErr) {
         transcriptWarning = transcriptErr instanceof Error ? transcriptErr.message : String(transcriptErr);
         console.warn('[Import] Transcript fetch failed (continuing without transcript):', transcriptWarning);
       }
-
 
       // 2. Handle Media (Download or Upload placeholder)
       let file: File;
@@ -1814,7 +1842,6 @@ function App() {
 
       if (download) {
         console.log('[Import] Starting download fetch...');
-        // Cache busting for video too, though less critical
         const downloadRes = await fetch(`/api/download?url=${encodeURIComponent(url)}&_t=${Date.now()}`);
         console.log('[Import] Download response status:', downloadRes.status);
 
@@ -1839,32 +1866,24 @@ function App() {
       }
 
       console.log('[Import] Getting video duration...');
-      // Get duration with timeout
       const video = document.createElement('video');
       video.src = videoUrl;
 
       let duration = 0;
       try {
         await new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => resolve(null), 5000); // 5s timeout
-          video.onloadedmetadata = () => {
-            clearTimeout(timeout);
-            resolve(null);
-          };
-          video.onerror = () => {
-            clearTimeout(timeout);
-            reject(new Error('Video format not supported or corrupt'));
-          };
+          const timeout = setTimeout(() => resolve(null), 5000);
+          video.onloadedmetadata = () => { clearTimeout(timeout); resolve(null); };
+          video.onerror = () => { clearTimeout(timeout); reject(new Error('Video format not supported or corrupt')); };
         });
         duration = video.duration || 0;
       } catch (e) {
         console.warn('Could not determine video duration:', e);
-        // Fallback or alert? We'll allow it with 0 duration but warn.
       }
       console.log('[Import] Duration determined:', duration);
 
       if (!duration || isNaN(duration)) {
-        duration = processedEvents.length > 0 ? processedEvents[processedEvents.length - 1].endTime : 10; // Fallback to transcript length or 10s
+        duration = processedEvents.length > 0 ? processedEvents[processedEvents.length - 1].endTime : 10;
       }
 
       const newItem: MediaItem = {
@@ -1873,6 +1892,8 @@ function App() {
         url: videoUrl,
         duration: duration,
         name: videoTitle,
+        youtubeVideoId: videoId || undefined,
+        transcriptSource: processedEvents.length > 0 ? 'youtube' : 'none',
         analysis: {
           summary: "Imported from YouTube",
           events: processedEvents,
@@ -1881,15 +1902,11 @@ function App() {
       };
 
       setProject(prev => ({ ...prev, library: [...prev.library, newItem] }));
-
-      // Auto-select the new item so the user sees the transcript immediately
       setSelectedMediaId(newItem.id);
       setActiveRightTab('transcript');
-
       setShowYoutubeModal(false);
       console.log('[Import] Import complete!');
 
-      // Show non-blocking warning if transcript failed (video imported successfully)
       if (transcriptWarning) {
         setTimeout(() => {
           alert(`Video imported, but transcript could not be fetched.\n\nReason: ${transcriptWarning}\n\nTip: Try updating yt-dlp ("yt-dlp -U" in terminal), or upload a cookies.txt file in the import dialog's Advanced Options.`);
@@ -1901,6 +1918,195 @@ function App() {
       alert(`Import failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
     } finally {
       setStatus(ProcessingStatus.IDLE);
+    }
+  };
+
+  // Helper: Fetch and process YouTube transcript
+  const fetchYoutubeTranscript = async (url: string): Promise<{ events: AnalysisEvent[]; title: string; warning?: string }> => {
+    console.log('[Import] Fetching transcript...');
+    const transcriptRes = await fetch(`/api/transcript?url=${encodeURIComponent(url)}&_t=${Date.now()}`);
+    const transcriptData = await transcriptRes.json();
+
+    if (transcriptData.error) {
+      return { events: [], title: "YouTube Video", warning: transcriptData.error };
+    }
+
+    const videoTitle = transcriptData.title || "YouTube Video";
+    const events: AnalysisEvent[] = [];
+    let warning: string | undefined;
+
+    if (transcriptData.segments && transcriptData.segments.length > 0) {
+      transcriptData.segments.forEach((seg: any) => {
+        let text = seg.text || "";
+        text = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!text) return;
+
+        const words = text.split(/\s+/);
+        const segDurationMs = Math.abs(Number(seg.duration));
+        const segStartMs = Number(seg.start);
+
+        if (words.length > 1) {
+          const durationPerWord = segDurationMs / words.length;
+          words.forEach((w: string, i: number) => {
+            events.push({ type: 'dialogue', startTime: segStartMs + (i * durationPerWord), endTime: segStartMs + ((i + 1) * durationPerWord), label: 'speech', details: w });
+          });
+        } else {
+          events.push({ type: 'dialogue', startTime: segStartMs, endTime: segStartMs + segDurationMs, label: 'speech', details: text });
+        }
+      });
+    } else {
+      warning = 'No caption segments found for this video.';
+    }
+
+    // Post-Process: Combine rapid/short words into readable "Slides"
+    const processedEvents: AnalysisEvent[] = [];
+    if (events.length > 0) {
+      let buffer: AnalysisEvent[] = [events[0]];
+      for (let i = 1; i < events.length; i++) {
+        const current = events[i];
+        const prev = buffer[buffer.length - 1];
+        const isContiguous = (current.startTime - prev.endTime) < 0.1;
+        const bufferDuration = prev.endTime - buffer[0].startTime;
+        const combinedDuration = current.endTime - buffer[0].startTime;
+        const wordCount = buffer.length;
+
+        const isDuplicate = current.details.trim().toLowerCase() === prev.details.trim().toLowerCase();
+        const isOverlap = current.startTime < prev.endTime;
+        if (isDuplicate && isOverlap) { prev.endTime = Math.max(prev.endTime, current.endTime); continue; }
+
+        if (isContiguous && (bufferDuration < 0.5 || wordCount < 3) && combinedDuration < 1.2) {
+          buffer.push(current);
+        } else {
+          processedEvents.push({ type: 'dialogue', startTime: buffer[0].startTime, endTime: buffer[buffer.length - 1].endTime, label: 'speech', details: buffer.map(e => e.details).join(' ') });
+          buffer = [current];
+        }
+      }
+      if (buffer.length > 0) {
+        processedEvents.push({ type: 'dialogue', startTime: buffer[0].startTime, endTime: buffer[buffer.length - 1].endTime, label: 'speech', details: buffer.map(e => e.details).join(' ') });
+      }
+    }
+
+    return { events: processedEvents, title: videoTitle, warning };
+  };
+
+  // Transcribe media with AssemblyAI (SSE progress)
+  const handleTranscribeWithAssemblyAI = async (mediaId: string) => {
+    const item = project.library.find(m => m.id === mediaId);
+    if (!item) return;
+
+    // Update job status
+    setTranscriptionJobs(prev => {
+      const next = new Map(prev);
+      next.set(mediaId, { status: 'starting', mediaId });
+      return next;
+    });
+
+    try {
+      let response: Response;
+
+      if (item.youtubeVideoId) {
+        // YouTube video — use locally cached file via videoId
+        const formData = new FormData();
+        formData.append('videoId', item.youtubeVideoId);
+        response = await fetch('/api/transcribe', { method: 'POST', body: formData });
+      } else {
+        // Local file upload — send the file itself
+        const formData = new FormData();
+        formData.append('file', item.file);
+        response = await fetch('/api/transcribe', { method: 'POST', body: formData });
+      }
+
+      if (!response.ok && !response.headers.get('content-type')?.includes('text/event-stream')) {
+        const err = await response.json();
+        throw new Error(err.error || 'Transcription request failed');
+      }
+
+      // Read SSE stream
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      if (!reader) throw new Error('No response stream');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+
+            // Update job progress
+            setTranscriptionJobs(prev => {
+              const next = new Map(prev);
+              next.set(mediaId, { status: data.status, progress: data.detail, mediaId });
+              return next;
+            });
+
+            if (data.status === 'completed' && data.events) {
+              // Hot-swap transcript events on the MediaItem
+              setProject(prev => ({
+                ...prev,
+                library: prev.library.map(m =>
+                  m.id === mediaId
+                    ? {
+                      ...m,
+                      transcriptSource: 'assemblyai' as const,
+                      analysis: {
+                        summary: `Transcribed with AssemblyAI (${data.wordCount} words)`,
+                        events: data.events,
+                        generatedAt: new Date(),
+                      },
+                    }
+                    : m
+                ),
+              }));
+
+              // Clean up job after a delay
+              setTimeout(() => {
+                setTranscriptionJobs(prev => {
+                  const next = new Map(prev);
+                  next.delete(mediaId);
+                  return next;
+                });
+              }, 3000);
+            }
+
+            if (data.status === 'error') {
+              throw new Error(data.detail || 'Transcription failed');
+            }
+          } catch (parseErr) {
+            if (parseErr instanceof Error && parseErr.message !== 'Transcription failed' && !parseErr.message.startsWith('AssemblyAI')) {
+              console.warn('[Transcribe] SSE parse error:', parseErr);
+            } else {
+              throw parseErr;
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Transcribe] Error:', err);
+      alert(`Transcription failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+
+      setTranscriptionJobs(prev => {
+        const next = new Map(prev);
+        next.set(mediaId, { status: 'error', progress: err instanceof Error ? err.message : 'Unknown error', mediaId });
+        return next;
+      });
+
+      // Clean up error state after a delay
+      setTimeout(() => {
+        setTranscriptionJobs(prev => {
+          const next = new Map(prev);
+          next.delete(mediaId);
+          return next;
+        });
+      }, 5000);
     }
   };
 
@@ -5736,6 +5942,9 @@ function App() {
                       removedWords={project.removedWords}
                       onRemoveWords={(words) => handleRemoveTranscriptWords(words)}
                       onRestoreWord={handleRestoreTranscriptWord}
+                      transcriptSource={transcriptMedia?.transcriptSource}
+                      transcriptionJob={transcriptMedia ? transcriptionJobs.get(transcriptMedia.id) : undefined}
+                      onTranscribe={transcriptMedia ? () => handleTranscribeWithAssemblyAI(transcriptMedia.id) : undefined}
                     />
                   );
                 })()}
