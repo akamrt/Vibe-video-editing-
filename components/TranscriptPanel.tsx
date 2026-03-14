@@ -44,8 +44,22 @@ const TranscriptPanel: React.FC<TranscriptPanelProps> = ({
     const dialogueEvents = useMemo(() => analysis?.events?.filter(e => e.type === 'dialogue') || [], [analysis]);
 
     // Pre-parse words so we can render them individually
+    // When AssemblyAI wordTimings are available, use real per-word timestamps
+    // Otherwise fall back to character-proportion estimation (YouTube/Gemini transcripts)
     const wordsByEvent = useMemo(() => {
         return dialogueEvents.map((event, globalIndex) => {
+            // Use real wordTimings from AssemblyAI when available
+            if (event.wordTimings && event.wordTimings.length > 0) {
+                return event.wordTimings.map((wt, wordIndex) => ({
+                    id: `${mediaId}-${globalIndex}-${wordIndex}`,
+                    text: wt.text,
+                    startTime: wt.start,
+                    endTime: wt.end,
+                    globalEventIndex: globalIndex
+                } as ParsedWord));
+            }
+
+            // Fallback: estimate word timings from character position
             const rawWords = event.details.split(/\s+/).filter(w => w.trim().length > 0);
             const totalChars = rawWords.join('').length;
             const duration = event.endTime - event.startTime;

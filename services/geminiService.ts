@@ -847,7 +847,7 @@ const deduplicateFillers = (existing: FillerDetection[], newOnes: FillerDetectio
  * but cannot detect non-verbal hesitations that weren't transcribed.
  */
 export const detectFillersFromTranscript = async (
-  transcript: Array<{ startTime: number; endTime: number; text: string }>,
+  transcript: Array<{ startTime: number; endTime: number; text: string; wordTimings?: Array<{ text: string; start: number; end: number; confidence: number }> }>,
   onProgress?: (msg: string) => void
 ): Promise<FillerDetection[]> => {
   if (transcript.length === 0) return [];
@@ -856,9 +856,30 @@ export const detectFillersFromTranscript = async (
 
   onProgress?.('Analyzing transcript for filler words...');
 
-  const lines = transcript
-    .map(e => `[${e.startTime.toFixed(2)} - ${e.endTime.toFixed(2)}] ${e.text}`)
-    .join('\n');
+  // When per-word timestamps are available (AssemblyAI), include them for precise filler boundaries
+  const hasWordTimings = transcript.some(e => e.wordTimings && e.wordTimings.length > 0);
+
+  let lines: string;
+  let timingInstructions: string;
+
+  if (hasWordTimings) {
+    // Per-word timestamps: AI can return exact boundaries
+    lines = transcript.map(e => {
+      if (e.wordTimings && e.wordTimings.length > 0) {
+        return e.wordTimings.map(w => `[${w.start.toFixed(2)}-${w.end.toFixed(2)}] ${w.text}`).join(' ');
+      }
+      return `[${e.startTime.toFixed(2)} - ${e.endTime.toFixed(2)}] ${e.text}`;
+    }).join('\n');
+    timingInstructions = `- Each word has EXACT timestamps [start-end]. Use those exact timestamps for filler boundaries.
+- For multi-word fillers like "you know", combine the start of the first word and end of the last word.`;
+  } else {
+    // Segment-level timestamps: AI must estimate within segment
+    lines = transcript
+      .map(e => `[${e.startTime.toFixed(2)} - ${e.endTime.toFixed(2)}] ${e.text}`)
+      .join('\n');
+    timingInstructions = `- Use the timestamps from the transcript lines to estimate filler positions.
+- If a filler word appears within a line, estimate its position proportionally within that line's time range.`;
+  }
 
   const prompt = `Task: Analyze this timestamped transcript and identify ALL filler words, repeated words, and stammering that should be removed for a clean edit.
 
@@ -875,8 +896,7 @@ WHAT TO DETECT:
    (e.g., "I was g- I was going to")
 
 IMPORTANT RULES:
-- Use the timestamps from the transcript lines to estimate filler positions.
-- If a filler word appears within a line, estimate its position proportionally within that line's time range.
+${timingInstructions}
 - Be PRECISE — only mark actual fillers, not intentional use of words.
 - Do NOT flag intentional repetition for emphasis or rhetorical use.
 
@@ -923,7 +943,7 @@ Constraints:
  * it to look for anything MISSED. Uses text only (~35x cheaper than video upload).
  */
 export const redetectFillersFromTranscript = async (
-  transcript: Array<{ startTime: number; endTime: number; text: string }>,
+  transcript: Array<{ startTime: number; endTime: number; text: string; wordTimings?: Array<{ text: string; start: number; end: number; confidence: number }> }>,
   existingDetections: FillerDetection[],
   onProgress?: (msg: string) => void
 ): Promise<FillerDetection[]> => {
@@ -933,9 +953,28 @@ export const redetectFillersFromTranscript = async (
 
   onProgress?.('Re-analyzing transcript for missed fillers...');
 
-  const lines = transcript
-    .map(e => `[${e.startTime.toFixed(2)} - ${e.endTime.toFixed(2)}] ${e.text}`)
-    .join('\n');
+  // Use per-word timestamps when available (AssemblyAI)
+  const hasWordTimings = transcript.some(e => e.wordTimings && e.wordTimings.length > 0);
+
+  let lines: string;
+  let timingInstructions: string;
+
+  if (hasWordTimings) {
+    lines = transcript.map(e => {
+      if (e.wordTimings && e.wordTimings.length > 0) {
+        return e.wordTimings.map(w => `[${w.start.toFixed(2)}-${w.end.toFixed(2)}] ${w.text}`).join(' ');
+      }
+      return `[${e.startTime.toFixed(2)} - ${e.endTime.toFixed(2)}] ${e.text}`;
+    }).join('\n');
+    timingInstructions = `- Each word has EXACT timestamps [start-end]. Use those exact timestamps for filler boundaries.
+- For multi-word fillers, combine the start of the first word and end of the last word.`;
+  } else {
+    lines = transcript
+      .map(e => `[${e.startTime.toFixed(2)} - ${e.endTime.toFixed(2)}] ${e.text}`)
+      .join('\n');
+    timingInstructions = `- Use the timestamps from the transcript lines to estimate filler positions.
+- If a filler word appears within a line, estimate its position proportionally within that line's time range.`;
+  }
 
   const existingList = existingDetections
     .map(d => `[${d.startTime.toFixed(2)} - ${d.endTime.toFixed(2)}] [${d.type.toUpperCase()}] ${d.text}`)
@@ -961,8 +1000,7 @@ WHAT TO DETECT (be MORE aggressive this pass — catch subtle fillers):
 4. FALSE STARTS: "I th- I think", "we should- we need to", etc.
 
 IMPORTANT RULES:
-- Use the timestamps from the transcript lines to estimate filler positions.
-- If a filler word appears within a line, estimate its position proportionally within that line's time range.
+${timingInstructions}
 - Do NOT re-report any detection from the ALREADY DETECTED list above.
 - Only report NEW fillers that were missed.
 

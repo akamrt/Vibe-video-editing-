@@ -2755,13 +2755,19 @@ function App() {
             const end = buffer[buffer.length - 1].start + buffer[buffer.length - 1].duration;
             const text = buffer.map(e => e.text).join(' ');
 
+            // Collect wordTimings from buffered segments (AssemblyAI data)
+            const collectedWordTimings = buffer
+              .flatMap(seg => seg.wordTimings || [])
+              .filter((wt: any) => wt && wt.text);
+
             analysisEvents.push({
               type: 'dialogue',
               startTime: start,
               endTime: end,
               label: 'speech',
               details: text,
-              wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end)
+              wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end),
+              ...(collectedWordTimings.length > 0 ? { wordTimings: collectedWordTimings } : {})
             });
 
             // Start new buffer
@@ -2774,13 +2780,19 @@ function App() {
           const start = buffer[0].start;
           const end = buffer[buffer.length - 1].start + buffer[buffer.length - 1].duration;
           const text = buffer.map(e => e.text).join(' ');
+
+          const collectedWordTimings = buffer
+            .flatMap(seg => seg.wordTimings || [])
+            .filter((wt: any) => wt && wt.text);
+
           analysisEvents.push({
             type: 'dialogue',
             startTime: start,
             endTime: end,
             label: 'speech',
             details: text,
-            wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end)
+            wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end),
+            ...(collectedWordTimings.length > 0 ? { wordTimings: collectedWordTimings } : {})
           });
         }
       }
@@ -2936,21 +2948,57 @@ function App() {
     // Save undo snapshot before modifying segments
     pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
 
-    // Pre-compute snapped split points (snap to nearest silence, ±150ms)
+    // Pre-compute snapped split points
+    // Prefer word boundaries (from AssemblyAI wordTimings) ±200ms, fall back to silence ±150ms
     const snappedPoints = new Map<string, number>();
     for (const seg of segmentsToSplit) {
       const rawSplitSource = seg.startTime + (time - seg.timelineStart);
       const media = project.library.find(m => m.id === seg.mediaId);
-      if (media?.file) {
-        try {
-          const audioBuf = await getAudioBuffer(seg.mediaId, media.file);
-          const result = findNearestSilence(audioBuf, rawSplitSource, 0.15);
-          snappedPoints.set(seg.id, result.time);
-        } catch {
+
+      // Try word-boundary snap first (when wordTimings available)
+      let wordBoundarySnapped = false;
+      if (media?.analysis?.events) {
+        const allWordTimings = media.analysis.events
+          .filter(e => e.type === 'dialogue' && e.wordTimings?.length)
+          .flatMap(e => e.wordTimings!);
+
+        if (allWordTimings.length > 1) {
+          // Find the nearest gap between consecutive words within ±200ms
+          let bestGapTime = rawSplitSource;
+          let bestGapDist = 0.2; // max search radius
+
+          for (let i = 0; i < allWordTimings.length - 1; i++) {
+            const gapStart = allWordTimings[i].end;
+            const gapEnd = allWordTimings[i + 1].start;
+            const gapMid = (gapStart + gapEnd) / 2;
+            const dist = Math.abs(gapMid - rawSplitSource);
+
+            if (dist < bestGapDist && gapEnd > gapStart) {
+              bestGapDist = dist;
+              bestGapTime = gapMid;
+              wordBoundarySnapped = true;
+            }
+          }
+
+          if (wordBoundarySnapped) {
+            snappedPoints.set(seg.id, bestGapTime);
+          }
+        }
+      }
+
+      // Fall back to silence detection
+      if (!wordBoundarySnapped) {
+        if (media?.file) {
+          try {
+            const audioBuf = await getAudioBuffer(seg.mediaId, media.file);
+            const result = findNearestSilence(audioBuf, rawSplitSource, 0.15);
+            snappedPoints.set(seg.id, result.time);
+          } catch {
+            snappedPoints.set(seg.id, rawSplitSource);
+          }
+        } else {
           snappedPoints.set(seg.id, rawSplitSource);
         }
-      } else {
-        snappedPoints.set(seg.id, rawSplitSource);
       }
     }
 
@@ -4173,7 +4221,7 @@ function App() {
         if (dialogueEvents.length > 0) {
           setFillerProgress(`${prefix}Analyzing transcript for "${media.name}"...`);
           detections = await detectFillersFromTranscript(
-            dialogueEvents.map(e => ({ startTime: e.startTime, endTime: e.endTime, text: e.details })),
+            dialogueEvents.map(e => ({ startTime: e.startTime, endTime: e.endTime, text: e.details, wordTimings: e.wordTimings })),
             (msg) => setFillerProgress(`${prefix}${msg}`)
           );
         } else {
@@ -4239,7 +4287,7 @@ function App() {
 
         if (dialogueEvents.length > 0) {
           newDetections = await redetectFillersFromTranscript(
-            dialogueEvents.map(e => ({ startTime: e.startTime, endTime: e.endTime, text: e.details })),
+            dialogueEvents.map(e => ({ startTime: e.startTime, endTime: e.endTime, text: e.details, wordTimings: e.wordTimings })),
             existing,
             (msg) => setFillerProgress(`${prefix}${msg}`)
           );
@@ -4323,6 +4371,12 @@ function App() {
       // Process each media's fillers (descending so indices stay stable)
       for (const [mediaId, fillers] of fillersByMedia) {
         const audioBuf = audioBuffers.get(mediaId);
+        // Collect all wordTimings from this media's events for precise boundary lookup
+        const media = prev.library.find(m => m.id === mediaId);
+        const allWordTimings = media?.analysis?.events
+          ?.filter(e => e.type === 'dialogue' && e.wordTimings?.length)
+          .flatMap(e => e.wordTimings!) || [];
+
         const sortedDesc = [...fillers].sort((a, b) => b.startTime - a.startTime);
         for (const filler of sortedDesc) {
           let start = filler.startTime;
@@ -4334,7 +4388,19 @@ function App() {
             start = (start + end) / 2;
           }
 
-          // Snap cut points to silence boundaries
+          // When wordTimings are available, refine boundaries using exact word timestamps
+          if (allWordTimings.length > 0) {
+            // Find words that overlap the filler time range
+            const matchingWords = allWordTimings.filter(w =>
+              w.start >= start - 0.05 && w.end <= end + 0.05
+            );
+            if (matchingWords.length > 0) {
+              start = matchingWords[0].start;
+              end = matchingWords[matchingWords.length - 1].end;
+            }
+          }
+
+          // Snap cut points to silence boundaries for clean audio edges
           if (audioBuf) {
             const snapped = snapFillerRange(audioBuf, start, end);
             start = snapped.startTime;
