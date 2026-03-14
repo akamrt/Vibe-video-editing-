@@ -282,7 +282,7 @@ export class ContentDatabase {
         });
     }
 
-    private async deleteSegmentsByVideoId(videoId: string): Promise<void> {
+    async deleteSegmentsByVideoId(videoId: string): Promise<void> {
         const segments = await this.getSegmentsByVideoId(videoId);
         return new Promise((resolve, reject) => {
             if (segments.length === 0) {

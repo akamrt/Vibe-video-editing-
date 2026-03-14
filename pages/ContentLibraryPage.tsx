@@ -596,11 +596,12 @@ export const ContentLibraryPage: React.FC<{
                                 videoId,
                                 start: evt.startTime || 0,
                                 duration: (evt.endTime || 0) - (evt.startTime || 0),
-                                text: evt.text || '',
+                                text: evt.details || evt.text || '',
                                 wordTimings: evt.wordTimings || undefined,
                             }));
 
-                            // Replace segments in DB (addSegments uses put, so overwrite by matching IDs)
+                            // Clear old segments and replace with AssemblyAI ones
+                            await contentDB.deleteSegmentsByVideoId(videoId);
                             await contentDB.addSegments(newSegments);
                             await contentDB.updateVideo(videoId, { transcriptSource: 'assemblyai' });
 
@@ -889,23 +890,27 @@ export const ContentLibraryPage: React.FC<{
                                             </div>
                                             <div className="flex items-center gap-2">
                                                 <span className="text-xs text-gray-500">{selectedSegments.length} segments</span>
-                                                {hasAssemblyAIKey && !transcriptionJobs.has(selectedVideoId) && (
-                                                    <button
-                                                        onClick={() => {
-                                                            const v = videos.find(v => v.id === selectedVideoId);
-                                                            if (v) transcribeVideo(v.id, v.url);
-                                                        }}
-                                                        className="text-xs bg-indigo-600/80 hover:bg-indigo-500 px-2.5 py-1 rounded flex items-center gap-1"
-                                                        title="Transcribe with AssemblyAI for accurate word-level timestamps"
-                                                    >
-                                                        🎤 Transcribe
-                                                    </button>
-                                                )}
-                                                {transcriptionJobs.has(selectedVideoId) && (() => {
-                                                    const job = transcriptionJobs.get(selectedVideoId)!;
-                                                    if (job.status === 'completed') return <span className="text-xs text-green-400">Done!</span>;
-                                                    if (job.status === 'error') return <span className="text-xs text-red-400" title={job.detail}>Error</span>;
-                                                    return <span className="text-xs text-blue-400 animate-pulse">{job.detail || job.status}...</span>;
+                                                {(() => {
+                                                    const job = transcriptionJobs.get(selectedVideoId);
+                                                    const isRunning = job && job.status !== 'completed' && job.status !== 'error';
+                                                    return (
+                                                        <>
+                                                            {hasAssemblyAIKey && !isRunning && (
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const v = videos.find(v => v.id === selectedVideoId);
+                                                                        if (v) transcribeVideo(v.id, v.url);
+                                                                    }}
+                                                                    className="text-xs bg-indigo-600/80 hover:bg-indigo-500 px-2.5 py-1 rounded flex items-center gap-1"
+                                                                    title="Transcribe with AssemblyAI for accurate word-level timestamps"
+                                                                >
+                                                                    🎤 {job?.status === 'error' ? 'Retry' : 'Transcribe'}
+                                                                </button>
+                                                            )}
+                                                            {job && job.status === 'completed' && <span className="text-xs text-green-400">Done!</span>}
+                                                            {isRunning && <span className="text-xs text-blue-400 animate-pulse">{job.detail || job.status}...</span>}
+                                                        </>
+                                                    );
                                                 })()}
                                             </div>
                                         </div>

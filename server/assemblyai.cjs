@@ -12,16 +12,16 @@ async function uploadAudio(filePath, apiKey) {
     const fileSize = fs.statSync(filePath).size;
     console.log(`[AssemblyAI] Uploading ${path.basename(filePath)} (${(fileSize / 1024 / 1024).toFixed(1)}MB)...`);
 
-    const fileBuffer = fs.readFileSync(filePath);
+    const fileStream = fs.createReadStream(filePath);
 
     const response = await fetch(`${ASSEMBLYAI_BASE}/v2/upload`, {
         method: 'POST',
         headers: {
             authorization: apiKey,
             'content-type': 'application/octet-stream',
-            'transfer-encoding': 'chunked',
         },
-        body: fileBuffer,
+        body: fileStream,
+        duplex: 'half',
     });
 
     if (!response.ok) {
