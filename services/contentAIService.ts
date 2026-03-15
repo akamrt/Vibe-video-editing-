@@ -274,26 +274,10 @@ export async function buildShortPrompt(
     const segments = await contentDB.getSegmentsByVideoId(videoId);
     if (segments.length === 0) return { success: false, error: "No transcript found for this video" };
 
-    // Use word-level timings when available (AssemblyAI), otherwise segment-level
-    const hasWordTimings = segments.some(s => s.wordTimings && s.wordTimings.length > 0);
-    let transcriptWithTimestamps: string;
-
-    if (hasWordTimings) {
-        // Word-level format: each word has precise timing
-        transcriptWithTimestamps = segments.map(seg => {
-            if (seg.wordTimings && seg.wordTimings.length > 0) {
-                const words = seg.wordTimings.map(w =>
-                    `  ${w.text} [${w.start.toFixed(3)}-${w.end.toFixed(3)}]`
-                ).join('\n');
-                return `[${seg.start.toFixed(2)} - ${(seg.start + seg.duration).toFixed(2)}] ${seg.text}\n  WORD TIMINGS:\n${words}`;
-            }
-            return `[${seg.start.toFixed(2)} - ${(seg.start + seg.duration).toFixed(2)}] ${seg.text}`;
-        }).join('\n');
-    } else {
-        transcriptWithTimestamps = segments.map(seg =>
-            `[${seg.start.toFixed(2)} - ${(seg.start + seg.duration).toFixed(2)}] ${seg.text}`
-        ).join('\n');
-    }
+    // Segment-level timestamps only — word timings are not used in the prompt
+    const transcriptWithTimestamps = segments.map(seg =>
+        `[${seg.start.toFixed(2)} - ${(seg.start + seg.duration).toFixed(2)}] ${seg.text}`
+    ).join('\n');
 
     try {
         const response = await fetch('/api/ai/build-short-prompt', {

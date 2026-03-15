@@ -618,6 +618,25 @@ function parseTranscriptLines(transcript) {
     return parsed;
 }
 
+// Merge nearby segments into paragraph-level chunks (reduces prompt size for
+// AssemblyAI transcripts which produce many short utterance-level segments)
+function consolidateSegments(lines, maxGapSec = 1.0) {
+    // Filter out empty-text segments first
+    const nonEmpty = lines.filter(l => l.text.length > 0);
+    if (nonEmpty.length === 0) return [];
+    const merged = [{ start: nonEmpty[0].start, end: nonEmpty[0].end, text: nonEmpty[0].text }];
+    for (let i = 1; i < nonEmpty.length; i++) {
+        const prev = merged[merged.length - 1];
+        if (nonEmpty[i].start - prev.end <= maxGapSec) {
+            prev.end = nonEmpty[i].end;
+            prev.text += ' ' + nonEmpty[i].text;
+        } else {
+            merged.push({ start: nonEmpty[i].start, end: nonEmpty[i].end, text: nonEmpty[i].text });
+        }
+    }
+    return merged;
+}
+
 // Look up transcript text for a given time range
 function getTextForTimeRange(transcriptLines, startTime, endTime) {
     const overlapping = transcriptLines.filter(line =>
@@ -1144,9 +1163,12 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
             return res.status(400).json({ error: 'Missing transcript or videoTitle' });
         }
 
-        // Parse transcript and preserve raw per-line timestamps (karaoke-level precision)
+        // Parse transcript, then consolidate nearby segments into paragraph chunks
+        // (AssemblyAI produces many short utterance-level segments; this keeps the
+        // prompt compact while preserving timestamp precision at paragraph boundaries)
         const transcriptLines = parseTranscriptLines(transcript);
-        const rawTranscript = transcriptLines
+        const consolidated = consolidateSegments(transcriptLines);
+        const rawTranscript = consolidated
             .map(line => `[${line.start.toFixed(2)}s] ${line.text}`)
             .join('\n');
 
