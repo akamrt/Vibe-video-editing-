@@ -446,10 +446,12 @@ export async function importManualShort(
 
                 if (clip.startPhrase) {
                     const matched = matchPhraseToTimestamp(transcriptLines, clip.startPhrase, startTime, 'start');
+                    console.log(`[PhraseMatch] startPhrase="${clip.startPhrase}" approx=${startTime.toFixed(2)} → ${matched !== null ? matched.toFixed(2) : 'FAILED'}`);
                     if (matched !== null) { startTime = matched; phraseMatchedStart = true; }
                 }
                 if (clip.endPhrase) {
                     const matched = matchPhraseToTimestamp(transcriptLines, clip.endPhrase, endTime, 'end');
+                    console.log(`[PhraseMatch] endPhrase="${clip.endPhrase}" approx=${endTime.toFixed(2)} → ${matched !== null ? matched.toFixed(2) : 'FAILED'}`);
                     if (matched !== null) { endTime = matched; phraseMatchedEnd = true; }
                 }
 
@@ -575,7 +577,30 @@ function matchPhraseToTimestamp(
     );
     if (candidates.length === 0) return null;
 
-    const candidateWords = candidates.map(l => normalizeWord(l.text));
+    // Explode multi-word segments into individual words with interpolated timestamps.
+    // YouTube transcripts have multi-word chunks like "but jesus did" as one segment,
+    // while AssemblyAI has one word per segment. This handles both uniformly.
+    type WordEntry = { word: string; start: number; end: number };
+    const explodedWords: WordEntry[] = [];
+    for (const seg of candidates) {
+        const words = seg.text.split(/\s+/).filter(w => w.length > 0);
+        if (words.length <= 1) {
+            explodedWords.push({ word: normalizeWord(seg.text), start: seg.start, end: seg.end });
+        } else {
+            const segDuration = seg.end - seg.start;
+            const wordDur = segDuration / words.length;
+            for (let wi = 0; wi < words.length; wi++) {
+                explodedWords.push({
+                    word: normalizeWord(words[wi]),
+                    start: seg.start + wi * wordDur,
+                    end: seg.start + (wi + 1) * wordDur
+                });
+            }
+        }
+    }
+
+    const candidateWords = explodedWords.map(e => e.word);
+    console.log(`[PhraseMatch] Looking for [${phraseWords.join(', ')}] in ${explodedWords.length} words (from ${candidates.length} segments) near ${approxTime.toFixed(1)}s. Sample: [${candidateWords.slice(0, 25).join(', ')}]`);
 
     // Exact sequence match
     for (let i = 0; i <= candidateWords.length - phraseWords.length; i++) {
@@ -584,9 +609,11 @@ function matchPhraseToTimestamp(
             if (candidateWords[i + j] !== phraseWords[j]) { match = false; break; }
         }
         if (match) {
-            return mode === 'start'
-                ? candidates[i].start
-                : candidates[i + phraseWords.length - 1].end;
+            const result = mode === 'start'
+                ? explodedWords[i].start
+                : explodedWords[i + phraseWords.length - 1].end;
+            console.log(`[PhraseMatch] ✓ Exact match at word index ${i}: "${explodedWords.slice(i, i + phraseWords.length).map(e => e.word).join(' ')}" → ${result.toFixed(2)}s`);
+            return result;
         }
     }
 
@@ -602,11 +629,14 @@ function matchPhraseToTimestamp(
     }
 
     if (bestScore >= 0.6 && bestIdx >= 0) {
-        return mode === 'start'
-            ? candidates[bestIdx].start
-            : candidates[bestIdx + phraseWords.length - 1].end;
+        const result = mode === 'start'
+            ? explodedWords[bestIdx].start
+            : explodedWords[bestIdx + phraseWords.length - 1].end;
+        console.log(`[PhraseMatch] ~ Fuzzy match (${(bestScore * 100).toFixed(0)}%) at word index ${bestIdx}: "${explodedWords.slice(bestIdx, bestIdx + phraseWords.length).map(e => e.word).join(' ')}" → ${result.toFixed(2)}s`);
+        return result;
     }
 
+    console.log(`[PhraseMatch] ✗ No match found (best fuzzy: ${(bestScore * 100).toFixed(0)}%)`);
     return null;
 }
 
