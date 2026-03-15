@@ -59,7 +59,8 @@ async function runYtDlpWithFallback(cmdBuilder, execOptions) {
                 if (browserStderr.includes('no suitable') || browserStderr.includes('could not find') ||
                     browserStderr.includes('not available') || browserStderr.includes('not found') ||
                     browserStderr.includes('no cookies') || browserStderr.includes('permission') ||
-                    browserStderr.includes('not installed') || browserStderr.includes('unsupported')) {
+                    browserStderr.includes('not installed') || browserStderr.includes('unsupported') ||
+                    browserStderr.includes('could not copy')) {
                     console.log(`Browser ${browser} not available, trying next...`);
                     continue;
                 }
