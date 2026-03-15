@@ -2116,8 +2116,8 @@ function App() {
     const isAudio = !!item.isAudioOnly;
 
     // For audio-only clips: always place on a brand-new layer above all existing audio tracks.
-    // Each audio import gets its own dedicated track (A2, A3, A4…) so they never stack on A1
-    // or collide with existing audio. For video clips, find the first available track as before.
+    // For video clips: always place on a new track above all existing video tracks so existing
+    // layers keep their numbers (V1 stays V1, new clip becomes V2, etc.).
     let targetTrack = 0;
     if (isAudio) {
       const existingAudioTracks = project.segments
@@ -2125,17 +2125,10 @@ function App() {
         .map(s => s.track);
       targetTrack = existingAudioTracks.length > 0 ? Math.max(...existingAudioTracks) + 1 : 1;
     } else {
-      while (true) {
-        const collision = project.segments.some(s =>
-          s.track === targetTrack &&
-          s.type !== 'audio' &&
-          !(s.timelineStart + (s.endTime - s.startTime) <= insertionTime + 0.01 ||
-            s.timelineStart >= insertionTime + duration - 0.01)
-        );
-        if (!collision) break;
-        targetTrack++;
-        if (targetTrack > 10) break;
-      }
+      const existingVideoTracks = project.segments
+        .filter(s => s.type !== 'audio')
+        .map(s => s.track);
+      targetTrack = existingVideoTracks.length > 0 ? Math.max(...existingVideoTracks) + 1 : 0;
     }
 
     const newSeg: Segment = {
@@ -2836,7 +2829,6 @@ function App() {
       // startTime/endTime = position in SOURCE VIDEO (for playback)
       // timelineStart = position on TIMELINE (for display)
       const clipCount = snappedShortSegments.length;
-      const XFADE_DURATION = 0.8; // Crossfade duration (must match transitionIn.duration below)
       const FADE_DURATION = 1.0;  // Fade-from/to-black duration
       let timelinePosition = 0;
       const newSegments: Segment[] = snappedShortSegments.map((clipSeg, index) => {
@@ -2845,17 +2837,13 @@ function App() {
         const transitionIn: Transition | undefined =
           index === 0
             ? { type: 'FADE' as TransitionType, duration: FADE_DURATION, easing: 'easeOut' }       // First clip: fade from black
-            : { type: 'CROSSFADE' as TransitionType, duration: XFADE_DURATION, easing: 'easeInOut' }; // Middle clips: crossfade
+            : undefined;
         const transitionOut: Transition | undefined =
           index === clipCount - 1
             ? { type: 'FADE' as TransitionType, duration: FADE_DURATION, easing: 'easeIn' }    // Last clip: fade to black
-            : undefined; // Crossfade is handled by the next clip's transitionIn
+            : undefined;
 
-        // For crossfade clips: start this clip XFADE_DURATION before the previous clip ends,
-        // creating a real timeline overlap so the cross-transition renders correctly in both
-        // the viewport and the export.
-        const xfadeOffset = (index > 0) ? XFADE_DURATION : 0;
-        timelinePosition -= xfadeOffset; // Pull start back to overlap with previous clip
+        // Clips butt up against each other with no overlap
 
         const segment: Segment = {
           id: Math.random().toString(36).substr(2, 9),
