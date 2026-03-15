@@ -1630,7 +1630,9 @@ function App() {
 
           if (shouldLog) {
             if (subtitle) {
-              console.log(`[Export] Subtitle found: "${subtitle.details.slice(0, 40)}..." frame=${Math.round((mediaTime - subtitle.startTime) * settings.fps)}`);
+              const subTemplate = subtitle.templateOverride || projectRef.current.activeSubtitleTemplate;
+              const kwAnim = subtitle.keywordAnimation || subTemplate?.keywordAnimation || projectRef.current.activeKeywordAnimation || null;
+              console.log(`[Export] Subtitle: "${subtitle.details.slice(0, 50)}" | template=${subTemplate?.name || 'NONE'} | anim=${subTemplate?.animation?.effects?.length || 0} effects (scope=${subTemplate?.animation?.scope || 'N/A'}) | kwAnim=${kwAnim ? kwAnim.effects.length + ' effects' : 'NONE'} | wordEmphases=${subtitle.wordEmphases?.filter(w => w.enabled).length || 0} | frame=${Math.round((mediaTime - subtitle.startTime) * settings.fps)}`);
             } else {
               console.log(`[Export] No subtitle at mediaTime=${mediaTime.toFixed(3)}, events=${media.analysis.events.filter(e => e.type === 'dialogue').length}`);
             }
@@ -1657,10 +1659,6 @@ function App() {
             const sourceTime = activeSeg.startTime + clipTime;
             const localFrame = Math.round((sourceTime - subtitle.startTime) * settings.fps);
             const subAnim = subTemplate?.animation || null;
-
-            if (shouldLog && subAnim) {
-              console.log(`[Export] Animation: "${subTemplate?.name}", effects=${subAnim.effects.length}, localFrame=${localFrame}, duration=${subAnim.duration}s`);
-            }
 
             // Resolve keyword animation (same cascade as viewport: per-event → template → global)
             const kwAnim = subtitle.keywordAnimation || subTemplate?.keywordAnimation || projectRef.current.activeKeywordAnimation || null;

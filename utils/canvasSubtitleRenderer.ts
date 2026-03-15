@@ -109,6 +109,28 @@ function toCompositeOp(blendMode?: string): GlobalCompositeOperation {
     return validOps[blendMode] || 'source-over';
 }
 
+// ─── Template Style Merge ─────────────────────────────────────────────────────
+
+/**
+ * Merges template CSS properties as fallback values for the SubtitleStyle.
+ * Mirrors the viewport logic: `{ ...templateStyleNoSize, ...styles.text }`
+ * Template fontSize is excluded (viewport strips it too).
+ */
+function mergeTemplateStyle(style: SubtitleStyle, tplStyle: Record<string, any>): SubtitleStyle {
+    const merged = { ...style };
+    // Font family: use template if base doesn't have one
+    if (!merged.fontFamily && tplStyle.fontFamily) merged.fontFamily = tplStyle.fontFamily;
+    // Color: use template if base doesn't have one
+    if (!merged.color && tplStyle.color) merged.color = tplStyle.color;
+    // Bold: template fontWeight as fallback
+    if (merged.bold === undefined && tplStyle.fontWeight) merged.bold = tplStyle.fontWeight === 'bold';
+    // Italic: template fontStyle as fallback
+    if (merged.italic === undefined && tplStyle.fontStyle) merged.italic = tplStyle.fontStyle === 'italic';
+    // Text align: use template as fallback
+    if (!merged.textAlign && tplStyle.textAlign) merged.textAlign = tplStyle.textAlign;
+    return merged;
+}
+
 // ─── Text Transform Helper (canvas doesn't support CSS textTransform) ────────
 
 function applyTextTransform(text: string, transform?: string): string {
@@ -150,10 +172,74 @@ function computeElementAnimations(
         }
     }
 
-    // For non-word scopes: always render as individual words so keywords
-    // get per-word coloring (matching viewport AnimatedText.renderContent).
-    // The ANIMATION transforms still apply to the whole line/element, but
-    // each word within it can have its own color and keyword animation.
+    // For 'line' scope: split on \n, each line gets its own stagger delay
+    // This matches AnimatedText which renders each line as a separate flex item
+    if (animation.scope === 'line') {
+        const lines = text.split('\n');
+        const result: ElementAnimValues[] = [];
+        let globalWordIdx = 0;
+
+        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+            // Each line has its own stagger delay
+            const delaySec = lineIdx * (animation.stagger ?? 0);
+            const delayFrames = delaySec * fps;
+            const elmLocalFrame = frame - delayFrames;
+
+            let baseOpacity = 1, baseScale = 1, baseTx = 0, baseTy = 0;
+            let baseRotate = 0, baseBlur = 0, baseLs = 0;
+
+            for (const effect of animation.effects) {
+                const val = computeEffectValue(effect, elmLocalFrame, animation.duration, fps);
+                switch (effect.type) {
+                    case 'opacity': baseOpacity *= val; break;
+                    case 'scale': baseScale *= val; break;
+                    case 'translateX': baseTx += val; break;
+                    case 'translateY': baseTy += val; break;
+                    case 'rotate': baseRotate += val; break;
+                    case 'blur': baseBlur = Math.max(0, baseBlur + val); break;
+                    case 'letterSpacing': baseLs += val; break;
+                }
+            }
+            baseOpacity = Math.max(0, Math.min(1, baseOpacity));
+
+            // Split line into words for keyword coloring
+            const tokens = lines[lineIdx].split(/(\s+)/);
+            for (const token of tokens) {
+                if (/^\s+$/.test(token)) {
+                    result.push({
+                        text: token, opacity: baseOpacity, scaleVal: baseScale,
+                        translateX: baseTx, translateY: baseTy, rotate: baseRotate,
+                        blur: baseBlur, letterSpacing: baseLs,
+                        isKeyword: false, keywordColor: null,
+                    });
+                    continue;
+                }
+                const kwEntry = emphasisMap.get(globalWordIdx);
+                const isKw = !!kwEntry;
+                result.push({
+                    text: token, opacity: baseOpacity, scaleVal: baseScale,
+                    translateX: baseTx, translateY: baseTy, rotate: baseRotate,
+                    blur: baseBlur, letterSpacing: baseLs,
+                    isKeyword: isKw,
+                    keywordColor: isKw ? (kwEntry!.color || '#FFD700') : null,
+                });
+                globalWordIdx++;
+            }
+
+            // Add a newline marker between lines (except after last)
+            if (lineIdx < lines.length - 1) {
+                result.push({
+                    text: '\n', opacity: 1, scaleVal: 1,
+                    translateX: 0, translateY: 0, rotate: 0,
+                    blur: 0, letterSpacing: 0,
+                    isKeyword: false, keywordColor: null,
+                });
+            }
+        }
+        return result;
+    }
+
+    // For 'element' scope: animate as a single block, split into words for keyword coloring
     if (animation.scope !== 'word' && animation.scope !== 'character') {
         // Compute the element-level animation (for the whole block)
         const delaySec = 0 * (animation.stagger ?? 0);
@@ -359,12 +445,18 @@ interface DrawSubtitleOptions {
  */
 export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     const {
-        ctx, text: rawText, style, animation,
+        ctx, text: rawText, style: rawStyle, templateStyle, animation,
         frame, fps, outputWidth, outputHeight,
         viewportSafeZoneHeight,
         totalTx, totalTy, totalScale, totalRotation,
         wordEmphases, keywordAnimation,
     } = opts;
+
+    // Merge templateStyle into the effective style (template is fallback, style wins)
+    // This mirrors the viewport logic: { ...templateStyleNoSize, ...styles.text }
+    const style = templateStyle
+        ? mergeTemplateStyle(rawStyle, templateStyle)
+        : rawStyle;
 
     // Apply text transform (canvas doesn't support CSS textTransform)
     const text = applyTextTransform(rawText, (style as any).textTransform);
@@ -407,7 +499,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
 
     // If no animation or empty effects, draw plain text (simple path)
     if (!animation || animation.effects.length === 0) {
-        drawPlainText(ctx, text, style, fontSize, scaleFactor, textPaddingV, textPaddingH);
+        drawPlainText(ctx, text, style, fontSize, scaleFactor, textPaddingV, textPaddingH, wordEmphases);
         ctx.restore();
         return;
     }
@@ -415,32 +507,59 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     // Compute per-element animation values
     const elements = computeElementAnimations(text, animation, frame, fps, wordEmphases, keywordAnimation);
 
-    // Measure all elements to compute total width for centering
+    // Check if we have multi-line content (line-scope or text with \n)
+    const hasNewlines = elements.some(el => el.text === '\n');
+
+    // Measure all elements (skip newline markers)
     const elementWidths = elements.map((el: ElementAnimValues) => {
+        if (el.text === '\n') return 0;
         return ctx.measureText(el.text).width;
     });
-    const totalWidth = elementWidths.reduce((sum: number, w: number) => sum + w, 0);
 
-    // Starting X position (centered by default)
-    let xOffset: number;
-    const align = style.textAlign || 'center';
-    if (align === 'left') {
-        // Left-aligned: start from left edge with 5% padding
-        xOffset = -(outputWidth * 0.45) + textPaddingH; // -45% of width from center + padding
-    } else if (align === 'right') {
-        // Right-aligned: end at right edge with 5% padding
-        xOffset = (outputWidth * 0.45) - totalWidth - textPaddingH;
+    // For multi-line: compute per-line widths and layout
+    const lineHeight = fontSize * 1.4;
+    let lines: { startIdx: number; endIdx: number; width: number }[] = [];
+    if (hasNewlines) {
+        let lineStart = 0;
+        let lineW = 0;
+        for (let i = 0; i < elements.length; i++) {
+            if (elements[i].text === '\n') {
+                lines.push({ startIdx: lineStart, endIdx: i, width: lineW });
+                lineStart = i + 1;
+                lineW = 0;
+            } else {
+                lineW += elementWidths[i];
+            }
+        }
+        // Last line
+        lines.push({ startIdx: lineStart, endIdx: elements.length, width: lineW });
     } else {
-        // Center-aligned
-        xOffset = -totalWidth / 2;
+        const totalWidth = elementWidths.reduce((sum: number, w: number) => sum + w, 0);
+        lines = [{ startIdx: 0, endIdx: elements.length, width: totalWidth }];
+    }
+
+    const totalWidth = Math.max(...lines.map(l => l.width));
+    const totalTextHeight = lines.length * lineHeight;
+    const lineYStart = lines.length > 1 ? -(totalTextHeight - lineHeight) / 2 : 0;
+
+    // Compute xOffset for each line based on alignment
+    const align = style.textAlign || 'center';
+    function computeLineXOffset(lineWidth: number): number {
+        if (align === 'left') {
+            return -(outputWidth * 0.45) + textPaddingH;
+        } else if (align === 'right') {
+            return (outputWidth * 0.45) - lineWidth - textPaddingH;
+        } else {
+            return -lineWidth / 2;
+        }
     }
 
     // Draw background behind the full text block
     if (style.backgroundType === 'box' || style.backgroundType === 'rounded') {
-        const bgX = xOffset - textPaddingH;
-        const bgY = -(fontSize * 1.2 + textPaddingV); // Account for line height ~1.2 + padding top
+        const bgX = -(totalWidth / 2) - textPaddingH;
+        const bgY = lineYStart - (fontSize * 1.2 + textPaddingV); // Account for line height ~1.2 + padding top
         const bgW = totalWidth + textPaddingH * 2;
-        const bgH = fontSize * 1.4 + textPaddingV * 2; // line-height 1.4 like viewport
+        const bgH = totalTextHeight + textPaddingV * 2;
 
         const bgOpacity = style.backgroundOpacity ?? 0.8;
         const bgColor = style.backgroundColor || '#000000';
@@ -540,9 +659,24 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     }
 
     // Draw each element with its animation applied
+    // Track current line for multi-line vertical positioning
+    let currentLineIdx = 0;
+    let xOffset = computeLineXOffset(lines[0].width);
+    let yOffset = lineYStart;
+
     for (let i = 0; i < elements.length; i++) {
         const el = elements[i];
         const elWidth = elementWidths[i];
+
+        // Handle newline markers: move to next line
+        if (el.text === '\n') {
+            currentLineIdx++;
+            if (currentLineIdx < lines.length) {
+                xOffset = computeLineXOffset(lines[currentLineIdx].width);
+                yOffset = lineYStart + currentLineIdx * lineHeight;
+            }
+            continue;
+        }
 
         if (el.opacity <= 0.01) {
             xOffset += elWidth;
@@ -552,7 +686,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
         ctx.save();
 
         // Move to this element's position (center of element)
-        ctx.translate(xOffset + elWidth / 2, 0);
+        ctx.translate(xOffset + elWidth / 2, yOffset);
 
         // Apply per-element animation transforms
         // AnimatedText uses raw px for translate values, scale to canvas
@@ -668,17 +802,34 @@ function drawPlainText(
     scaleFactor: number,
     textPaddingV: number,
     textPaddingH: number,
+    wordEmphases?: KeywordEmphasis[],
 ): void {
     ctx.textAlign = (style.textAlign as CanvasTextAlign) || 'center';
     ctx.textBaseline = 'alphabetic';
 
+    // Build keyword emphasis map for per-word coloring
+    const emphasisMap = new Map<number, KeywordEmphasis>();
+    if (wordEmphases) {
+        for (const kw of wordEmphases) {
+            if (kw.enabled) emphasisMap.set(kw.wordIndex, kw);
+        }
+    }
+
+    // Handle multi-line text: split on \n, draw each line with proper spacing
+    const lines = text.split('\n');
+    const lineHeight = fontSize * 1.4;
+    const totalTextHeight = lines.length * lineHeight;
+    // Offset to center all lines vertically around the baseline position (y=0)
+    const lineYStart = lines.length > 1 ? -(totalTextHeight - lineHeight) / 2 : 0;
+
     // Background
     if (style.backgroundType === 'box' || style.backgroundType === 'rounded') {
-        const metrics = ctx.measureText(text);
-        const w = metrics.width + textPaddingH * 2;
-        const h = fontSize * 1.4 + textPaddingV * 2;
+        // For multi-line, measure the widest line for background width
+        const maxLineWidth = Math.max(...lines.map(l => ctx.measureText(l).width));
+        const w = maxLineWidth + textPaddingH * 2;
+        const h = totalTextHeight + textPaddingV * 2;
         const bx = -(w / 2);
-        const by = -(fontSize * 1.2 + textPaddingV);
+        const by = lineYStart - (fontSize * 1.2 + textPaddingV);
 
         const bgOpacity = style.backgroundOpacity ?? 0.8;
         const bgColor = style.backgroundColor || '#000000';
@@ -779,7 +930,10 @@ function drawPlainText(
         ctx.strokeStyle = style.outlineColor || style.backgroundColor || '#000000';
         ctx.lineWidth = (style.outlineWidth || 2) * scaleFactor;
         ctx.lineJoin = 'round';
-        ctx.strokeText(text, 0, 0);
+        // Outline each line
+        for (let li = 0; li < lines.length; li++) {
+            ctx.strokeText(lines[li], 0, lineYStart + li * lineHeight);
+        }
     }
 
     // Text glow (separate blend mode)
@@ -791,9 +945,13 @@ function drawPlainText(
         ctx.shadowOffsetX = 0;
         ctx.shadowOffsetY = 0;
         ctx.fillStyle = style.color || '#ffffff';
-        ctx.fillText(text, 0, 0);
+        for (let li = 0; li < lines.length; li++) {
+            ctx.fillText(lines[li], 0, lineYStart + li * lineHeight);
+        }
         ctx.shadowBlur = (style.glowBlur * 1.5) * scaleFactor;
-        ctx.fillText(text, 0, 0);
+        for (let li = 0; li < lines.length; li++) {
+            ctx.fillText(lines[li], 0, lineYStart + li * lineHeight);
+        }
         ctx.restore();
     }
 
@@ -806,7 +964,9 @@ function drawPlainText(
         ctx.shadowOffsetX = (style.textShadowOffsetX || 0) * scaleFactor;
         ctx.shadowOffsetY = (style.textShadowOffsetY || 0) * scaleFactor;
         ctx.fillStyle = style.color || '#ffffff';
-        ctx.fillText(text, 0, 0);
+        for (let li = 0; li < lines.length; li++) {
+            ctx.fillText(lines[li], 0, lineYStart + li * lineHeight);
+        }
         ctx.restore();
     } else if (style.backgroundType !== 'box' && style.backgroundType !== 'rounded' && style.backgroundType !== 'outline' && style.backgroundType !== 'stripe') {
         // Drop shadow for plain text (no background)
@@ -818,40 +978,128 @@ function drawPlainText(
         ctx.shadowColor = 'transparent';
     }
 
-    // Text fill with blend mode
+    // Text fill with blend mode — with per-word keyword coloring
     ctx.save();
-    const plainTextOp = toCompositeOp(style.textBlendMode);
-    const plainGradStops = resolveGradientStops(style);
-    if (style.gradientType && style.gradientType !== 'none' && plainGradStops) {
-        ctx.globalCompositeOperation = toCompositeOp(style.gradientBlendMode) !== 'source-over'
-            ? toCompositeOp(style.gradientBlendMode) : plainTextOp;
-        const textWidth = ctx.measureText(text).width;
-        const hw = textWidth / 2;
-        const hh = fontSize / 2;
-        let gradient: CanvasGradient;
-        if (style.gradientType === 'radial') {
-            gradient = ctx.createRadialGradient(0, -hh, 0, 0, -hh, Math.max(hw, hh));
-        } else {
-            const angle = (style.gradientAngle || 0) * Math.PI / 180;
-            gradient = ctx.createLinearGradient(
-                Math.cos(angle + Math.PI) * hw,
-                -hh + Math.sin(angle + Math.PI) * hh,
-                Math.cos(angle) * hw,
-                -hh + Math.sin(angle) * hh
-            );
-        }
-        applyStopsToCanvasGradient(gradient, plainGradStops);
-        ctx.fillStyle = gradient;
-    } else {
-        ctx.globalCompositeOperation = plainTextOp;
-        ctx.fillStyle = style.color || '#ffffff';
-    }
-
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur = 0;
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 0;
 
-    ctx.fillText(text, 0, 0);
+    const plainTextOp = toCompositeOp(style.textBlendMode);
+    const plainGradStops = resolveGradientStops(style);
+    const hasGradient = style.gradientType && style.gradientType !== 'none' && plainGradStops;
+    const hasKeywords = emphasisMap.size > 0;
+
+    if (hasKeywords) {
+        // Per-word rendering for keyword coloring (matching viewport behavior)
+        ctx.textAlign = 'left';
+        let globalWordIdx = 0;
+
+        for (let li = 0; li < lines.length; li++) {
+            const lineY = lineYStart + li * lineHeight;
+            const tokens = lines[li].split(/(\s+)/);
+            const lineWidth = ctx.measureText(lines[li]).width;
+
+            // Calculate starting X for alignment
+            let xPos: number;
+            const align = style.textAlign || 'center';
+            if (align === 'left') {
+                xPos = -(lineWidth / 2);
+            } else if (align === 'right') {
+                xPos = lineWidth / 2 - lineWidth;
+            } else {
+                xPos = -(lineWidth / 2);
+            }
+
+            for (const token of tokens) {
+                const tokenWidth = ctx.measureText(token).width;
+                if (/^\s+$/.test(token)) {
+                    // Whitespace — just advance position
+                    xPos += tokenWidth;
+                    continue;
+                }
+
+                const kwEntry = emphasisMap.get(globalWordIdx);
+                if (kwEntry) {
+                    // Keyword: draw with keyword color
+                    ctx.globalCompositeOperation = plainTextOp;
+                    ctx.fillStyle = kwEntry.color || '#FFD700';
+                    ctx.fillText(token, xPos, lineY);
+
+                    // Underline (matching viewport)
+                    const underlineY = lineY + 2 * scaleFactor;
+                    ctx.strokeStyle = kwEntry.color || '#FFD700';
+                    ctx.lineWidth = 1 * scaleFactor;
+                    ctx.beginPath();
+                    ctx.moveTo(xPos, underlineY);
+                    ctx.lineTo(xPos + tokenWidth, underlineY);
+                    ctx.stroke();
+                } else if (hasGradient) {
+                    // Non-keyword with gradient
+                    const hw = tokenWidth / 2;
+                    const hh = fontSize / 2;
+                    const gradOp = toCompositeOp(style.gradientBlendMode);
+                    ctx.globalCompositeOperation = gradOp !== 'source-over' ? gradOp : plainTextOp;
+                    let gradient: CanvasGradient;
+                    if (style.gradientType === 'radial') {
+                        gradient = ctx.createRadialGradient(xPos + hw, lineY - hh, 0, xPos + hw, lineY - hh, Math.max(hw, hh));
+                    } else {
+                        const angle = (style.gradientAngle || 0) * Math.PI / 180;
+                        gradient = ctx.createLinearGradient(
+                            xPos + hw + Math.cos(angle + Math.PI) * hw,
+                            lineY - hh + Math.sin(angle + Math.PI) * hh,
+                            xPos + hw + Math.cos(angle) * hw,
+                            lineY - hh + Math.sin(angle) * hh
+                        );
+                    }
+                    applyStopsToCanvasGradient(gradient, plainGradStops!);
+                    ctx.fillStyle = gradient;
+                    ctx.fillText(token, xPos, lineY);
+                } else {
+                    // Non-keyword, no gradient
+                    ctx.globalCompositeOperation = plainTextOp;
+                    ctx.fillStyle = style.color || '#ffffff';
+                    ctx.fillText(token, xPos, lineY);
+                }
+
+                globalWordIdx++;
+                xPos += tokenWidth;
+            }
+        }
+    } else if (hasGradient) {
+        // No keywords, but has gradient — draw all lines with gradient
+        ctx.globalCompositeOperation = toCompositeOp(style.gradientBlendMode) !== 'source-over'
+            ? toCompositeOp(style.gradientBlendMode) : plainTextOp;
+        for (let li = 0; li < lines.length; li++) {
+            const lineText = lines[li];
+            const lineY = lineYStart + li * lineHeight;
+            const textWidth = ctx.measureText(lineText).width;
+            const hw = textWidth / 2;
+            const hh = fontSize / 2;
+            let gradient: CanvasGradient;
+            if (style.gradientType === 'radial') {
+                gradient = ctx.createRadialGradient(0, lineY - hh, 0, 0, lineY - hh, Math.max(hw, hh));
+            } else {
+                const angle = (style.gradientAngle || 0) * Math.PI / 180;
+                gradient = ctx.createLinearGradient(
+                    Math.cos(angle + Math.PI) * hw,
+                    lineY - hh + Math.sin(angle + Math.PI) * hh,
+                    Math.cos(angle) * hw,
+                    lineY - hh + Math.sin(angle) * hh
+                );
+            }
+            applyStopsToCanvasGradient(gradient, plainGradStops!);
+            ctx.fillStyle = gradient;
+            ctx.fillText(lineText, 0, lineY);
+        }
+    } else {
+        // Simple: no keywords, no gradient — just draw each line
+        ctx.globalCompositeOperation = plainTextOp;
+        ctx.fillStyle = style.color || '#ffffff';
+        for (let li = 0; li < lines.length; li++) {
+            ctx.fillText(lines[li], 0, lineYStart + li * lineHeight);
+        }
+    }
+
     ctx.restore();
 }
