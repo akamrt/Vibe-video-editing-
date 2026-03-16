@@ -21,7 +21,7 @@
 import { interpolate, Easing, spring } from 'remotion';
 import type { TextAnimation, AnimationEffect, EasingType, SubtitleStyle, KeywordEmphasis } from '../types';
 import { resolveGradientStops, applyStopsToCanvasGradient } from './gradientUtils';
-import { getActiveWordInfo, lerp, type WordTiming } from './wordHighlightUtils';
+import { getActiveWordInfo, lerp, easeOutCubic, lerpColor, type WordTiming } from './wordHighlightUtils';
 
 // ─── Easing Mapping (mirrors AnimatedText.tsx) ────────────────────────────────
 
@@ -549,6 +549,10 @@ function drawWordHighlightBox(
     eventStartTime: number,
     eventEndTime: number,
     sourceTime: number,
+    frame: number,
+    fps: number,
+    animStagger: number,
+    animDuration: number,
 ): void {
     const hlColor = style.wordHighlightColor ?? '#FFD700';
     const hlOpacity = style.wordHighlightOpacity ?? 0.85;
@@ -564,12 +568,39 @@ function drawWordHighlightBox(
     const glowColor = style.wordHighlightGlowColor;
     const glowBlur = (style.wordHighlightGlowBlur ?? 0) * scaleFactor;
 
+    // In-flight fields
+    const flightColorEnabled = !!style.wordHighlightFlightColorEnabled;
+    const flightColor = style.wordHighlightFlightColor ?? '#FFFFFF';
+    const flightColorOpacity = style.wordHighlightFlightColorOpacity ?? 1.0;
+    const flightGlowEnabled = !!style.wordHighlightFlightGlowEnabled;
+    const flightGlowColor = style.wordHighlightFlightGlowColor ?? hlColor;
+    const flightGlowBlurFlight = (style.wordHighlightFlightGlowBlur ?? 20) * scaleFactor;
+    const flightScaleEnabled = !!style.wordHighlightFlightScaleEnabled;
+    const flightScale = style.wordHighlightFlightScale ?? 1.25;
+
     const align = style.textAlign || 'center';
     const wordRects = computeWordCanvasRects(text, ctx, fontSize, lineHeight, align, outputWidth, textPaddingH);
     if (wordRects.length === 0) return;
 
     const info = getActiveWordInfo(wordTimings, eventStartTime, eventEndTime, text, sourceTime);
     const activeIdx = Math.max(0, Math.min(info.activeIndex, wordRects.length - 1));
+
+    // Compute in-flight progress for the active word
+    const wordStartFrame = activeIdx * animStagger * fps;
+    const wordEndFrame = wordStartFrame + animDuration * fps;
+    const rawProgress = (wordEndFrame > wordStartFrame)
+        ? Math.max(0, Math.min(1, (frame - wordStartFrame) / (wordEndFrame - wordStartFrame)))
+        : 1;
+    const isInFlight = rawProgress < 1;
+    const easedP = easeOutCubic(rawProgress);
+
+    // Derive current values
+    const currentHlColor = (flightColorEnabled && isInFlight) ? lerpColor(flightColor, hlColor, easedP) : hlColor;
+    const currentHlOpacity = (flightColorEnabled && isInFlight) ? lerp(flightColorOpacity, hlOpacity, easedP) : hlOpacity;
+    const currentGlowBlur = (flightGlowEnabled && isInFlight) ? lerp(flightGlowBlurFlight, glowBlur, easedP) : glowBlur;
+    const currentGlowColor = (flightGlowEnabled && isInFlight) ? flightGlowColor : (style.wordHighlightGlowColor ?? null);
+    const currentScale = (flightScaleEnabled && isInFlight) ? lerp(hlScale * flightScale, hlScale, easedP) : hlScale;
+
     const activeRect = wordRects[activeIdx];
 
     // Interpolate toward next word during gap between words
@@ -585,31 +616,39 @@ function drawWordHighlightBox(
         };
     }
 
-    // Apply padding and scale
+    // Apply padding, scale, and manual offsets
+    const hlOffsetX = (style.wordHighlightOffsetX ?? 0) * scaleFactor;
+    const hlOffsetY = (style.wordHighlightOffsetY ?? 0) * scaleFactor;
     const baseW = finalRect.width + 2 * paddingH;
     const baseH = finalRect.height + 2 * paddingV;
-    const scaledW = baseW * hlScale;
-    const scaledH = baseH * hlScale;
-    const bx = finalRect.x - paddingH - (scaledW - baseW) / 2;
-    const by = finalRect.y - paddingV - (scaledH - baseH) / 2;
+    const scaledW = baseW * currentScale;
+    const scaledH = baseH * currentScale;
+    const bx = finalRect.x - paddingH - (scaledW - baseW) / 2 + hlOffsetX;
+    const by = finalRect.y - paddingV - (scaledH - baseH) / 2 + hlOffsetY;
 
-    // Parse hex color to RGBA
-    const clean = (hlColor.startsWith('#') ? hlColor.slice(1) : hlColor);
-    const r = parseInt(clean.slice(0, 2), 16) || 0;
-    const g = parseInt(clean.slice(2, 4), 16) || 0;
-    const b = parseInt(clean.slice(4, 6), 16) || 0;
+    // Parse current color to RGBA (handles both hex and rgb() from lerpColor)
+    let r = 0, g = 0, b = 0;
+    if (currentHlColor.startsWith('rgb(')) {
+        const m = currentHlColor.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+        if (m) { r = parseInt(m[1]); g = parseInt(m[2]); b = parseInt(m[3]); }
+    } else {
+        const clean = (currentHlColor.startsWith('#') ? currentHlColor.slice(1) : currentHlColor);
+        r = parseInt(clean.slice(0, 2), 16) || 0;
+        g = parseInt(clean.slice(2, 4), 16) || 0;
+        b = parseInt(clean.slice(4, 6), 16) || 0;
+    }
 
     ctx.save();
     ctx.globalCompositeOperation = toCompositeOp(hlBlendMode);
 
     // Glow
-    if (glowColor && glowBlur > 0) {
+    if (currentGlowColor && currentGlowBlur > 0) {
         ctx.save();
-        ctx.shadowColor = glowColor;
-        ctx.shadowBlur = glowBlur;
+        ctx.shadowColor = currentGlowColor;
+        ctx.shadowBlur = currentGlowBlur;
         ctx.shadowOffsetX = 0;
         ctx.shadowOffsetY = 0;
-        ctx.fillStyle = `rgba(${r},${g},${b},${hlOpacity})`;
+        ctx.fillStyle = `rgba(${r},${g},${b},${currentHlOpacity})`;
         if (ctx.roundRect && hlRadius > 0) {
             ctx.beginPath();
             ctx.roundRect(bx, by, scaledW, scaledH, hlRadius);
@@ -617,7 +656,7 @@ function drawWordHighlightBox(
         } else {
             ctx.fillRect(bx, by, scaledW, scaledH);
         }
-        ctx.shadowBlur = glowBlur * 1.5;
+        ctx.shadowBlur = currentGlowBlur * 1.5;
         if (ctx.roundRect && hlRadius > 0) {
             ctx.beginPath();
             ctx.roundRect(bx, by, scaledW, scaledH, hlRadius);
@@ -641,7 +680,7 @@ function drawWordHighlightBox(
         ctx.shadowOffsetY = 0;
     }
 
-    ctx.fillStyle = `rgba(${r},${g},${b},${hlOpacity})`;
+    ctx.fillStyle = `rgba(${r},${g},${b},${currentHlOpacity})`;
     if (ctx.roundRect && hlRadius > 0) {
         ctx.beginPath();
         ctx.roundRect(bx, by, scaledW, scaledH, hlRadius);
@@ -717,7 +756,8 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     // If no animation or empty effects AND no keyword animation, draw plain text (simple path)
     if ((!animation || animation.effects.length === 0) && !keywordAnimation) {
         drawPlainText(ctx, text, style, fontSize, scaleFactor, textPaddingV, textPaddingH, outputWidth, wordEmphases,
-            wordTimings, sourceTime, eventStartTime, eventEndTime);
+            wordTimings, sourceTime, eventStartTime, eventEndTime,
+            frame, fps, animation?.stagger ?? 0, animation?.duration ?? 0);
         ctx.restore();
         return;
     }
@@ -888,6 +928,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
             ctx, text, style, scaleFactor, fontSize, lineHeight,
             textPaddingH, outputWidth,
             wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, sourceTime,
+            frame, fps, effectiveAnimation.stagger, effectiveAnimation.duration,
         );
     }
 
@@ -1065,6 +1106,10 @@ function drawPlainText(
     sourceTime?: number,
     eventStartTime?: number,
     eventEndTime?: number,
+    frame?: number,
+    fps?: number,
+    animStagger?: number,
+    animDuration?: number,
 ): void {
     ctx.textAlign = (style.textAlign as CanvasTextAlign) || 'center';
     ctx.textBaseline = 'alphabetic';
@@ -1204,6 +1249,7 @@ function drawPlainText(
             ctx, text, style, scaleFactor, fontSize, lineHeight,
             textPaddingH, outputWidth,
             wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, sourceTime,
+            frame ?? 0, fps ?? 30, animStagger ?? 0, animDuration ?? 0,
         );
     }
 
