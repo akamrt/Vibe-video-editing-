@@ -2,9 +2,13 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { contentDB, VideoRecord, TranscriptSegment, Category, GeneratedShort, generateId } from '../services/contentDatabase';
 import { searchTranscripts, generateShort, SearchResult, buildShortPrompt, importManualShort } from '../services/contentAIService';
 import { CookieUploadButton } from '../components/CookieUploadButton';
-import type { KeywordEmphasis } from '../types';
+import type { KeywordEmphasis, TrendItem, TrendAnalysis, TrendState } from '../types';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from '../services/costTracker';
 import { detectFillersFromTranscript, FillerDetection } from '../services/geminiService';
+import { fetchAllTrends, getDefaultTrendState } from '../services/trendsService';
+import { TrendsTicker } from '../components/TrendsTicker';
+import { RepostRanker } from '../components/RepostRanker';
+import { TrendPromptBuilder } from '../components/TrendPromptBuilder';
 
 // ==================== Types ====================
 
@@ -41,7 +45,7 @@ export const ContentLibraryPage: React.FC<{
     const [newCategoryColor, setNewCategoryColor] = useState('#6366f1');
 
     // AI Search State
-    const [activeTab, setActiveTab] = useState<'videos' | 'ai-search' | 'shorts'>('videos');
+    const [activeTab, setActiveTab] = useState<'videos' | 'ai-search' | 'shorts' | 'trends'>('videos');
     const [aiSearchQuery, setAiSearchQuery] = useState('');
     const [aiSearchResults, setAiSearchResults] = useState<SearchResult[]>([]);
     const [isSearching, setIsSearching] = useState(false);
@@ -81,6 +85,51 @@ export const ContentLibraryPage: React.FC<{
     const [previewCaption, setPreviewCaption] = useState('');
     const [previewKeywords, setPreviewKeywords] = useState<KeywordEmphasis[]>([]);
     const previewStopRef = useRef(false);
+
+    // Trends State
+    const [trendState, setTrendState] = useState<TrendState>(getDefaultTrendState);
+    const [trendPreSelected, setTrendPreSelected] = useState<TrendItem[]>([]);
+
+    const handleRefreshTrends = async () => {
+        setTrendState(prev => ({ ...prev, loading: true, error: null }));
+        try {
+            const items = await fetchAllTrends(trendState.activeFilters);
+            // Save previous ranks for animations
+            const previousRanks: Record<string, number> = {};
+            for (const item of trendState.items) {
+                previousRanks[item.id] = item.rank;
+            }
+            setTrendState(prev => ({
+                ...prev,
+                items,
+                previousRanks,
+                loading: false,
+                lastFetched: Date.now(),
+            }));
+        } catch (err: any) {
+            setTrendState(prev => ({ ...prev, loading: false, error: err.message }));
+        }
+    };
+
+    const handleTrendFiltersChange = (filters: typeof trendState.activeFilters) => {
+        setTrendState(prev => ({ ...prev, activeFilters: filters }));
+    };
+
+    // Auto-fetch when trends tab is first opened
+    const trendsFetchedRef = useRef(false);
+    useEffect(() => {
+        if (activeTab === 'trends' && !trendsFetchedRef.current && trendState.items.length === 0) {
+            trendsFetchedRef.current = true;
+            handleRefreshTrends();
+        }
+    }, [activeTab]);
+
+    // Re-fetch when filters change (if we already have data)
+    useEffect(() => {
+        if (activeTab === 'trends' && trendState.lastFetched) {
+            handleRefreshTrends();
+        }
+    }, [trendState.activeFilters.source, trendState.activeFilters.category, trendState.activeFilters.region, trendState.activeFilters.timeRange]);
 
     // Group shorts by video for display
     const shortsByVideo = useMemo(() => {
@@ -790,6 +839,7 @@ export const ContentLibraryPage: React.FC<{
                     <button onClick={() => setActiveTab('videos')} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'videos' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>📹 Videos</button>
                     <button onClick={() => setActiveTab('ai-search')} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'ai-search' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>🔍 AI Search</button>
                     <button onClick={() => setActiveTab('shorts')} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'shorts' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>⚡ Generated Shorts</button>
+                    <button onClick={() => setActiveTab('trends')} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'trends' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>📈 Trends</button>
                 </div>
 
                 {/* Content Area */}
@@ -1404,6 +1454,66 @@ export const ContentLibraryPage: React.FC<{
                 </div>
             )
             }
+
+            {/* ==================== TRENDS TAB ==================== */}
+            {activeTab === 'trends' && (
+                <div className="flex-1 overflow-y-auto p-6">
+                    <TrendsTicker
+                        items={trendState.items}
+                        previousRanks={trendState.previousRanks}
+                        loading={trendState.loading}
+                        error={trendState.error}
+                        filters={trendState.activeFilters}
+                        onFiltersChange={handleTrendFiltersChange}
+                        onRefresh={handleRefreshTrends}
+                        onUseInPrompt={(item) => {
+                            setTrendPreSelected(prev => {
+                                if (prev.find(t => t.id === item.id)) return prev;
+                                return [...prev, item];
+                            });
+                        }}
+                    />
+
+                    <RepostRanker
+                        trends={trendState.items}
+                        analyses={trendState.analyses}
+                        onAnalysesUpdate={(analyses) => {
+                            setTrendState(prev => ({
+                                ...prev,
+                                analyses,
+                                analysesTimestamp: Date.now(),
+                            }));
+                        }}
+                        onOpenInEditor={(shortId) => {
+                            // Navigate to editor with this short loaded
+                            if (onNavigateToEditor) onNavigateToEditor();
+                        }}
+                        onRegenerateWithTrends={(shortId, trendContext) => {
+                            // Open short generation modal with trend context pre-filled
+                            const short = generatedShorts.find(s => s.id === shortId);
+                            if (short) {
+                                setShortTargetVideo(short.videoId);
+                                setShortPrompt(short.prompt + `\n\nFocus on alignment with trending topics: ${trendContext}`);
+                                setShowShortModal(true);
+                            }
+                        }}
+                    />
+
+                    <TrendPromptBuilder
+                        trends={trendState.items}
+                        preSelectedTrends={trendPreSelected}
+                        onGenerate={(enrichedPrompt, selectedTrends) => {
+                            // Open short generation modal with enriched prompt
+                            setShortPrompt(enrichedPrompt);
+                            setShowShortModal(true);
+                            // Store trending topic for the generated short
+                            const topicName = selectedTrends.map(t => t.title).join(', ');
+                            // This will be available when the short is saved
+                        }}
+                        onClearPreSelected={() => setTrendPreSelected([])}
+                    />
+                </div>
+            )}
         </div >
     );
 };

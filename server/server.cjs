@@ -1718,12 +1718,264 @@ app.post('/api/transcribe', transcribeUpload.single('file'), async (req, res) =>
     }
 });
 
+// ==================== Trends Endpoints ====================
+
+const googleTrends = require('google-trends-api');
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+
+// Simple in-memory cache: { key: { data, timestamp } }
+const trendsCache = {};
+const TRENDS_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+function getCached(key) {
+    const entry = trendsCache[key];
+    if (entry && Date.now() - entry.timestamp < TRENDS_CACHE_TTL) return entry.data;
+    return null;
+}
+function setCache(key, data) {
+    trendsCache[key] = { data, timestamp: Date.now() };
+}
+
+// YouTube Trending Videos
+app.get('/api/trends/youtube', async (req, res) => {
+    const { region = 'US', category = '0' } = req.query;
+    const cacheKey = `yt_${region}_${category}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    if (!YOUTUBE_API_KEY) {
+        return res.status(400).json({
+            error: 'YOUTUBE_API_KEY not configured',
+            setup: 'Get a free API key at https://console.cloud.google.com/apis/credentials and add YOUTUBE_API_KEY to your .env.local'
+        });
+    }
+
+    try {
+        const params = new URLSearchParams({
+            part: 'snippet,statistics',
+            chart: 'mostPopular',
+            regionCode: region,
+            maxResults: '25',
+            key: YOUTUBE_API_KEY,
+        });
+        if (category !== '0') params.set('videoCategoryId', category);
+
+        const response = await fetch(`https://www.googleapis.com/youtube/v3/videos?${params}`);
+        if (!response.ok) {
+            const err = await response.text();
+            throw new Error(`YouTube API ${response.status}: ${err}`);
+        }
+
+        const data = await response.json();
+        const now = Date.now();
+        const items = (data.items || []).map((v, i) => ({
+            id: `yt_${v.id}`,
+            title: v.snippet.title,
+            source: 'youtube',
+            category: v.snippet.categoryId || 'General',
+            rank: i + 1,
+            previousRank: null,
+            velocity: 'rising',
+            viewCount: parseInt(v.statistics?.viewCount || '0', 10),
+            engagement: parseInt(v.statistics?.likeCount || '0', 10),
+            growthPercent: null,
+            keywords: (v.snippet.tags || []).slice(0, 5),
+            thumbnailUrl: v.snippet.thumbnails?.medium?.url || v.snippet.thumbnails?.default?.url,
+            url: `https://www.youtube.com/watch?v=${v.id}`,
+            fetchedAt: now,
+        }));
+
+        setCache(cacheKey, items);
+        res.json(items);
+    } catch (error) {
+        console.error('YouTube trends error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Google Trends (Daily trending searches)
+app.get('/api/trends/google', async (req, res) => {
+    const { geo = 'US' } = req.query;
+    const cacheKey = `gt_${geo}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    try {
+        const result = await googleTrends.dailyTrends({ geo });
+        const parsed = JSON.parse(result);
+        const days = parsed.default?.trendingSearchesDays || [];
+        const now = Date.now();
+        const items = [];
+
+        for (const day of days.slice(0, 2)) { // last 2 days
+            for (const trend of day.trendingSearches || []) {
+                const traffic = trend.formattedTraffic || '0';
+                const viewCount = parseInt(traffic.replace(/[^0-9]/g, ''), 10) * (traffic.includes('M') ? 1000000 : traffic.includes('K') ? 1000 : 1);
+                items.push({
+                    id: `gt_${trend.title?.query?.replace(/\s+/g, '_') || items.length}`,
+                    title: trend.title?.query || 'Unknown',
+                    source: 'google',
+                    category: 'Trending Search',
+                    rank: items.length + 1,
+                    previousRank: null,
+                    velocity: viewCount > 500000 ? 'exploding' : viewCount > 100000 ? 'rising' : 'stable',
+                    viewCount,
+                    engagement: null,
+                    growthPercent: null,
+                    keywords: (trend.relatedQueries || []).map(q => q.query).slice(0, 5),
+                    thumbnailUrl: trend.image?.imageUrl || null,
+                    url: trend.title?.exploreLink ? `https://trends.google.com${trend.title.exploreLink}` : null,
+                    fetchedAt: now,
+                });
+            }
+        }
+
+        setCache(cacheKey, items.slice(0, 25));
+        res.json(items.slice(0, 25));
+    } catch (error) {
+        console.error('Google Trends error:', error.message);
+        // Google Trends scraping is unreliable - return empty gracefully
+        res.json([]);
+    }
+});
+
+// Reddit Trending Posts
+app.get('/api/trends/reddit', async (req, res) => {
+    const { timeRange = 'today' } = req.query;
+    const redditTime = timeRange === 'today' ? 'day' : timeRange === 'week' ? 'week' : 'month';
+    const cacheKey = `reddit_${redditTime}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    try {
+        const subreddits = ['videos', 'viral', 'trending'];
+        const now = Date.now();
+        const items = [];
+
+        for (const sub of subreddits) {
+            try {
+                const response = await fetch(
+                    `https://www.reddit.com/r/${sub}/top.json?t=${redditTime}&limit=10`,
+                    { headers: { 'User-Agent': 'VibeCutPro/1.0' } }
+                );
+                if (!response.ok) continue;
+
+                const data = await response.json();
+                for (const post of (data.data?.children || [])) {
+                    const d = post.data;
+                    if (!d) continue;
+                    items.push({
+                        id: `reddit_${d.id}`,
+                        title: d.title,
+                        source: 'reddit',
+                        category: `r/${sub}`,
+                        rank: items.length + 1,
+                        previousRank: null,
+                        velocity: d.score > 10000 ? 'exploding' : d.score > 1000 ? 'rising' : 'stable',
+                        viewCount: d.score || 0,
+                        engagement: d.num_comments || 0,
+                        growthPercent: null,
+                        keywords: [],
+                        thumbnailUrl: d.thumbnail && d.thumbnail.startsWith('http') ? d.thumbnail : null,
+                        url: `https://reddit.com${d.permalink}`,
+                        fetchedAt: now,
+                    });
+                }
+            } catch (subErr) {
+                console.warn(`Reddit r/${sub} failed:`, subErr.message);
+            }
+        }
+
+        // Sort by score descending
+        items.sort((a, b) => (b.viewCount || 0) - (a.viewCount || 0));
+        items.forEach((item, i) => { item.rank = i + 1; });
+
+        const result = items.slice(0, 25);
+        setCache(cacheKey, result);
+        res.json(result);
+    } catch (error) {
+        console.error('Reddit trends error:', error.message);
+        res.json([]);
+    }
+});
+
+// Aggregated trends from all sources
+app.get('/api/trends/all', async (req, res) => {
+    const { region = 'US', category = '0', timeRange = 'today' } = req.query;
+
+    try {
+        const [youtube, google, reddit] = await Promise.allSettled([
+            fetch(`http://localhost:${PORT}/api/trends/youtube?region=${region}&category=${category}`).then(r => r.json()),
+            fetch(`http://localhost:${PORT}/api/trends/google?geo=${region}`).then(r => r.json()),
+            fetch(`http://localhost:${PORT}/api/trends/reddit?timeRange=${timeRange}`).then(r => r.json()),
+        ]);
+
+        const items = [];
+        if (youtube.status === 'fulfilled' && Array.isArray(youtube.value)) items.push(...youtube.value);
+        if (google.status === 'fulfilled' && Array.isArray(google.value)) items.push(...google.value);
+        if (reddit.status === 'fulfilled' && Array.isArray(reddit.value)) items.push(...reddit.value);
+
+        // Re-rank combined results
+        items.sort((a, b) => (b.viewCount || 0) - (a.viewCount || 0));
+        items.forEach((item, i) => { item.rank = i + 1; });
+
+        res.json(items);
+    } catch (error) {
+        console.error('Aggregated trends error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// AI-powered Repost Ranker
+app.post('/api/ai/analyze-trends', async (req, res) => {
+    const { shorts, trends } = req.body;
+    if (!shorts || !trends) {
+        return res.status(400).json({ error: 'Missing shorts or trends data' });
+    }
+
+    const trendSummary = trends.map(t =>
+        `- "${t.title}" (${t.category}, ${t.velocity}${t.growthPercent ? `, +${t.growthPercent}%` : ''}, keywords: ${(t.keywords || []).join(', ')})`
+    ).join('\n');
+
+    const shortsSummary = shorts.map(s =>
+        `- ID: ${s.id} | Title: "${s.title}" | Hook: "${s.hook}" | Keywords: ${(s.keywords || []).join(', ')}`
+    ).join('\n');
+
+    const prompt = `You are a social media trend analyst and algorithm expert. Given these currently trending topics:
+
+${trendSummary}
+
+Score each of the following short-form video clips on how well they could perform if posted/reposted right now (0-100).
+Consider: topic relevance, keyword overlap, emotional resonance with current trends, timing.
+
+Shorts to analyze:
+${shortsSummary}
+
+Return a JSON array called "analyses" where each element has:
+- "shortId": the ID of the short
+- "trendScore": integer 0-100
+- "matchedTrends": array of trend titles this short aligns with
+- "reasoning": one sentence explaining the score
+- "suggestedAngle": one sentence on how to reframe/re-title for better trend alignment (optional)
+
+Example: { "analyses": [{ "shortId": "abc", "trendScore": 85, "matchedTrends": ["AI in Education"], "reasoning": "Strong alignment with trending AI content.", "suggestedAngle": "Reframe title to emphasize AI transformation angle." }] }`;
+
+    try {
+        const result = await callGemini(prompt);
+        res.json(result);
+    } catch (error) {
+        console.error('Trend analysis error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ==================== API Key Management ====================
 
 // Get current API key status (masked)
 app.get('/api/keys', (req, res) => {
     res.json({
         GEMINI_API_KEY: GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : null,
+        YOUTUBE_API_KEY: YOUTUBE_API_KEY ? '******' + YOUTUBE_API_KEY.slice(-4) : null,
         KIMI_API_KEY: KIMI_API_KEY ? '******' + KIMI_API_KEY.slice(-4) : null,
         OPENAI_API_KEY: OPENAI_API_KEY ? '******' + OPENAI_API_KEY.slice(-4) : null,
         MINIMAX_API_KEY: MINIMAX_API_KEY ? '******' + MINIMAX_API_KEY.slice(-4) : null,

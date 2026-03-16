@@ -436,3 +436,48 @@ export enum ProcessingStatus {
   CLEANING_FILLERS = 'CLEANING_FILLERS',
   ERROR = 'ERROR'
 }
+
+// ============ TRENDS SYSTEM ============
+export interface TrendItem {
+  id: string;
+  title: string;
+  source: 'youtube' | 'google' | 'reddit';
+  category: string;
+  rank: number;
+  previousRank: number | null;  // null = new entry
+  velocity: 'exploding' | 'rising' | 'stable' | 'falling';
+  viewCount?: number;
+  engagement?: number;
+  growthPercent?: number;
+  keywords: string[];
+  thumbnailUrl?: string;
+  url?: string;
+  fetchedAt: number;
+}
+
+export interface TrendAnalysis {
+  shortId: string;
+  trendScore: number;          // 0-100
+  matchedTrends: string[];
+  reasoning: string;
+  suggestedAngle?: string;
+  analyzedAt: number;
+}
+
+export interface TrendState {
+  items: TrendItem[];
+  previousRanks: Record<string, number>;  // id -> previous rank for animations
+  analyses: TrendAnalysis[];
+  analysesTimestamp: number | null;
+  loading: boolean;
+  error: string | null;
+  lastFetched: number | null;
+  activeFilters: TrendFilters;
+}
+
+export interface TrendFilters {
+  source: 'all' | 'youtube' | 'google' | 'reddit';
+  category: string;
+  region: string;
+  timeRange: 'today' | 'week' | 'month';
+}
