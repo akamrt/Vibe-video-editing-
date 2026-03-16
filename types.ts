@@ -352,10 +352,10 @@ export interface TitleStyle {
   wordHighlightShadowOffsetY?: number;
   wordHighlightGlowColor?: string;
   wordHighlightGlowBlur?: number;
-  wordHighlightOffsetX?: number;
-  wordHighlightOffsetY?: number;
+  wordHighlightOffsetX?: number;         // manual X offset px, default 0
+  wordHighlightOffsetY?: number;         // manual Y offset px, default 0
 
-  // In-flight effects
+  // In-flight effects (applied while active word is still animating in)
   wordHighlightFlightColorEnabled?: boolean;
   wordHighlightFlightColor?: string;
   wordHighlightFlightColorOpacity?: number;
