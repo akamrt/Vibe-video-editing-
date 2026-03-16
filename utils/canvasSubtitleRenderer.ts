@@ -928,7 +928,9 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
             ctx, text, style, scaleFactor, fontSize, lineHeight,
             textPaddingH, outputWidth,
             wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, sourceTime,
-            frame, fps, effectiveAnimation.stagger, effectiveAnimation.duration,
+            frame, fps,
+            effectiveAnimation.scope === 'word' ? effectiveAnimation.stagger : 0,
+            effectiveAnimation.scope === 'word' ? effectiveAnimation.duration : 0,
         );
     }
 
