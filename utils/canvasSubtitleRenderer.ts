@@ -216,10 +216,40 @@ function computeElementAnimations(
                 }
                 const kwEntry = emphasisMap.get(globalWordIdx);
                 const isKw = !!kwEntry;
+
+                // Apply keyword animation on top of base line animation
+                let finalOpacity = baseOpacity, finalScale = baseScale, finalTx = baseTx, finalTy = baseTy;
+                let finalRotate = baseRotate, finalBlur = baseBlur, finalLs = baseLs;
+                if (isKw && keywordAnimation) {
+                    const kwDelay = globalWordIdx * (keywordAnimation.stagger ?? 0) * fps;
+                    const kwFrame = frame - kwDelay;
+                    let kwOp = 1, kwSc = 1, kwTx = 0, kwTy = 0, kwRot = 0, kwBl = 0, kwLs = 0;
+                    for (const effect of keywordAnimation.effects) {
+                        const val = computeEffectValue(effect, kwFrame, keywordAnimation.duration, fps);
+                        switch (effect.type) {
+                            case 'opacity': kwOp *= val; break;
+                            case 'scale': kwSc *= val; break;
+                            case 'translateX': kwTx += val; break;
+                            case 'translateY': kwTy += val; break;
+                            case 'rotate': kwRot += val; break;
+                            case 'blur': kwBl = Math.max(0, kwBl + val); break;
+                            case 'letterSpacing': kwLs += val; break;
+                        }
+                    }
+                    kwOp = Math.max(0, Math.min(1, kwOp));
+                    finalOpacity = baseOpacity * kwOp;
+                    finalScale = baseScale * kwSc;
+                    finalTx = baseTx + kwTx;
+                    finalTy = baseTy + kwTy;
+                    finalRotate = baseRotate + kwRot;
+                    finalBlur = Math.max(0, baseBlur + kwBl);
+                    finalLs = baseLs + kwLs;
+                }
+
                 result.push({
-                    text: token, opacity: baseOpacity, scaleVal: baseScale,
-                    translateX: baseTx, translateY: baseTy, rotate: baseRotate,
-                    blur: baseBlur, letterSpacing: baseLs,
+                    text: token, opacity: finalOpacity, scaleVal: finalScale,
+                    translateX: finalTx, translateY: finalTy, rotate: finalRotate,
+                    blur: finalBlur, letterSpacing: finalLs,
                     isKeyword: isKw,
                     keywordColor: isKw ? (kwEntry!.color || '#FFD700') : null,
                 });
@@ -497,15 +527,21 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     ctx.font = fontStr;
     ctx.textBaseline = 'alphabetic';
 
-    // If no animation or empty effects, draw plain text (simple path)
-    if (!animation || animation.effects.length === 0) {
+    // If no animation or empty effects AND no keyword animation, draw plain text (simple path)
+    if ((!animation || animation.effects.length === 0) && !keywordAnimation) {
         drawPlainText(ctx, text, style, fontSize, scaleFactor, textPaddingV, textPaddingH, wordEmphases);
         ctx.restore();
         return;
     }
 
+    // If we have a keyword animation but no base animation, synthesize a no-op word-scope
+    // animation so keywords still get their animation effects computed and rendered
+    const effectiveAnimation: TextAnimation = (animation && animation.effects.length > 0)
+        ? animation
+        : { effects: [], duration: keywordAnimation!.duration, scope: 'word', stagger: 0 };
+
     // Compute per-element animation values
-    const elements = computeElementAnimations(text, animation, frame, fps, wordEmphases, keywordAnimation);
+    const elements = computeElementAnimations(text, effectiveAnimation, frame, fps, wordEmphases, keywordAnimation);
 
     // Check if we have multi-line content (line-scope or text with \n)
     const hasNewlines = elements.some(el => el.text === '\n');
