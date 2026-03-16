@@ -128,3 +128,25 @@ export function lerp(a: number, b: number, t: number): number {
 export function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - Math.max(0, Math.min(1, t)), 3);
 }
+
+/** Lerp between two hex colors by decomposing into R/G/B channels */
+export function lerpColor(hexA: string, hexB: string, t: number): string {
+  function hexToRgb(hex: string): [number, number, number] {
+    const clean = (hex.startsWith('#') ? hex.slice(1) : hex).replace(/[^0-9a-fA-F]/g, '');
+    if (clean.length === 3) {
+      return [
+        parseInt(clean[0] + clean[0], 16),
+        parseInt(clean[1] + clean[1], 16),
+        parseInt(clean[2] + clean[2], 16),
+      ];
+    }
+    return [
+      parseInt(clean.slice(0, 2), 16) || 0,
+      parseInt(clean.slice(2, 4), 16) || 0,
+      parseInt(clean.slice(4, 6), 16) || 0,
+    ];
+  }
+  const [rA, gA, bA] = hexToRgb(hexA);
+  const [rB, gB, bB] = hexToRgb(hexB);
+  return `rgb(${Math.round(lerp(rA, rB, t))}, ${Math.round(lerp(gA, gB, t))}, ${Math.round(lerp(bA, bB, t))})`;
+}

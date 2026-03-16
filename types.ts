@@ -265,6 +265,18 @@ export interface SubtitleStyle {
   wordHighlightShadowOffsetY?: number;
   wordHighlightGlowColor?: string;
   wordHighlightGlowBlur?: number;
+  wordHighlightOffsetX?: number;         // manual X offset px, default 0
+  wordHighlightOffsetY?: number;         // manual Y offset px, default 0
+
+  // In-flight effects (applied while active word is still animating in)
+  wordHighlightFlightColorEnabled?: boolean;
+  wordHighlightFlightColor?: string;          // in-flight box color, default '#FFFFFF'
+  wordHighlightFlightColorOpacity?: number;   // in-flight box opacity, default 1.0
+  wordHighlightFlightGlowEnabled?: boolean;
+  wordHighlightFlightGlowColor?: string;      // runtime fallback: wordHighlightColor
+  wordHighlightFlightGlowBlur?: number;       // in-flight glow blur px, default 20
+  wordHighlightFlightScaleEnabled?: boolean;
+  wordHighlightFlightScale?: number;          // multiplier on top of wordHighlightScale, default 1.25
 }
 
 // ============ TITLE LAYER ============
@@ -340,6 +352,18 @@ export interface TitleStyle {
   wordHighlightShadowOffsetY?: number;
   wordHighlightGlowColor?: string;
   wordHighlightGlowBlur?: number;
+  wordHighlightOffsetX?: number;
+  wordHighlightOffsetY?: number;
+
+  // In-flight effects
+  wordHighlightFlightColorEnabled?: boolean;
+  wordHighlightFlightColor?: string;
+  wordHighlightFlightColorOpacity?: number;
+  wordHighlightFlightGlowEnabled?: boolean;
+  wordHighlightFlightGlowColor?: string;
+  wordHighlightFlightGlowBlur?: number;
+  wordHighlightFlightScaleEnabled?: boolean;
+  wordHighlightFlightScale?: number;
 }
 
 export interface TitleLayer {
