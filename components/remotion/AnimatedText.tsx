@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useEffect, useState } from 'react';
 import { interpolate, Easing, spring } from 'remotion';
 import type { TextAnimation, AnimationEffect, EasingType, KeywordEmphasis, SubtitleStyle } from '../../types';
-import { getActiveWordInfo, type WordTiming } from '../../utils/wordHighlightUtils';
+import { getActiveWordInfo, lerp, easeOutCubic, lerpColor, type WordTiming } from '../../utils/wordHighlightUtils';
 
 interface WordRect {
   left: number;
@@ -154,28 +154,40 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [wordRects, setWordRects] = useState<Map<number, WordRect>>(new Map());
+  const prevEventStartRef = useRef<number | undefined>(undefined);
 
-  // Measure word span positions after DOM settles (browser only, not Remotion SSR)
+  // Measure word span positions — re-runs every frame during animation for accurate tracking
+  // getBoundingClientRect returns the live visual position including all CSS transforms
   useEffect(() => {
     if (!wordHighlightEnabled) return;
     const container = containerRef.current;
     if (!container) return;
+
+    // Perf guard: skip re-measuring once all words have settled at final positions
+    const animatableCount = text.split(/(\s+)/).filter(t => t.trim().length > 0).length;
+    const lastAnimFrame = (animatableCount - 1) * animation.stagger * fps + animation.duration * fps;
+    // Always re-measure when keywordAnimation present (its timing may extend beyond base animation)
+    if (!keywordAnimation && frame > lastAnimFrame) return;
+
     const spans = container.querySelectorAll<HTMLSpanElement>('[data-word-idx]');
     if (spans.length === 0) return;
+    const containerRect = container.getBoundingClientRect();
     const newRects = new Map<number, WordRect>();
     spans.forEach(span => {
       const idx = parseInt(span.dataset.wordIdx!, 10);
       if (!isNaN(idx)) {
+        const spanRect = span.getBoundingClientRect();
         newRects.set(idx, {
-          left: span.offsetLeft,
-          top: span.offsetTop,
-          width: span.offsetWidth,
-          height: span.offsetHeight,
+          left: spanRect.left - containerRect.left,
+          top: spanRect.top - containerRect.top,
+          width: spanRect.width,
+          height: spanRect.height,
         });
       }
     });
     setWordRects(newRects);
-  }, [wordHighlightEnabled, text, animation.scope]);
+  }, [wordHighlightEnabled, text, animation.scope, animation.stagger, animation.duration,
+      frame, fps, keywordAnimation]);
 
   const activeWordInfo = useMemo(() => {
     if (!wordHighlightEnabled) return null;
@@ -190,12 +202,33 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
 
   const activeWordIndex = activeWordInfo?.activeIndex ?? -1;
 
-  // Build highlight box position + style
+  // In-flight progress for the active word: 0 = just started animating, 1 = fully settled.
+  // Guards: only meaningful when scope is 'word' and animation has effects.
+  const wordAnimProgress = useMemo(() => {
+    if (
+      !wordHighlightEnabled ||
+      activeWordIndex < 0 ||
+      animation.effects.length === 0 ||
+      animation.scope !== 'word'
+    ) return 1;
+    const wordStartFrame = activeWordIndex * animation.stagger * fps;
+    const wordEndFrame = wordStartFrame + animation.duration * fps;
+    if (wordEndFrame <= wordStartFrame) return 1;
+    return Math.max(0, Math.min(1, (frame - wordStartFrame) / (wordEndFrame - wordStartFrame)));
+  }, [wordHighlightEnabled, activeWordIndex, animation.effects.length, animation.scope,
+      animation.stagger, animation.duration, frame, fps]);
+
+  // Build highlight box position + style — applies settled values and lerps in-flight effects
   const highlightBoxStyle = useMemo((): React.CSSProperties | null => {
     if (!wordHighlightEnabled || !wordHighlightStyle || activeWordIndex < 0) return null;
     const rect = wordRects.get(activeWordIndex);
     if (!rect || rect.width === 0) return null;
 
+    // Detect chunk boundary — snap instantly so the box doesn't slide back to word 0
+    const isNewChunk = prevEventStartRef.current !== eventStartTime;
+    prevEventStartRef.current = eventStartTime;
+
+    // Settled values
     const hlColor = wordHighlightStyle.wordHighlightColor ?? '#FFD700';
     const hlOpacity = wordHighlightStyle.wordHighlightOpacity ?? 0.85;
     const paddingH = wordHighlightStyle.wordHighlightPaddingH ?? 4;
@@ -208,24 +241,65 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
     const shadowBlur = wordHighlightStyle.wordHighlightShadowBlur ?? 0;
     const shadowX = wordHighlightStyle.wordHighlightShadowOffsetX ?? 0;
     const shadowY = wordHighlightStyle.wordHighlightShadowOffsetY ?? 0;
-    const glowColor = wordHighlightStyle.wordHighlightGlowColor;
+    const glowColor = wordHighlightStyle.wordHighlightGlowColor ?? null;
     const glowBlur = wordHighlightStyle.wordHighlightGlowBlur ?? 0;
+    const offsetX = wordHighlightStyle.wordHighlightOffsetX ?? 0;
+    const offsetY = wordHighlightStyle.wordHighlightOffsetY ?? 0;
+
+    // In-flight effect fields
+    const flightColorEnabled = !!wordHighlightStyle.wordHighlightFlightColorEnabled;
+    const flightColor = wordHighlightStyle.wordHighlightFlightColor ?? '#FFFFFF';
+    const flightColorOpacity = wordHighlightStyle.wordHighlightFlightColorOpacity ?? 1.0;
+    const flightGlowEnabled = !!wordHighlightStyle.wordHighlightFlightGlowEnabled;
+    const flightGlowColor = wordHighlightStyle.wordHighlightFlightGlowColor ?? hlColor;
+    const flightGlowBlur = wordHighlightStyle.wordHighlightFlightGlowBlur ?? 20;
+    const flightScaleEnabled = !!wordHighlightStyle.wordHighlightFlightScaleEnabled;
+    const flightScale = wordHighlightStyle.wordHighlightFlightScale ?? 1.25;
+
+    // Lerp factors
+    const isInFlight = wordAnimProgress < 1;
+    const easedP = easeOutCubic(wordAnimProgress);
+
+    // Color Burst: lerp box color and opacity from flight → settled
+    const currentColor = (flightColorEnabled && isInFlight)
+      ? lerpColor(flightColor, hlColor, easedP)
+      : hlColor;
+    const currentOpacity = (flightColorEnabled && isInFlight)
+      ? lerp(flightColorOpacity, hlOpacity, easedP)
+      : hlOpacity;
+
+    // Glow Surge: lerp glow blur from flightGlowBlur → static glowBlur (replaces static glow during flight)
+    const currentGlowBlur = (flightGlowEnabled && isInFlight)
+      ? lerp(flightGlowBlur, glowBlur, easedP)
+      : glowBlur;
+    const currentGlowColor = (flightGlowEnabled && isInFlight) ? flightGlowColor : glowColor;
+
+    // Scale Boost: flightScale is a multiplier on top of settled hlScale
+    const currentScale = (flightScaleEnabled && isInFlight)
+      ? lerp(hlScale * flightScale, hlScale, easedP)
+      : hlScale;
 
     const baseW = rect.width + 2 * paddingH;
     const baseH = rect.height + 2 * paddingV;
-    const scaledW = baseW * hlScale;
-    const scaledH = baseH * hlScale;
-    const left = rect.left - paddingH - (scaledW - baseW) / 2;
-    const top = rect.top - paddingV - (scaledH - baseH) / 2;
+    const scaledW = baseW * currentScale;
+    const scaledH = baseH * currentScale;
+    const left = rect.left - paddingH - (scaledW - baseW) / 2 + offsetX;
+    const top = rect.top - paddingV - (scaledH - baseH) / 2 + offsetY;
 
     const shadows: string[] = [];
     if (shadowColor && (shadowBlur > 0 || shadowX !== 0 || shadowY !== 0)) {
       shadows.push(`${shadowX}px ${shadowY}px ${shadowBlur}px ${shadowColor}`);
     }
-    if (glowColor && glowBlur > 0) {
-      shadows.push(`0 0 ${glowBlur}px ${glowColor}`);
-      shadows.push(`0 0 ${glowBlur * 1.5}px ${glowColor}`);
+    if (currentGlowColor && currentGlowBlur > 0) {
+      shadows.push(`0 0 ${currentGlowBlur}px ${currentGlowColor}`);
+      shadows.push(`0 0 ${currentGlowBlur * 1.5}px ${currentGlowColor}`);
     }
+
+    // CSS transition: exclude width/height while in-flight (Scale Boost drives those via frame math)
+    const slidePart = `left ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
+      + `top ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1)`;
+    const sizePart = `, width ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
+      + `height ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1)`;
 
     return {
       position: 'absolute',
@@ -233,18 +307,18 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
       top,
       width: scaledW,
       height: scaledH,
-      backgroundColor: hexToRgba(hlColor, hlOpacity),
+      backgroundColor: currentColor.startsWith('rgb(')
+        ? currentColor.replace('rgb(', 'rgba(').replace(')', `, ${currentOpacity})`)
+        : hexToRgba(currentColor, currentOpacity),
       borderRadius: hlRadius,
       mixBlendMode: hlBlendMode as React.CSSProperties['mixBlendMode'],
       boxShadow: shadows.length > 0 ? shadows.join(', ') : undefined,
-      transition: `left ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
-        + `top ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
-        + `width ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
-        + `height ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1)`,
+      transition: isNewChunk ? 'none' : (isInFlight ? slidePart : slidePart + sizePart),
       pointerEvents: 'none',
       zIndex: 0,
     };
-  }, [wordHighlightEnabled, wordHighlightStyle, activeWordIndex, wordRects]);
+  }, [wordHighlightEnabled, wordHighlightStyle, activeWordIndex, wordRects, eventStartTime,
+      wordAnimProgress]);
 
   const idleOpacity = wordHighlightEnabled ? (wordHighlightStyle?.wordHighlightIdleOpacity ?? 1.0) : 1.0;
   const activeColor = wordHighlightEnabled ? (wordHighlightStyle?.wordHighlightActiveColor || null) : null;
