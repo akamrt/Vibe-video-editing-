@@ -246,6 +246,25 @@ export interface SubtitleStyle {
   backdropShadowBlendMode?: string; // blend mode for background drop shadow
   backdropGlowBlendMode?: string;   // blend mode for background outer glow
   gradientBlendMode?: string;       // blend mode for the gradient fill
+
+  // Word highlight box (karaoke-style)
+  wordHighlightEnabled?: boolean;
+  wordHighlightColor?: string;          // box fill color, default '#FFD700'
+  wordHighlightOpacity?: number;        // 0-1, default 0.85
+  wordHighlightPaddingH?: number;       // horizontal padding px, default 4
+  wordHighlightPaddingV?: number;       // vertical padding px, default 2
+  wordHighlightBorderRadius?: number;   // px, default 4
+  wordHighlightBlendMode?: string;      // CSS blend mode, default 'normal'
+  wordHighlightTransitionMs?: number;   // slide duration ms, default 150
+  wordHighlightScale?: number;          // scale relative to word box, default 1.0
+  wordHighlightActiveColor?: string;    // override text color of active word
+  wordHighlightIdleOpacity?: number;    // opacity of non-active words, default 1.0
+  wordHighlightShadowColor?: string;
+  wordHighlightShadowBlur?: number;
+  wordHighlightShadowOffsetX?: number;
+  wordHighlightShadowOffsetY?: number;
+  wordHighlightGlowColor?: string;
+  wordHighlightGlowBlur?: number;
 }
 
 // ============ TITLE LAYER ============
@@ -302,6 +321,25 @@ export interface TitleStyle {
   backdropShadowBlendMode?: string;
   backdropGlowBlendMode?: string;
   gradientBlendMode?: string;
+
+  // Word highlight box (karaoke-style)
+  wordHighlightEnabled?: boolean;
+  wordHighlightColor?: string;
+  wordHighlightOpacity?: number;
+  wordHighlightPaddingH?: number;
+  wordHighlightPaddingV?: number;
+  wordHighlightBorderRadius?: number;
+  wordHighlightBlendMode?: string;
+  wordHighlightTransitionMs?: number;
+  wordHighlightScale?: number;
+  wordHighlightActiveColor?: string;
+  wordHighlightIdleOpacity?: number;
+  wordHighlightShadowColor?: string;
+  wordHighlightShadowBlur?: number;
+  wordHighlightShadowOffsetX?: number;
+  wordHighlightShadowOffsetY?: number;
+  wordHighlightGlowColor?: string;
+  wordHighlightGlowBlur?: number;
 }
 
 export interface TitleLayer {

@@ -21,6 +21,7 @@
 import { interpolate, Easing, spring } from 'remotion';
 import type { TextAnimation, AnimationEffect, EasingType, SubtitleStyle, KeywordEmphasis } from '../types';
 import { resolveGradientStops, applyStopsToCanvasGradient } from './gradientUtils';
+import { getActiveWordInfo, lerp, type WordTiming } from './wordHighlightUtils';
 
 // ─── Easing Mapping (mirrors AnimatedText.tsx) ────────────────────────────────
 
@@ -465,6 +466,191 @@ interface DrawSubtitleOptions {
     wordEmphases?: KeywordEmphasis[];
     /** Separate animation applied only to keyword words (overrides main animation for those words) */
     keywordAnimation?: TextAnimation | null;
+    // ── Word highlight box (karaoke) ──
+    wordTimings?: WordTiming[];
+    sourceTime?: number;
+    eventStartTime?: number;
+    eventEndTime?: number;
+}
+
+// ─── Word Highlight Box Helpers ───────────────────────────────────────────────
+
+interface CanvasWordRect {
+    x: number;  // left edge (canvas-local coords)
+    y: number;  // approximate top edge
+    width: number;
+    height: number;
+}
+
+/**
+ * Compute per-word bounding boxes in canvas-local coordinates (after subtitle center transforms).
+ * This is used for the karaoke highlight box and works independently of animation scope.
+ */
+function computeWordCanvasRects(
+    text: string,
+    ctx: CanvasRenderingContext2D,
+    fontSize: number,
+    lineHeight: number,
+    textAlign: string,
+    outputWidth: number,
+    textPaddingH: number,
+): CanvasWordRect[] {
+    const textLines = text.split('\n');
+    const result: CanvasWordRect[] = [];
+    const numLines = textLines.length;
+    const lineYStart = numLines > 1 ? -((numLines * lineHeight) - lineHeight) / 2 : 0;
+
+    for (let li = 0; li < textLines.length; li++) {
+        const line = textLines[li];
+        const lineWidth = ctx.measureText(line).width;
+        const lineY = lineYStart + li * lineHeight;
+
+        let lineStartX: number;
+        if (textAlign === 'left') {
+            lineStartX = -(outputWidth * 0.45) + textPaddingH;
+        } else if (textAlign === 'right') {
+            lineStartX = (outputWidth * 0.45) - lineWidth - textPaddingH;
+        } else {
+            lineStartX = -(lineWidth / 2);
+        }
+
+        const tokens = line.split(/(\s+)/);
+        let xPos = lineStartX;
+        for (const token of tokens) {
+            const tokenWidth = ctx.measureText(token).width;
+            if (!/^\s+$/.test(token)) {
+                result.push({
+                    x: xPos,
+                    y: lineY - fontSize * 1.1,
+                    width: tokenWidth,
+                    height: fontSize * 1.3,
+                });
+            }
+            xPos += tokenWidth;
+        }
+    }
+    return result;
+}
+
+/**
+ * Draw the karaoke word highlight box for the active (currently-spoken) word.
+ * Uses stateless position interpolation so it works frame-by-frame in canvas export.
+ */
+function drawWordHighlightBox(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    style: SubtitleStyle,
+    scaleFactor: number,
+    fontSize: number,
+    lineHeight: number,
+    textPaddingH: number,
+    outputWidth: number,
+    wordTimings: WordTiming[] | undefined,
+    eventStartTime: number,
+    eventEndTime: number,
+    sourceTime: number,
+): void {
+    const hlColor = style.wordHighlightColor ?? '#FFD700';
+    const hlOpacity = style.wordHighlightOpacity ?? 0.85;
+    const paddingH = (style.wordHighlightPaddingH ?? 4) * scaleFactor;
+    const paddingV = (style.wordHighlightPaddingV ?? 2) * scaleFactor;
+    const hlRadius = (style.wordHighlightBorderRadius ?? 4) * scaleFactor;
+    const hlScale = style.wordHighlightScale ?? 1.0;
+    const hlBlendMode = style.wordHighlightBlendMode ?? 'normal';
+    const shadowColor = style.wordHighlightShadowColor;
+    const shadowBlur = (style.wordHighlightShadowBlur ?? 0) * scaleFactor;
+    const shadowX = (style.wordHighlightShadowOffsetX ?? 0) * scaleFactor;
+    const shadowY = (style.wordHighlightShadowOffsetY ?? 0) * scaleFactor;
+    const glowColor = style.wordHighlightGlowColor;
+    const glowBlur = (style.wordHighlightGlowBlur ?? 0) * scaleFactor;
+
+    const align = style.textAlign || 'center';
+    const wordRects = computeWordCanvasRects(text, ctx, fontSize, lineHeight, align, outputWidth, textPaddingH);
+    if (wordRects.length === 0) return;
+
+    const info = getActiveWordInfo(wordTimings, eventStartTime, eventEndTime, text, sourceTime);
+    const activeIdx = Math.max(0, Math.min(info.activeIndex, wordRects.length - 1));
+    const activeRect = wordRects[activeIdx];
+
+    // Interpolate toward next word during gap between words
+    let finalRect = { ...activeRect };
+    if (info.gapProgress > 0 && info.nextIndex >= 0 && info.nextIndex < wordRects.length) {
+        const nextRect = wordRects[info.nextIndex];
+        const t = info.gapProgress;
+        finalRect = {
+            x: lerp(activeRect.x, nextRect.x, t),
+            y: lerp(activeRect.y, nextRect.y, t),
+            width: lerp(activeRect.width, nextRect.width, t),
+            height: lerp(activeRect.height, nextRect.height, t),
+        };
+    }
+
+    // Apply padding and scale
+    const baseW = finalRect.width + 2 * paddingH;
+    const baseH = finalRect.height + 2 * paddingV;
+    const scaledW = baseW * hlScale;
+    const scaledH = baseH * hlScale;
+    const bx = finalRect.x - paddingH - (scaledW - baseW) / 2;
+    const by = finalRect.y - paddingV - (scaledH - baseH) / 2;
+
+    // Parse hex color to RGBA
+    const clean = (hlColor.startsWith('#') ? hlColor.slice(1) : hlColor);
+    const r = parseInt(clean.slice(0, 2), 16) || 0;
+    const g = parseInt(clean.slice(2, 4), 16) || 0;
+    const b = parseInt(clean.slice(4, 6), 16) || 0;
+
+    ctx.save();
+    ctx.globalCompositeOperation = toCompositeOp(hlBlendMode);
+
+    // Glow
+    if (glowColor && glowBlur > 0) {
+        ctx.save();
+        ctx.shadowColor = glowColor;
+        ctx.shadowBlur = glowBlur;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.fillStyle = `rgba(${r},${g},${b},${hlOpacity})`;
+        if (ctx.roundRect && hlRadius > 0) {
+            ctx.beginPath();
+            ctx.roundRect(bx, by, scaledW, scaledH, hlRadius);
+            ctx.fill();
+        } else {
+            ctx.fillRect(bx, by, scaledW, scaledH);
+        }
+        ctx.shadowBlur = glowBlur * 1.5;
+        if (ctx.roundRect && hlRadius > 0) {
+            ctx.beginPath();
+            ctx.roundRect(bx, by, scaledW, scaledH, hlRadius);
+            ctx.fill();
+        } else {
+            ctx.fillRect(bx, by, scaledW, scaledH);
+        }
+        ctx.restore();
+    }
+
+    // Shadow
+    if (shadowColor && (shadowBlur > 0 || shadowX !== 0 || shadowY !== 0)) {
+        ctx.shadowColor = shadowColor;
+        ctx.shadowBlur = shadowBlur;
+        ctx.shadowOffsetX = shadowX;
+        ctx.shadowOffsetY = shadowY;
+    } else {
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+    }
+
+    ctx.fillStyle = `rgba(${r},${g},${b},${hlOpacity})`;
+    if (ctx.roundRect && hlRadius > 0) {
+        ctx.beginPath();
+        ctx.roundRect(bx, by, scaledW, scaledH, hlRadius);
+        ctx.fill();
+    } else {
+        ctx.fillRect(bx, by, scaledW, scaledH);
+    }
+
+    ctx.restore();
 }
 
 /**
@@ -480,6 +666,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
         viewportSafeZoneHeight,
         totalTx, totalTy, totalScale, totalRotation,
         wordEmphases, keywordAnimation,
+        wordTimings, sourceTime, eventStartTime, eventEndTime,
     } = opts;
 
     // Merge templateStyle into the effective style (template is fallback, style wins)
@@ -529,7 +716,8 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
 
     // If no animation or empty effects AND no keyword animation, draw plain text (simple path)
     if ((!animation || animation.effects.length === 0) && !keywordAnimation) {
-        drawPlainText(ctx, text, style, fontSize, scaleFactor, textPaddingV, textPaddingH, wordEmphases);
+        drawPlainText(ctx, text, style, fontSize, scaleFactor, textPaddingV, textPaddingH, outputWidth, wordEmphases,
+            wordTimings, sourceTime, eventStartTime, eventEndTime);
         ctx.restore();
         return;
     }
@@ -538,7 +726,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     // animation so keywords still get their animation effects computed and rendered
     const effectiveAnimation: TextAnimation = (animation && animation.effects.length > 0)
         ? animation
-        : { effects: [], duration: keywordAnimation!.duration, scope: 'word', stagger: 0 };
+        : { id: '', name: '', effects: [], duration: keywordAnimation!.duration, scope: 'word', stagger: 0 };
 
     // Compute per-element animation values
     const elements = computeElementAnimations(text, effectiveAnimation, frame, fps, wordEmphases, keywordAnimation);
@@ -694,11 +882,30 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
         }
     }
 
+    // Draw word highlight box (karaoke) — after backgrounds, before text
+    if (style.wordHighlightEnabled && sourceTime != null) {
+        drawWordHighlightBox(
+            ctx, text, style, scaleFactor, fontSize, lineHeight,
+            textPaddingH, outputWidth,
+            wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, sourceTime,
+        );
+    }
+
+    // Compute active word index for idle-opacity and active-color in element loop
+    const hlActiveIdx = (style.wordHighlightEnabled && sourceTime != null)
+        ? getActiveWordInfo(wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, text, sourceTime).activeIndex
+        : -1;
+    const hlIdleOpacity = style.wordHighlightIdleOpacity ?? 1.0;
+    const hlActiveColor = style.wordHighlightActiveColor || null;
+    const applyHl = hlActiveIdx >= 0 && (hlIdleOpacity < 1 || hlActiveColor);
+
     // Draw each element with its animation applied
     // Track current line for multi-line vertical positioning
     let currentLineIdx = 0;
     let xOffset = computeLineXOffset(lines[0].width);
     let yOffset = lineYStart;
+    // Track global word index for highlight (same counting as getActiveWordInfo)
+    let hlWordIdx = 0;
 
     for (let i = 0; i < elements.length; i++) {
         const el = elements[i];
@@ -715,9 +922,17 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
         }
 
         if (el.opacity <= 0.01) {
+            if (!/^\s+$/.test(el.text)) hlWordIdx++;
             xOffset += elWidth;
             continue;
         }
+
+        // Determine highlight state for this word element
+        const elIsWhitespace = /^\s+$/.test(el.text);
+        const elWordIdx = elIsWhitespace ? -1 : hlWordIdx;
+        if (!elIsWhitespace) hlWordIdx++;
+        const isActiveWord = applyHl && elWordIdx === hlActiveIdx;
+        const isIdleWord = applyHl && !isActiveWord && elWordIdx >= 0 && hlIdleOpacity < 1;
 
         ctx.save();
 
@@ -730,7 +945,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
         if (el.rotate !== 0) ctx.rotate(el.rotate * Math.PI / 180);
         if (el.scaleVal !== 1) ctx.scale(el.scaleVal, el.scaleVal);
 
-        ctx.globalAlpha = el.opacity;
+        ctx.globalAlpha = isIdleWord ? el.opacity * hlIdleOpacity : el.opacity;
 
         // Set font again after transforms
         ctx.font = fontStr;
@@ -753,7 +968,9 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
             ctx.shadowBlur = style.glowBlur * scaleFactor;
             ctx.shadowOffsetX = 0;
             ctx.shadowOffsetY = 0;
-            ctx.fillStyle = el.isKeyword && el.keywordColor ? el.keywordColor : (style.color || '#ffffff');
+            ctx.fillStyle = isActiveWord && hlActiveColor
+                ? hlActiveColor
+                : el.isKeyword && el.keywordColor ? el.keywordColor : (style.color || '#ffffff');
             ctx.fillText(el.text, 0, 0);
             ctx.shadowBlur = (style.glowBlur * 1.5) * scaleFactor;
             ctx.fillText(el.text, 0, 0);
@@ -768,7 +985,9 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
             ctx.shadowBlur = (style.textShadowBlur || 0) * scaleFactor;
             ctx.shadowOffsetX = (style.textShadowOffsetX || 0) * scaleFactor;
             ctx.shadowOffsetY = (style.textShadowOffsetY || 0) * scaleFactor;
-            ctx.fillStyle = el.isKeyword && el.keywordColor ? el.keywordColor : (style.color || '#ffffff');
+            ctx.fillStyle = isActiveWord && hlActiveColor
+                ? hlActiveColor
+                : el.isKeyword && el.keywordColor ? el.keywordColor : (style.color || '#ffffff');
             ctx.fillText(el.text, 0, 0);
             ctx.restore();
         } else if (style.backgroundType !== 'box' && style.backgroundType !== 'rounded' && style.backgroundType !== 'outline' && style.backgroundType !== 'stripe') {
@@ -808,7 +1027,9 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
             ctx.fillStyle = gradient;
         } else {
             ctx.globalCompositeOperation = textOp;
-            ctx.fillStyle = el.isKeyword && el.keywordColor ? el.keywordColor : (style.color || '#ffffff');
+            ctx.fillStyle = isActiveWord && hlActiveColor
+                ? hlActiveColor
+                : el.isKeyword && el.keywordColor ? el.keywordColor : (style.color || '#ffffff');
         }
 
         // Clear any lingering shadow from the non-background fallback path
@@ -838,7 +1059,12 @@ function drawPlainText(
     scaleFactor: number,
     textPaddingV: number,
     textPaddingH: number,
+    outputWidth: number,
     wordEmphases?: KeywordEmphasis[],
+    wordTimings?: WordTiming[],
+    sourceTime?: number,
+    eventStartTime?: number,
+    eventEndTime?: number,
 ): void {
     ctx.textAlign = (style.textAlign as CanvasTextAlign) || 'center';
     ctx.textBaseline = 'alphabetic';
@@ -972,6 +1198,23 @@ function drawPlainText(
         }
     }
 
+    // Draw word highlight box (karaoke) — after background, before text
+    if (style.wordHighlightEnabled && sourceTime != null) {
+        drawWordHighlightBox(
+            ctx, text, style, scaleFactor, fontSize, lineHeight,
+            textPaddingH, outputWidth,
+            wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, sourceTime,
+        );
+    }
+
+    // Compute active word index for per-word coloring
+    const ptHlActiveIdx = (style.wordHighlightEnabled && sourceTime != null)
+        ? getActiveWordInfo(wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, text, sourceTime).activeIndex
+        : -1;
+    const ptHlIdleOpacity = style.wordHighlightIdleOpacity ?? 1.0;
+    const ptHlActiveColor = style.wordHighlightActiveColor || null;
+    const ptApplyHl = ptHlActiveIdx >= 0 && (ptHlIdleOpacity < 1 || ptHlActiveColor);
+
     // Text glow (separate blend mode)
     if (style.glowBlur && style.glowBlur > 0) {
         ctx.save();
@@ -1026,8 +1269,8 @@ function drawPlainText(
     const hasGradient = style.gradientType && style.gradientType !== 'none' && plainGradStops;
     const hasKeywords = emphasisMap.size > 0;
 
-    if (hasKeywords) {
-        // Per-word rendering for keyword coloring (matching viewport behavior)
+    if (hasKeywords || ptApplyHl) {
+        // Per-word rendering for keyword coloring + word highlight styling
         ctx.textAlign = 'left';
         let globalWordIdx = 0;
 
@@ -1056,7 +1299,22 @@ function drawPlainText(
                 }
 
                 const kwEntry = emphasisMap.get(globalWordIdx);
-                if (kwEntry) {
+                const isActiveToken = ptApplyHl && globalWordIdx === ptHlActiveIdx;
+                const isIdleToken = ptApplyHl && !isActiveToken && ptHlIdleOpacity < 1;
+
+                // Apply idle word opacity
+                if (isIdleToken) {
+                    ctx.globalAlpha = ptHlIdleOpacity;
+                } else {
+                    ctx.globalAlpha = 1;
+                }
+
+                if (isActiveToken && ptHlActiveColor) {
+                    // Active word with highlight color override
+                    ctx.globalCompositeOperation = plainTextOp;
+                    ctx.fillStyle = ptHlActiveColor;
+                    ctx.fillText(token, xPos, lineY);
+                } else if (kwEntry) {
                     // Keyword: draw with keyword color
                     ctx.globalCompositeOperation = plainTextOp;
                     ctx.fillStyle = kwEntry.color || '#FFD700';
@@ -1102,6 +1360,7 @@ function drawPlainText(
                 xPos += tokenWidth;
             }
         }
+        ctx.globalAlpha = 1; // restore
     } else if (hasGradient) {
         // No keywords, but has gradient — draw all lines with gradient
         ctx.globalCompositeOperation = toCompositeOp(style.gradientBlendMode) !== 'source-over'

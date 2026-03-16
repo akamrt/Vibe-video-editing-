@@ -447,6 +447,120 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
               </div>
             </Accordion>
 
+            <Accordion title="Word Highlight" defaultOpen={false}>
+              <div className="space-y-4">
+                {/* Enable toggle */}
+                <Field label="Enable Word Highlight" stack={false}>
+                  <label className="relative inline-flex items-center cursor-pointer ml-auto">
+                    <input
+                      type="checkbox"
+                      checked={!!subtitleStyle.wordHighlightEnabled}
+                      onChange={(e) => onUpdateSubtitleStyle({ wordHighlightEnabled: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-indigo-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+                  </label>
+                </Field>
+
+                {subtitleStyle.wordHighlightEnabled && (
+                  <div className="space-y-4">
+                    <Group title="Box Style">
+                      <Field label="Color" stack={true}>
+                        <ColorPicker
+                          value={subtitleStyle.wordHighlightColor || '#FFD700'}
+                          onChange={(v) => onUpdateSubtitleStyle({ wordHighlightColor: v })}
+                        />
+                      </Field>
+                      <Field label="Opacity" rightLabel={`${Math.round((subtitleStyle.wordHighlightOpacity ?? 0.85) * 100)}%`} stack={true}>
+                        <input type="range" min="0" max="1" step="0.05" value={subtitleStyle.wordHighlightOpacity ?? 0.85} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightOpacity: parseFloat(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Border Radius" rightLabel={`${subtitleStyle.wordHighlightBorderRadius ?? 4}px`} stack={true}>
+                        <input type="range" min="0" max="24" step="1" value={subtitleStyle.wordHighlightBorderRadius ?? 4} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightBorderRadius: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Scale" rightLabel={`${(subtitleStyle.wordHighlightScale ?? 1.0).toFixed(2)}×`} stack={true}>
+                        <input type="range" min="0.5" max="2.0" step="0.05" value={subtitleStyle.wordHighlightScale ?? 1.0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightScale: parseFloat(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Blend Mode" stack={true}>
+                        <select
+                          value={subtitleStyle.wordHighlightBlendMode || 'normal'}
+                          onChange={(e) => onUpdateSubtitleStyle({ wordHighlightBlendMode: e.target.value })}
+                          className="w-full bg-[#121212] border border-[#333] text-gray-300 text-[11px] rounded px-2 py-1.5 focus:outline-none focus:border-indigo-500"
+                        >
+                          {LAYER_BLEND_MODES.map(m => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1).replace('-', ' ')}</option>)}
+                        </select>
+                      </Field>
+                    </Group>
+
+                    <Group title="Padding">
+                      <div className="grid grid-cols-2 gap-3">
+                        <Field label="Horizontal" rightLabel={`${subtitleStyle.wordHighlightPaddingH ?? 4}px`} stack={true}>
+                          <input type="range" min="0" max="20" step="1" value={subtitleStyle.wordHighlightPaddingH ?? 4} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightPaddingH: parseInt(e.target.value) })} className={rangeClass} />
+                        </Field>
+                        <Field label="Vertical" rightLabel={`${subtitleStyle.wordHighlightPaddingV ?? 2}px`} stack={true}>
+                          <input type="range" min="0" max="20" step="1" value={subtitleStyle.wordHighlightPaddingV ?? 2} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightPaddingV: parseInt(e.target.value) })} className={rangeClass} />
+                        </Field>
+                      </div>
+                    </Group>
+
+                    <Group title="Text Override">
+                      <Field label="Active Word Color" stack={true}>
+                        <div className="flex items-center gap-2">
+                          <ColorPicker
+                            value={subtitleStyle.wordHighlightActiveColor || '#ffffff'}
+                            onChange={(v) => onUpdateSubtitleStyle({ wordHighlightActiveColor: v })}
+                          />
+                          {subtitleStyle.wordHighlightActiveColor && (
+                            <button
+                              className="text-[10px] text-gray-500 hover:text-red-400 whitespace-nowrap"
+                              onClick={() => onUpdateSubtitleStyle({ wordHighlightActiveColor: '' })}
+                            >None</button>
+                          )}
+                        </div>
+                      </Field>
+                      <Field label="Idle Word Opacity" rightLabel={`${Math.round((subtitleStyle.wordHighlightIdleOpacity ?? 1.0) * 100)}%`} stack={true}>
+                        <input type="range" min="0" max="1" step="0.05" value={subtitleStyle.wordHighlightIdleOpacity ?? 1.0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightIdleOpacity: parseFloat(e.target.value) })} className={rangeClass} />
+                      </Field>
+                    </Group>
+
+                    <Group title="Transition">
+                      <Field label="Slide Duration" rightLabel={`${subtitleStyle.wordHighlightTransitionMs ?? 150}ms`} stack={true}>
+                        <input type="range" min="0" max="500" step="10" value={subtitleStyle.wordHighlightTransitionMs ?? 150} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightTransitionMs: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                    </Group>
+
+                    <Group title="Shadow &amp; Glow">
+                      <Field label="Shadow Color" stack={true}>
+                        <ColorPicker
+                          value={subtitleStyle.wordHighlightShadowColor || '#000000'}
+                          onChange={(v) => onUpdateSubtitleStyle({ wordHighlightShadowColor: v })}
+                        />
+                      </Field>
+                      <Field label="Shadow Blur" rightLabel={`${subtitleStyle.wordHighlightShadowBlur ?? 0}px`} stack={true}>
+                        <input type="range" min="0" max="20" step="1" value={subtitleStyle.wordHighlightShadowBlur ?? 0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightShadowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <div className="grid grid-cols-2 gap-3">
+                        <Field label="Shadow X" rightLabel={`${subtitleStyle.wordHighlightShadowOffsetX ?? 0}px`} stack={true}>
+                          <input type="range" min="-10" max="10" step="1" value={subtitleStyle.wordHighlightShadowOffsetX ?? 0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightShadowOffsetX: parseInt(e.target.value) })} className={rangeClass} />
+                        </Field>
+                        <Field label="Shadow Y" rightLabel={`${subtitleStyle.wordHighlightShadowOffsetY ?? 0}px`} stack={true}>
+                          <input type="range" min="-10" max="10" step="1" value={subtitleStyle.wordHighlightShadowOffsetY ?? 0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightShadowOffsetY: parseInt(e.target.value) })} className={rangeClass} />
+                        </Field>
+                      </div>
+                      <Field label="Glow Color" stack={true}>
+                        <ColorPicker
+                          value={subtitleStyle.wordHighlightGlowColor || '#FFD700'}
+                          onChange={(v) => onUpdateSubtitleStyle({ wordHighlightGlowColor: v })}
+                        />
+                      </Field>
+                      <Field label="Glow Blur" rightLabel={`${subtitleStyle.wordHighlightGlowBlur ?? 0}px`} stack={true}>
+                        <input type="range" min="0" max="30" step="1" value={subtitleStyle.wordHighlightGlowBlur ?? 0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightGlowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                    </Group>
+                  </div>
+                )}
+              </div>
+            </Accordion>
+
             <Accordion title="Layout & Rules" defaultOpen={false}>
               <div className="space-y-4">
                 <Field label="Vertical Position" rightLabel={`${subtitleStyle.bottomOffset}%`} stack={true}>

@@ -1680,6 +1680,10 @@ function App() {
               totalRotation: kfTransform.rotation,
               wordEmphases: subtitle.wordEmphases,
               keywordAnimation: kwAnim,
+              wordTimings: subtitle.wordTimings,
+              sourceTime,
+              eventStartTime: subtitle.startTime,
+              eventEndTime: subtitle.endTime,
             });
           }
         }
@@ -5627,12 +5631,42 @@ function App() {
                                   wordEmphases={activeSubtitleEvent.wordEmphases}
                                   keywordAnimation={kwAnim || undefined}
                                   onWordClick={handleToggleSubtitleKeyword}
+                                  wordHighlightStyle={displayStyle}
+                                  sourceTime={sourceTime}
+                                  eventStartTime={activeSubtitleEvent.startTime}
+                                  eventEndTime={activeSubtitleEvent.endTime}
+                                  wordTimings={activeSubtitleEvent.wordTimings}
                                 />
                               </div>
                             </div>
                           );
                         }
                         // Fallback: plain text (no template applied)
+                        // If word highlight is enabled, use AnimatedText with a no-op animation so it
+                        // can measure word positions and render the highlight box.
+                        const topSegFb = activeSegments[activeSegments.length - 1];
+                        const sourceTimeFb = topSegFb ? topSegFb.startTime + (project.currentTime - topSegFb.timelineStart) : 0;
+                        if (displayStyle.wordHighlightEnabled) {
+                          const noOpAnim = { scope: 'word' as const, effects: [], duration: 0, stagger: 0 };
+                          return (
+                            <div style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
+                              <AnimatedText
+                                text={activeSubtitleEvent.details}
+                                animation={noOpAnim}
+                                style={styles.text}
+                                frame={0}
+                                fps={REMOTION_FPS}
+                                wordEmphases={activeSubtitleEvent.wordEmphases}
+                                onWordClick={handleToggleSubtitleKeyword}
+                                wordHighlightStyle={displayStyle}
+                                sourceTime={sourceTimeFb}
+                                eventStartTime={activeSubtitleEvent.startTime}
+                                eventEndTime={activeSubtitleEvent.endTime}
+                                wordTimings={activeSubtitleEvent.wordTimings}
+                              />
+                            </div>
+                          );
+                        }
                         // Extract gradient for per-word application (can't use backgroundClip on box element)
                         const textGradientVal = (styles.text as any)['--text-gradient'] as string | undefined;
                         const gradientFill: React.CSSProperties = textGradientVal ? {

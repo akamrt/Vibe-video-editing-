@@ -1,6 +1,31 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, useEffect, useState } from 'react';
 import { interpolate, Easing, spring } from 'remotion';
-import type { TextAnimation, AnimationEffect, EasingType, KeywordEmphasis } from '../../types';
+import type { TextAnimation, AnimationEffect, EasingType, KeywordEmphasis, SubtitleStyle } from '../../types';
+import { getActiveWordInfo, type WordTiming } from '../../utils/wordHighlightUtils';
+
+interface WordRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** Convert a hex color + 0-1 opacity to a CSS rgba() string */
+function hexToRgba(hex: string, opacity: number): string {
+  const clean = (hex.startsWith('#') ? hex.slice(1) : hex).replace(/[^0-9a-fA-F]/g, '');
+  const len = clean.length;
+  let r = 0, g = 0, b = 0;
+  if (len === 3) {
+    r = parseInt(clean[0] + clean[0], 16);
+    g = parseInt(clean[1] + clean[1], 16);
+    b = parseInt(clean[2] + clean[2], 16);
+  } else if (len >= 6) {
+    r = parseInt(clean.slice(0, 2), 16) || 0;
+    g = parseInt(clean.slice(2, 4), 16) || 0;
+    b = parseInt(clean.slice(4, 6), 16) || 0;
+  }
+  return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, opacity))})`;
+}
 
 interface AnimatedTextProps {
   text: string;
@@ -15,6 +40,14 @@ interface AnimatedTextProps {
   keywordAnimation?: TextAnimation;
   /** Click handler for individual words (wordIndex, word text). Only used in viewport, not Remotion export. */
   onWordClick?: (wordIndex: number, word: string) => void;
+  // ── Word highlight box (karaoke) ──
+  /** Pass the subtitle style to enable/read wordHighlight* settings. */
+  wordHighlightStyle?: SubtitleStyle;
+  /** Current source video time in seconds. Required for highlight to work. */
+  sourceTime?: number;
+  eventStartTime?: number;
+  eventEndTime?: number;
+  wordTimings?: WordTiming[];
 }
 
 const mapEasing = (easing: EasingType): ((t: number) => number) | null => {
@@ -71,7 +104,10 @@ function computeEffectValue(effect: AnimationEffect, elmLocalFrame: number, tota
   return interpolate(t, [0, 1], [effect.from, effect.to]);
 }
 
-const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, frame, fps, wordEmphases, keywordAnimation, onWordClick }) => {
+const AnimatedText: React.FC<AnimatedTextProps> = ({
+  text, animation, style, frame, fps, wordEmphases, keywordAnimation, onWordClick,
+  wordHighlightStyle, sourceTime, eventStartTime, eventEndTime, wordTimings,
+}) => {
   // Split text based on scope
   const elements = useMemo(() => {
     if (animation.scope === 'character') return text.split('');
@@ -113,6 +149,107 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
     });
   }, [elements, animation.scope, emphasisMap, onWordClick]);
 
+  // ── Word highlight box ──
+  const wordHighlightEnabled = !!wordHighlightStyle?.wordHighlightEnabled && sourceTime != null;
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [wordRects, setWordRects] = useState<Map<number, WordRect>>(new Map());
+
+  // Measure word span positions after DOM settles (browser only, not Remotion SSR)
+  useEffect(() => {
+    if (!wordHighlightEnabled) return;
+    const container = containerRef.current;
+    if (!container) return;
+    const spans = container.querySelectorAll<HTMLSpanElement>('[data-word-idx]');
+    if (spans.length === 0) return;
+    const newRects = new Map<number, WordRect>();
+    spans.forEach(span => {
+      const idx = parseInt(span.dataset.wordIdx!, 10);
+      if (!isNaN(idx)) {
+        newRects.set(idx, {
+          left: span.offsetLeft,
+          top: span.offsetTop,
+          width: span.offsetWidth,
+          height: span.offsetHeight,
+        });
+      }
+    });
+    setWordRects(newRects);
+  }, [wordHighlightEnabled, text, animation.scope]);
+
+  const activeWordInfo = useMemo(() => {
+    if (!wordHighlightEnabled) return null;
+    return getActiveWordInfo(
+      wordTimings,
+      eventStartTime ?? 0,
+      eventEndTime ?? 0,
+      text,
+      sourceTime!,
+    );
+  }, [wordHighlightEnabled, wordTimings, eventStartTime, eventEndTime, text, sourceTime]);
+
+  const activeWordIndex = activeWordInfo?.activeIndex ?? -1;
+
+  // Build highlight box position + style
+  const highlightBoxStyle = useMemo((): React.CSSProperties | null => {
+    if (!wordHighlightEnabled || !wordHighlightStyle || activeWordIndex < 0) return null;
+    const rect = wordRects.get(activeWordIndex);
+    if (!rect || rect.width === 0) return null;
+
+    const hlColor = wordHighlightStyle.wordHighlightColor ?? '#FFD700';
+    const hlOpacity = wordHighlightStyle.wordHighlightOpacity ?? 0.85;
+    const paddingH = wordHighlightStyle.wordHighlightPaddingH ?? 4;
+    const paddingV = wordHighlightStyle.wordHighlightPaddingV ?? 2;
+    const hlRadius = wordHighlightStyle.wordHighlightBorderRadius ?? 4;
+    const hlBlendMode = wordHighlightStyle.wordHighlightBlendMode ?? 'normal';
+    const transitionMs = wordHighlightStyle.wordHighlightTransitionMs ?? 150;
+    const hlScale = wordHighlightStyle.wordHighlightScale ?? 1.0;
+    const shadowColor = wordHighlightStyle.wordHighlightShadowColor;
+    const shadowBlur = wordHighlightStyle.wordHighlightShadowBlur ?? 0;
+    const shadowX = wordHighlightStyle.wordHighlightShadowOffsetX ?? 0;
+    const shadowY = wordHighlightStyle.wordHighlightShadowOffsetY ?? 0;
+    const glowColor = wordHighlightStyle.wordHighlightGlowColor;
+    const glowBlur = wordHighlightStyle.wordHighlightGlowBlur ?? 0;
+
+    const baseW = rect.width + 2 * paddingH;
+    const baseH = rect.height + 2 * paddingV;
+    const scaledW = baseW * hlScale;
+    const scaledH = baseH * hlScale;
+    const left = rect.left - paddingH - (scaledW - baseW) / 2;
+    const top = rect.top - paddingV - (scaledH - baseH) / 2;
+
+    const shadows: string[] = [];
+    if (shadowColor && (shadowBlur > 0 || shadowX !== 0 || shadowY !== 0)) {
+      shadows.push(`${shadowX}px ${shadowY}px ${shadowBlur}px ${shadowColor}`);
+    }
+    if (glowColor && glowBlur > 0) {
+      shadows.push(`0 0 ${glowBlur}px ${glowColor}`);
+      shadows.push(`0 0 ${glowBlur * 1.5}px ${glowColor}`);
+    }
+
+    return {
+      position: 'absolute',
+      left,
+      top,
+      width: scaledW,
+      height: scaledH,
+      backgroundColor: hexToRgba(hlColor, hlOpacity),
+      borderRadius: hlRadius,
+      mixBlendMode: hlBlendMode as React.CSSProperties['mixBlendMode'],
+      boxShadow: shadows.length > 0 ? shadows.join(', ') : undefined,
+      transition: `left ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
+        + `top ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
+        + `width ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
+        + `height ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1)`,
+      pointerEvents: 'none',
+      zIndex: 0,
+    };
+  }, [wordHighlightEnabled, wordHighlightStyle, activeWordIndex, wordRects]);
+
+  const idleOpacity = wordHighlightEnabled ? (wordHighlightStyle?.wordHighlightIdleOpacity ?? 1.0) : 1.0;
+  const activeColor = wordHighlightEnabled ? (wordHighlightStyle?.wordHighlightActiveColor || null) : null;
+  const applyHighlightStyling = wordHighlightEnabled && (idleOpacity < 1 || activeColor);
+
   // Separate container styles (font, color, background) from transform styles
   const { padding, ...allContainerStyle } = style;
 
@@ -131,6 +268,7 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
 
   return (
     <div
+      ref={containerRef}
       style={{
         display: 'flex',
         flexDirection: animation.scope === 'line' ? 'column' : 'row',
@@ -146,6 +284,9 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
         padding, // Apply padding to the container, NOT per-element
       }}
     >
+      {/* Highlight box — rendered first so it's visually behind the text */}
+      {highlightBoxStyle && <div style={highlightBoxStyle} />}
+
       {elements.map((el, rawIndex) => {
         const staggerIndex = animatableIndices[rawIndex];
 
@@ -191,9 +332,16 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
                 }
                 wOp = Math.max(0, Math.min(1, wOp));
 
+                // Apply idle/active highlight styling
+                const isActiveWord = applyHighlightStyling && globalIdx === activeWordIndex;
+                if (applyHighlightStyling && !isActiveWord && idleOpacity < 1) {
+                  wOp *= idleOpacity;
+                }
+
                 return (
                   <span
                     key={ti}
+                    data-word-idx={globalIdx}
                     style={{
                       display: 'inline-block',
                       opacity: wOp,
@@ -208,8 +356,10 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
                   >
                     <span style={{
                       display: 'inline-block',
-                      color: kwEntry ? (kwEntry.color || '#FFD700') : undefined,
-                      ...(!kwEntry ? textFillProps : {}), // Dont apply global gradient to keyword emphasized words if they have their own color
+                      color: isActiveWord && activeColor
+                        ? activeColor
+                        : kwEntry ? (kwEntry.color || '#FFD700') : undefined,
+                      ...(!kwEntry && !(isActiveWord && activeColor) ? textFillProps : {}),
                     }}>
                       {token}
                     </span>
@@ -263,6 +413,12 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
 
         opacity = Math.max(0, Math.min(1, opacity));
 
+        // Apply idle/active highlight styling for word scope
+        const isActiveWord = applyHighlightStyling && animation.scope === 'word' && staggerIndex === activeWordIndex;
+        if (applyHighlightStyling && animation.scope === 'word' && !isActiveWord && idleOpacity < 1) {
+          opacity *= idleOpacity;
+        }
+
         // At word scope, staggerIndex IS the word index — direct emphasisMap lookup
         const isKeywordDirect = animation.scope === 'word' && isKw;
 
@@ -271,7 +427,7 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
           // Word scope: outer span handles clicks directly
           if (animation.scope === 'word') return el;
           // No interactivity needed and no keywords to highlight
-          if (!emphasisMap && !onWordClick) return el;
+          if (!emphasisMap && !onWordClick && !applyHighlightStyling) return el;
           const tokens = el.split(/(\s+)/);
           let localWordIdx = 0;
           const baseOffset = wordOffsets[rawIndex] ?? 0;
@@ -280,11 +436,16 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
             const globalIdx = baseOffset + localWordIdx;
             localWordIdx++;
             const kwEntry = emphasisMap?.get(globalIdx);
+            const isActiveToken = applyHighlightStyling && globalIdx === activeWordIndex;
             return (
               <span
                 key={ti}
+                data-word-idx={globalIdx}
                 style={{
-                  ...(kwEntry ? { color: kwEntry.color || '#FFD700' } : textFillProps)
+                  opacity: applyHighlightStyling && !isActiveToken && idleOpacity < 1 ? idleOpacity : undefined,
+                  ...(isActiveToken && activeColor
+                    ? { color: activeColor }
+                    : kwEntry ? { color: kwEntry.color || '#FFD700' } : textFillProps)
                 }}
                 onClick={onWordClick ? (e) => { e.stopPropagation(); onWordClick(globalIdx, token); } : undefined}
                 className={onWordClick ? 'cursor-pointer' : undefined}
@@ -295,9 +456,13 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
           });
         };
 
+        // Word index attribute for highlight measurement
+        const wordIdxAttr = animation.scope === 'word' ? { 'data-word-idx': staggerIndex } : {};
+
         return (
           <span
             key={rawIndex}
+            {...wordIdxAttr}
             onClick={onWordClick && animation.scope === 'word' ? (e) => {
               e.stopPropagation();
               onWordClick(staggerIndex, el);
@@ -317,10 +482,12 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({ text, animation, style, fra
           >
             <span style={{
               display: 'inline-block',
-              color: isKeywordDirect
-                ? (emphasisMap!.get(staggerIndex)!.color || '#FFD700')
-                : containerStyle.color || undefined,
-              ...(!isKeywordDirect && (animation.scope === 'word' || !emphasisMap) ? textFillProps : {}),
+              color: isActiveWord && activeColor
+                ? activeColor
+                : isKeywordDirect
+                  ? (emphasisMap!.get(staggerIndex)!.color || '#FFD700')
+                  : containerStyle.color || undefined,
+              ...(!isKeywordDirect && !(isActiveWord && activeColor) && (animation.scope === 'word' || !emphasisMap) ? textFillProps : {}),
             }}>
               {renderContent()}
             </span>
