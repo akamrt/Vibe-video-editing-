@@ -267,6 +267,7 @@ export interface SubtitleStyle {
   wordHighlightGlowBlur?: number;
   wordHighlightOffsetX?: number;         // manual X offset px, default 0
   wordHighlightOffsetY?: number;         // manual Y offset px, default 0
+  wordHighlightSkipKeywords?: boolean;   // skip keyword-emphasized words (highlight jumps past them)
 
   // In-flight effects (applied while active word is still animating in)
   wordHighlightFlightColorEnabled?: boolean;
@@ -354,6 +355,7 @@ export interface TitleStyle {
   wordHighlightGlowBlur?: number;
   wordHighlightOffsetX?: number;         // manual X offset px, default 0
   wordHighlightOffsetY?: number;         // manual Y offset px, default 0
+  wordHighlightSkipKeywords?: boolean;   // skip keyword-emphasized words (highlight jumps past them)
 
   // In-flight effects (applied while active word is still animating in)
   wordHighlightFlightColorEnabled?: boolean;

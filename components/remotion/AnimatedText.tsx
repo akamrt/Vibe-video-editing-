@@ -202,24 +202,39 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
 
   const activeWordIndex = activeWordInfo?.activeIndex ?? -1;
 
+  // If skipKeywords is enabled, find the nearest non-keyword word index
+  const skipKeywords = !!wordHighlightStyle?.wordHighlightSkipKeywords;
+  const highlightWordIndex = useMemo(() => {
+    if (activeWordIndex < 0 || !skipKeywords || !emphasisMap) return activeWordIndex;
+    // If current word is a keyword, walk backward to the nearest non-keyword word
+    let idx = activeWordIndex;
+    while (idx >= 0 && emphasisMap.has(idx)) idx--;
+    // If all preceding words are keywords, try walking forward instead
+    if (idx < 0) {
+      idx = activeWordIndex;
+      while (emphasisMap.has(idx)) idx++;
+    }
+    return idx;
+  }, [activeWordIndex, skipKeywords, emphasisMap]);
+
   // In-flight progress for the active word: 0 = just became spoken, 1 = fully settled.
   // Based on speech timing (wordTimings), NOT animation entrance timing.
   const wordAnimProgress = useMemo(() => {
-    if (!wordHighlightEnabled || activeWordIndex < 0) return 1;
+    if (!wordHighlightEnabled || highlightWordIndex < 0) return 1;
     // Effect duration: use animation.duration when available, else 0.3s default
     const effectDur = animation.duration > 0 ? animation.duration : 0.3;
     return getWordFlightProgress(
-      activeWordIndex, wordTimings, text,
+      highlightWordIndex, wordTimings, text,
       eventStartTime ?? 0, eventEndTime ?? 0,
       frame, fps, effectDur,
     );
-  }, [wordHighlightEnabled, activeWordIndex, wordTimings, text,
+  }, [wordHighlightEnabled, highlightWordIndex, wordTimings, text,
       eventStartTime, eventEndTime, animation.duration, frame, fps]);
 
   // Build highlight box position + style — applies settled values and lerps in-flight effects
   const highlightBoxStyle = useMemo((): React.CSSProperties | null => {
-    if (!wordHighlightEnabled || !wordHighlightStyle || activeWordIndex < 0) return null;
-    const rect = wordRects.get(activeWordIndex);
+    if (!wordHighlightEnabled || !wordHighlightStyle || highlightWordIndex < 0) return null;
+    const rect = wordRects.get(highlightWordIndex);
     if (!rect || rect.width === 0) return null;
 
     // Detect chunk boundary — snap instantly so the box doesn't slide back to word 0
@@ -315,7 +330,7 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
       pointerEvents: 'none',
       zIndex: 0,
     };
-  }, [wordHighlightEnabled, wordHighlightStyle, activeWordIndex, wordRects, eventStartTime,
+  }, [wordHighlightEnabled, wordHighlightStyle, highlightWordIndex, wordRects, eventStartTime,
       wordAnimProgress]);
 
   const idleOpacity = wordHighlightEnabled ? (wordHighlightStyle?.wordHighlightIdleOpacity ?? 1.0) : 1.0;

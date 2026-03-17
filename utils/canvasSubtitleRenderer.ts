@@ -553,6 +553,7 @@ function drawWordHighlightBox(
     fps: number,
     animStagger: number,
     animDuration: number,
+    wordEmphases?: KeywordEmphasis[],
 ): void {
     const hlColor = style.wordHighlightColor ?? '#FFD700';
     const hlOpacity = style.wordHighlightOpacity ?? 0.85;
@@ -583,7 +584,19 @@ function drawWordHighlightBox(
     if (wordRects.length === 0) return;
 
     const info = getActiveWordInfo(wordTimings, eventStartTime, eventEndTime, text, sourceTime);
-    const activeIdx = Math.max(0, Math.min(info.activeIndex, wordRects.length - 1));
+    let activeIdx = Math.max(0, Math.min(info.activeIndex, wordRects.length - 1));
+
+    // Skip keyword-emphasized words if enabled
+    if (style.wordHighlightSkipKeywords && wordEmphases && wordEmphases.length > 0) {
+        const kwSet = new Set(wordEmphases.filter(kw => kw.enabled).map(kw => kw.wordIndex));
+        if (kwSet.has(activeIdx)) {
+            let idx = activeIdx;
+            while (idx >= 0 && kwSet.has(idx)) idx--;
+            if (idx < 0) { idx = activeIdx; while (idx < wordRects.length && kwSet.has(idx)) idx++; }
+            if (idx >= wordRects.length) return; // all words are keywords — nothing to highlight
+            activeIdx = idx;
+        }
+    }
 
     // Compute in-flight progress based on speech timing (when word starts being spoken)
     const effectDur = animDuration > 0 ? animDuration : 0.3;
@@ -931,6 +944,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
             wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, sourceTime,
             frame, fps,
             0, effectiveAnimation.duration,
+            wordEmphases,
         );
     }
 
@@ -1252,6 +1266,7 @@ function drawPlainText(
             textPaddingH, outputWidth,
             wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, sourceTime,
             frame ?? 0, fps ?? 30, animStagger ?? 0, animDuration ?? 0,
+            wordEmphases,
         );
     }
 

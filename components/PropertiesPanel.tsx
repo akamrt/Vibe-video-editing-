@@ -464,6 +464,17 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
 
                 {subtitleStyle.wordHighlightEnabled && (
                   <div className="space-y-4">
+                    <Field label="Skip Keywords" stack={false}>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!subtitleStyle.wordHighlightSkipKeywords}
+                          onChange={(e) => onUpdateSubtitleStyle({ wordHighlightSkipKeywords: e.target.checked })}
+                          className="sr-only peer"
+                        />
+                        <div className="w-9 h-5 bg-[#333] rounded-full peer peer-checked:bg-indigo-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+                      </label>
+                    </Field>
                     <Group title="Box Style">
                       <Field label="Color" stack={true}>
                         <ColorPicker
