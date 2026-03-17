@@ -157,6 +157,27 @@ interface ElementAnimValues {
     keywordColor: string | null;
 }
 
+/**
+ * Post-process a split(/(\s+)/) array so that \n characters are always
+ * isolated as their own tokens. Without this, " \n" or "\n " get grouped
+ * as a single whitespace token and newline detection fails.
+ */
+function splitNewlinesFromWhitespace(tokens: string[]): string[] {
+    const result: string[] = [];
+    for (const token of tokens) {
+        if (/^\s+$/.test(token) && token.includes('\n')) {
+            const parts = token.split('\n');
+            for (let i = 0; i < parts.length; i++) {
+                if (parts[i]) result.push(parts[i]);
+                if (i < parts.length - 1) result.push('\n');
+            }
+        } else {
+            result.push(token);
+        }
+    }
+    return result;
+}
+
 function computeElementAnimations(
     text: string,
     animation: TextAnimation,
@@ -295,7 +316,7 @@ function computeElementAnimations(
         baseOpacity = Math.max(0, Math.min(1, baseOpacity));
 
         // Now split the text into individual words/spaces for per-word keyword coloring
-        const tokens = text.split(/(\s+)/);
+        const tokens = splitNewlinesFromWhitespace(text.split(/(\s+)/));
         let globalWordIdx = 0;
         return tokens.map((token: string) => {
             if (/^\s+$/.test(token)) {
@@ -359,7 +380,7 @@ function computeElementAnimations(
     // --- Word scope (or character scope) ---
     let elements: string[];
     if (animation.scope === 'character') elements = text.split('');
-    else elements = text.split(/(\s+)/); // word scope
+    else elements = splitNewlinesFromWhitespace(text.split(/(\s+)/)); // word scope
 
     // Build stagger indices (skip whitespace tokens for word scope)
     let animatableIndices: number[];
@@ -873,7 +894,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     const elements = computeElementAnimations(text, effectiveAnimation, frame, fps, wordEmphases, keywordAnimation);
 
     // Check if we have multi-line content (line-scope or text with \n)
-    const hasNewlines = elements.some(el => el.text === '\n');
+    const hasNewlines = elements.some(el => el.text.includes('\n'));
 
     // Measure all elements (skip newline markers)
     const elementWidths = elements.map((el: ElementAnimValues) => {
