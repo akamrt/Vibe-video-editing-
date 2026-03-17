@@ -4544,14 +4544,23 @@ function App() {
   };
 
   const [removingSilences, setRemovingSilences] = useState(false);
+  const [silenceThreshold, setSilenceThreshold] = useState(0.3);
+  const [showSilencePanel, setShowSilencePanel] = useState(false);
+  const silenceButtonRef = useRef<HTMLButtonElement>(null);
 
-  const handleRemoveSilences = async () => {
+  const handleRemoveSilences = async (selectedOnly?: boolean) => {
     if (project.segments.length === 0 || removingSilences) return;
     setRemovingSilences(true);
+    setShowSilencePanel(false);
 
     try {
-      // Collect unique mediaIds from segments
-      const mediaIds = [...new Set(project.segments.map(s => s.mediaId))];
+      // Use selected segments if requested and any are selected, otherwise all segments
+      const targetSegments = selectedOnly && selectedSegmentIds.length > 0
+        ? project.segments.filter(s => selectedSegmentIds.includes(s.id))
+        : project.segments;
+
+      // Collect unique mediaIds from target segments
+      const mediaIds = [...new Set(targetSegments.map(s => s.mediaId))];
 
       // Decode audio for each media (try full-res, fall back to low-res for large files)
       const audioBuffers = new Map<string, AudioBuffer>();
@@ -4590,11 +4599,11 @@ function App() {
       let totalDuration = 0;
 
       for (const [mediaId, audioBuf] of audioBuffers) {
-        // Only scan within the source ranges actually used by segments on the timeline
-        const mediaSegments = project.segments.filter(s => s.mediaId === mediaId);
-        const gaps = findSilenceGaps(audioBuf, 0.3, 20);
+        // Only scan within the source ranges actually used by target segments
+        const mediaSegments = targetSegments.filter(s => s.mediaId === mediaId);
+        const gaps = findSilenceGaps(audioBuf, silenceThreshold, 20);
 
-        // Filter gaps to only those that fall within segment source ranges
+        // Filter gaps to only those that fall within target segment source ranges
         const relevantGaps = gaps.filter(gap =>
           mediaSegments.some(seg =>
             gap.start < seg.endTime && gap.end > seg.startTime
@@ -4609,7 +4618,7 @@ function App() {
       }
 
       if (totalGaps === 0) {
-        alert('No silence gaps found (>300ms).');
+        alert(`No silence gaps found (>${(silenceThreshold * 1000).toFixed(0)}ms).`);
         return;
       }
 
@@ -5404,8 +5413,11 @@ function App() {
         </button>
 
         <button
-          title={removingSilences ? 'Removing silences...' : 'Remove Silences'}
-          onClick={handleRemoveSilences}
+          ref={silenceButtonRef}
+          title={removingSilences ? 'Removing silences...' : 'Remove Silences — click to configure'}
+          onClick={() => {
+            if (!removingSilences) setShowSilencePanel(p => !p);
+          }}
           disabled={project.segments.length === 0 || removingSilences || status !== ProcessingStatus.IDLE}
           className={`p-2 rounded hover:text-white hover:bg-[#333] disabled:opacity-50 ${removingSilences ? 'text-purple-300 animate-pulse' : 'text-purple-400'}`}>
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -5413,6 +5425,63 @@ function App() {
             <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
           </svg>
         </button>
+
+        {showSilencePanel && (() => {
+          const rect = silenceButtonRef.current?.getBoundingClientRect();
+          const top = rect ? rect.top : 400;
+          const hasSelection = selectedSegmentIds.length > 0;
+          return (
+            <div
+              style={{ position: 'fixed', left: 60, top: Math.max(8, Math.min(top, window.innerHeight - 220)), zIndex: 300 }}
+              className="w-64 bg-[#1e1e1e] border border-[#444] rounded-lg shadow-2xl p-3 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-white">Remove Silences</span>
+                <button onClick={() => setShowSilencePanel(false)} className="text-gray-500 hover:text-white text-xs">{'\u2715'}</button>
+              </div>
+              <p className="text-[10px] text-gray-400 leading-tight">
+                Detects silence gaps using audio energy analysis — <span className="text-green-400 font-semibold">no AI tokens</span>. Cuts are snapped to zero-crossings with 20ms padding to avoid clipping speech.
+              </p>
+
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-gray-300">Min silence duration</label>
+                  <span className="text-xs font-mono text-purple-400">{(silenceThreshold * 1000).toFixed(0)}ms</span>
+                </div>
+                <input
+                  type="range" min={100} max={2000} step={50}
+                  value={silenceThreshold * 1000}
+                  onChange={e => setSilenceThreshold(Number(e.target.value) / 1000)}
+                  className="w-full h-1.5 cursor-pointer"
+                  style={{ accentColor: '#c084fc' }}
+                />
+                <div className="flex justify-between text-[9px] text-gray-500">
+                  <span>100ms — tight</span>
+                  <span>500ms</span>
+                  <span>2000ms — conservative</span>
+                </div>
+              </div>
+
+              <div className="border-t border-[#333] pt-2 flex flex-col gap-1.5">
+                {hasSelection && (
+                  <button
+                    onClick={() => handleRemoveSilences(true)}
+                    disabled={removingSilences}
+                    className="w-full py-1.5 px-2 bg-purple-700 hover:bg-purple-600 text-white text-xs rounded disabled:opacity-50 flex items-center gap-1.5">
+                    <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
+                    Remove from Selected ({selectedSegmentIds.length} clip{selectedSegmentIds.length !== 1 ? 's' : ''})
+                  </button>
+                )}
+                <button
+                  onClick={() => handleRemoveSilences(false)}
+                  disabled={removingSilences}
+                  className={`w-full py-1.5 px-2 text-xs rounded disabled:opacity-50 flex items-center gap-1.5 ${hasSelection ? 'bg-[#2a2a3a] hover:bg-[#334] border border-purple-800 text-purple-300' : 'bg-purple-700 hover:bg-purple-600 text-white'}`}>
+                  <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 10h16M4 14h16M4 18h16" /></svg>
+                  Remove from All Clips
+                </button>
+              </div>
+            </div>
+          );
+        })()}
 
       </div>
 
