@@ -129,6 +129,39 @@ export function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - Math.max(0, Math.min(1, t)), 3);
 }
 
+/**
+ * Compute in-flight progress (0→1) for the active word based on speech timing.
+ * 0 = word just became the active spoken word (effect at full strength).
+ * 1 = effect has fully decayed (settled state).
+ *
+ * Uses word-level timestamps (from ASR or estimated) to determine when the
+ * word starts being spoken, then measures elapsed frames against effectDuration.
+ * This decouples the in-flight effect from the template entrance animation so
+ * effects fire regardless of animation scope or stagger timing.
+ */
+export function getWordFlightProgress(
+  activeIndex: number,
+  wordTimings: WordTiming[] | undefined,
+  text: string,
+  eventStartTime: number,
+  eventEndTime: number,
+  frame: number,
+  fps: number,
+  effectDuration: number, // seconds — how long the burst lasts
+): number {
+  if (activeIndex < 0) return 1;
+  const timings = wordTimings && wordTimings.length > 0
+    ? wordTimings
+    : estimateWordTimings(text, eventStartTime, eventEndTime);
+  const wordTiming = timings[activeIndex];
+  if (!wordTiming) return 1;
+  const wordActiveFrame = (wordTiming.start - eventStartTime) * fps;
+  const effectDurFrames = effectDuration * fps;
+  if (effectDurFrames <= 0) return 1;
+  const elapsed = frame - wordActiveFrame;
+  return Math.max(0, Math.min(1, elapsed / effectDurFrames));
+}
+
 /** Lerp between two hex colors by decomposing into R/G/B channels */
 export function lerpColor(hexA: string, hexB: string, t: number): string {
   function hexToRgb(hex: string): [number, number, number] {

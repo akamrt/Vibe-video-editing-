@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useEffect, useState } from 'react';
 import { interpolate, Easing, spring } from 'remotion';
 import type { TextAnimation, AnimationEffect, EasingType, KeywordEmphasis, SubtitleStyle } from '../../types';
-import { getActiveWordInfo, lerp, easeOutCubic, lerpColor, type WordTiming } from '../../utils/wordHighlightUtils';
+import { getActiveWordInfo, getWordFlightProgress, lerp, easeOutCubic, lerpColor, type WordTiming } from '../../utils/wordHighlightUtils';
 
 interface WordRect {
   left: number;
@@ -202,21 +202,19 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
 
   const activeWordIndex = activeWordInfo?.activeIndex ?? -1;
 
-  // In-flight progress for the active word: 0 = just started animating, 1 = fully settled.
-  // Guards: only meaningful when scope is 'word' and animation has effects.
+  // In-flight progress for the active word: 0 = just became spoken, 1 = fully settled.
+  // Based on speech timing (wordTimings), NOT animation entrance timing.
   const wordAnimProgress = useMemo(() => {
-    if (
-      !wordHighlightEnabled ||
-      activeWordIndex < 0 ||
-      animation.effects.length === 0 ||
-      animation.scope !== 'word'
-    ) return 1;
-    const wordStartFrame = activeWordIndex * animation.stagger * fps;
-    const wordEndFrame = wordStartFrame + animation.duration * fps;
-    if (wordEndFrame <= wordStartFrame) return 1;
-    return Math.max(0, Math.min(1, (frame - wordStartFrame) / (wordEndFrame - wordStartFrame)));
-  }, [wordHighlightEnabled, activeWordIndex, animation.effects.length, animation.scope,
-      animation.stagger, animation.duration, frame, fps]);
+    if (!wordHighlightEnabled || activeWordIndex < 0) return 1;
+    // Effect duration: use animation.duration when available, else 0.3s default
+    const effectDur = animation.duration > 0 ? animation.duration : 0.3;
+    return getWordFlightProgress(
+      activeWordIndex, wordTimings, text,
+      eventStartTime ?? 0, eventEndTime ?? 0,
+      frame, fps, effectDur,
+    );
+  }, [wordHighlightEnabled, activeWordIndex, wordTimings, text,
+      eventStartTime, eventEndTime, animation.duration, frame, fps]);
 
   // Build highlight box position + style — applies settled values and lerps in-flight effects
   const highlightBoxStyle = useMemo((): React.CSSProperties | null => {

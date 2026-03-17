@@ -21,7 +21,7 @@
 import { interpolate, Easing, spring } from 'remotion';
 import type { TextAnimation, AnimationEffect, EasingType, SubtitleStyle, KeywordEmphasis } from '../types';
 import { resolveGradientStops, applyStopsToCanvasGradient } from './gradientUtils';
-import { getActiveWordInfo, lerp, easeOutCubic, lerpColor, type WordTiming } from './wordHighlightUtils';
+import { getActiveWordInfo, getWordFlightProgress, lerp, easeOutCubic, lerpColor, type WordTiming } from './wordHighlightUtils';
 
 // ─── Easing Mapping (mirrors AnimatedText.tsx) ────────────────────────────────
 
@@ -585,12 +585,13 @@ function drawWordHighlightBox(
     const info = getActiveWordInfo(wordTimings, eventStartTime, eventEndTime, text, sourceTime);
     const activeIdx = Math.max(0, Math.min(info.activeIndex, wordRects.length - 1));
 
-    // Compute in-flight progress for the active word
-    const wordStartFrame = activeIdx * animStagger * fps;
-    const wordEndFrame = wordStartFrame + animDuration * fps;
-    const rawProgress = (wordEndFrame > wordStartFrame)
-        ? Math.max(0, Math.min(1, (frame - wordStartFrame) / (wordEndFrame - wordStartFrame)))
-        : 1;
+    // Compute in-flight progress based on speech timing (when word starts being spoken)
+    const effectDur = animDuration > 0 ? animDuration : 0.3;
+    const rawProgress = getWordFlightProgress(
+        activeIdx, wordTimings, text,
+        eventStartTime, eventEndTime,
+        frame, fps, effectDur,
+    );
     const isInFlight = rawProgress < 1;
     const easedP = easeOutCubic(rawProgress);
 
@@ -757,7 +758,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     if ((!animation || animation.effects.length === 0) && !keywordAnimation) {
         drawPlainText(ctx, text, style, fontSize, scaleFactor, textPaddingV, textPaddingH, outputWidth, wordEmphases,
             wordTimings, sourceTime, eventStartTime, eventEndTime,
-            frame, fps, animation?.stagger ?? 0, animation?.duration ?? 0);
+            frame, fps, 0, animation?.duration ?? 0);
         ctx.restore();
         return;
     }
@@ -929,8 +930,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
             textPaddingH, outputWidth,
             wordTimings, eventStartTime ?? 0, eventEndTime ?? 0, sourceTime,
             frame, fps,
-            effectiveAnimation.scope === 'word' ? effectiveAnimation.stagger : 0,
-            effectiveAnimation.scope === 'word' ? effectiveAnimation.duration : 0,
+            0, effectiveAnimation.duration,
         );
     }
 
