@@ -1689,6 +1689,56 @@ function App() {
         }
       });
 
+      // --- TITLE DRAWING (outside segment loop — titles are global) ---
+      const titleLayer = projectRef.current.titleLayer;
+      if (titleLayer && currentTime >= titleLayer.startTime && currentTime < titleLayer.endTime) {
+        const titleStyle = titleLayer.style || projectRef.current.titleStyle;
+        const titleTemplate = projectRef.current.activeTitleTemplate;
+        const titleAnim = titleLayer.animation || titleTemplate?.animation || null;
+
+        const titleClipTime = currentTime - titleLayer.startTime;
+        const titleDuration = titleLayer.endTime - titleLayer.startTime;
+        const titleLocalFrame = Math.round(titleClipTime * settings.fps);
+
+        // Fade-in / fade-out opacity
+        let titleOpacity = 1;
+        if (titleLayer.fadeInDuration > 0 && titleClipTime < titleLayer.fadeInDuration) {
+          titleOpacity = titleClipTime / titleLayer.fadeInDuration;
+        }
+        if (titleLayer.fadeOutDuration > 0 && titleClipTime > (titleDuration - titleLayer.fadeOutDuration)) {
+          titleOpacity = (titleDuration - titleClipTime) / titleLayer.fadeOutDuration;
+        }
+
+        // Keyframe transforms
+        let titleKfTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+        if (titleLayer.keyframes && titleLayer.keyframes.length > 0) {
+          titleKfTransform = getInterpolatedTransform(titleLayer.keyframes, titleClipTime);
+        }
+
+        if (shouldLog) {
+          console.log(`[Export] Title: "${titleLayer.text.slice(0, 40)}" opacity=${titleOpacity.toFixed(2)} frame=${titleLocalFrame}`);
+        }
+
+        drawSubtitleOnCanvas({
+          ctx,
+          text: titleLayer.text,
+          style: titleStyle as any,
+          templateStyle: titleTemplate?.style || null,
+          animation: titleAnim,
+          frame: titleLocalFrame,
+          fps: settings.fps,
+          outputWidth,
+          outputHeight,
+          viewportSafeZoneHeight: safeZoneHeight,
+          totalTx: titleKfTransform.translateX,
+          totalTy: titleKfTransform.translateY,
+          totalScale: titleKfTransform.scale,
+          totalRotation: titleKfTransform.rotation,
+          topOffset: (titleStyle as any).topOffset ?? 15,
+          globalOpacity: titleOpacity,
+        });
+      }
+
       requestAnimationFrame(renderLoop);
     };
 
