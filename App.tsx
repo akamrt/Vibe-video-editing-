@@ -29,6 +29,7 @@ import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
 import { getAudioBuffer, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache } from './utils/audioAnalysis';
 import { crossfadeVolumes } from './utils/audioCrossfade';
+import { autoWrapDialogueText } from './utils/autoWrapText';
 import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
 import { loadGoogleFont } from './services/googleFontsService';
 
@@ -3330,6 +3331,31 @@ function App() {
     updateSelectedEvent(evt => ({ ...evt, details: newText }));
   };
 
+  const handleAutoWrapDialogue = () => {
+    if (!selectedDialogue) return;
+    const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+    const current = media?.analysis?.events[selectedDialogue.index];
+    if (!current || current.type !== 'dialogue') return;
+
+    // Compute max width from safe zone
+    const szWidth = safeZoneRef.current?.getBoundingClientRect().width || viewportSize.width || 640;
+    const maxWidth = szWidth * 0.9; // 90% to account for padding
+
+    const style = current.styleOverride || project.subtitleStyle;
+    const newText = autoWrapDialogueText(
+      current.details,
+      style.fontSize || 16,
+      style.fontFamily || 'Arial',
+      maxWidth,
+      style.bold,
+    );
+
+    if (newText !== current.details) {
+      pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+      updateSelectedEvent(evt => ({ ...evt, details: newText }));
+    }
+  };
+
   const handleToggleSubtitleKeyword = (wordIndex: number, word: string) => {
     if (!currentTopMedia || !activeSubtitleEvent) return;
     const evtIndex = currentTopMedia.analysis?.events.indexOf(activeSubtitleEvent) ?? -1;
@@ -3647,6 +3673,25 @@ function App() {
 
     try {
       const analysis = await performDeepAnalysis(media.file, media.duration, customPrompt, media.analysis, { skipAudio });
+      // Auto-wrap dialogue for portrait aspect ratio
+      if (viewportSettings.previewAspectRatio === '9:16') {
+        const szWidth = safeZoneRef.current?.getBoundingClientRect().width || 200;
+        const maxWidth = szWidth * 0.9;
+        const style = project.subtitleStyle;
+        if (analysis && analysis.events) {
+          for (const event of analysis.events) {
+            if (event.type === 'dialogue') {
+              event.details = autoWrapDialogueText(
+                event.details,
+                style.fontSize || 16,
+                style.fontFamily || 'Arial',
+                maxWidth,
+                style.bold,
+              );
+            }
+          }
+        }
+      }
       setProject(prev => ({
         ...prev,
         library: prev.library.map(m => m.id === mediaId ? { ...m, analysis } : m)
@@ -5026,6 +5071,7 @@ function App() {
               onUpdateSegment={(s: Segment) => handleUpdateSegments([s])}
               onUpdateTransition={handleUpdateTransition}
               onUpdateDialogueText={handleUpdateDialogueText}
+              onAutoWrapDialogue={handleAutoWrapDialogue}
               onUpdateSubtitleStyle={handleUpdateSubtitleStyle}
               onToggleSubtitleUnlink={handleToggleSubtitleUnlink}
               onAnalyze={performDeepAnalysis}
