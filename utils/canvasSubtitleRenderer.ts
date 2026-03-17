@@ -492,6 +492,10 @@ interface DrawSubtitleOptions {
     sourceTime?: number;
     eventStartTime?: number;
     eventEndTime?: number;
+    /** If provided, positions text from top instead of bottom (for titles) */
+    topOffset?: number;
+    /** Global opacity multiplier (0-1), for fade-in/fade-out effects */
+    globalOpacity?: number;
 }
 
 // ─── Word Highlight Box Helpers ───────────────────────────────────────────────
@@ -853,11 +857,22 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     // Calculate base position
     // Viewport: `bottom: ${bottomOffset}%` inside a safe zone of height sz.h
     // Canvas equivalent: y from top = outputHeight * (1 - bottomOffset/100)
-    const bottomOffset = style.bottomOffset ?? 10;
-    const yBase = outputHeight * (1 - bottomOffset / 100);
+    let yBase: number;
+    if (opts.topOffset != null) {
+        // Title positioning: from top
+        yBase = outputHeight * (opts.topOffset / 100) + fontSize;
+    } else {
+        const bottomOffset = style.bottomOffset ?? 10;
+        yBase = outputHeight * (1 - bottomOffset / 100);
+    }
     const xBase = outputWidth / 2;
 
     ctx.save();
+
+    // Apply global opacity (for title fade-in/fade-out)
+    if (opts.globalOpacity != null && opts.globalOpacity < 1) {
+        ctx.globalAlpha = opts.globalOpacity;
+    }
 
     // Apply global transforms (drag + keyframe position/scale/rotation)
     // Viewport: translate(${tx * sz.w / 100}px, ${ty * sz.h / 100}px)
