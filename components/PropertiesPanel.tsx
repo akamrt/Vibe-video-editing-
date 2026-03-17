@@ -556,6 +556,67 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                         <input type="range" min="0" max="30" step="1" value={subtitleStyle.wordHighlightGlowBlur ?? 0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightGlowBlur: parseInt(e.target.value) })} className={rangeClass} />
                       </Field>
                     </Group>
+                    <Group title="In-Flight Effects">
+                      <p className="text-xs text-gray-400 mb-2">Effects while a word is animating in. Each fades out as the word settles.</p>
+                      <div className="space-y-3">
+                        {/* Color Burst */}
+                        <div>
+                          <label className="flex items-center gap-2 text-xs text-gray-300 mb-2 cursor-pointer">
+                            <input type="checkbox" checked={!!subtitleStyle.wordHighlightFlightColorEnabled} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightFlightColorEnabled: e.target.checked })} className="accent-blue-500" />
+                            Color Burst
+                          </label>
+                          {subtitleStyle.wordHighlightFlightColorEnabled && (
+                            <div className="pl-4 space-y-2">
+                              <Field label="Flight Color" stack={true}>
+                                <ColorPicker value={subtitleStyle.wordHighlightFlightColor || '#FFFFFF'} onChange={(v) => onUpdateSubtitleStyle({ wordHighlightFlightColor: v })} />
+                              </Field>
+                              <Field label="Flight Opacity" rightLabel={`${Math.round((subtitleStyle.wordHighlightFlightColorOpacity ?? 1) * 100)}%`} stack={true}>
+                                <input type="range" min="0" max="1" step="0.05" value={subtitleStyle.wordHighlightFlightColorOpacity ?? 1} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightFlightColorOpacity: parseFloat(e.target.value) })} className={rangeClass} />
+                              </Field>
+                            </div>
+                          )}
+                        </div>
+                        {/* Glow Surge */}
+                        <div>
+                          <label className="flex items-center gap-2 text-xs text-gray-300 mb-2 cursor-pointer">
+                            <input type="checkbox" checked={!!subtitleStyle.wordHighlightFlightGlowEnabled} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightFlightGlowEnabled: e.target.checked })} className="accent-blue-500" />
+                            Glow Surge
+                          </label>
+                          {subtitleStyle.wordHighlightFlightGlowEnabled && (
+                            <div className="pl-4 space-y-2">
+                              <Field label="Flight Glow Color" stack={true}>
+                                <ColorPicker value={subtitleStyle.wordHighlightFlightGlowColor || subtitleStyle.wordHighlightColor || '#FFD700'} onChange={(v) => onUpdateSubtitleStyle({ wordHighlightFlightGlowColor: v })} />
+                              </Field>
+                              <Field label="Flight Glow Blur" rightLabel={`${subtitleStyle.wordHighlightFlightGlowBlur ?? 20}px`} stack={true}>
+                                <input type="range" min="0" max="40" step="1" value={subtitleStyle.wordHighlightFlightGlowBlur ?? 20} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightFlightGlowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                              </Field>
+                            </div>
+                          )}
+                        </div>
+                        {/* Scale Boost */}
+                        <div>
+                          <label className="flex items-center gap-2 text-xs text-gray-300 mb-2 cursor-pointer">
+                            <input type="checkbox" checked={!!subtitleStyle.wordHighlightFlightScaleEnabled} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightFlightScaleEnabled: e.target.checked })} className="accent-blue-500" />
+                            Scale Boost
+                          </label>
+                          {subtitleStyle.wordHighlightFlightScaleEnabled && (
+                            <div className="pl-4 space-y-2">
+                              <Field label="Flight Scale" rightLabel={`${subtitleStyle.wordHighlightFlightScale ?? 1.25}×`} stack={true}>
+                                <input type="range" min="1" max="2" step="0.05" value={subtitleStyle.wordHighlightFlightScale ?? 1.25} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightFlightScale: parseFloat(e.target.value) })} className={rangeClass} />
+                              </Field>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </Group>
+                    <Group title="Position Offset">
+                      <Field label="Offset X" rightLabel={`${subtitleStyle.wordHighlightOffsetX ?? 0}px`} stack={true}>
+                        <input type="range" min="-20" max="20" step="1" value={subtitleStyle.wordHighlightOffsetX ?? 0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightOffsetX: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                      <Field label="Offset Y" rightLabel={`${subtitleStyle.wordHighlightOffsetY ?? 0}px`} stack={true}>
+                        <input type="range" min="-20" max="20" step="1" value={subtitleStyle.wordHighlightOffsetY ?? 0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightOffsetY: parseInt(e.target.value) })} className={rangeClass} />
+                      </Field>
+                    </Group>
                   </div>
                 )}
               </div>
