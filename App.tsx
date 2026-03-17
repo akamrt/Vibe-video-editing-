@@ -27,7 +27,7 @@ import { fullScanAndCenter } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
-import { getAudioBuffer, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache, findSilenceGaps } from './utils/audioAnalysis';
+import { getAudioBuffer, getAudioBufferLowRes, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache, findSilenceGaps } from './utils/audioAnalysis';
 import { crossfadeVolumes } from './utils/audioCrossfade';
 import { autoWrapDialogueText } from './utils/autoWrapText';
 import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
@@ -4553,7 +4553,7 @@ function App() {
       // Collect unique mediaIds from segments
       const mediaIds = [...new Set(project.segments.map(s => s.mediaId))];
 
-      // Decode audio for each media
+      // Decode audio for each media (try full-res, fall back to low-res for large files)
       const audioBuffers = new Map<string, AudioBuffer>();
       for (const mediaId of mediaIds) {
         const media = project.library.find(m => m.id === mediaId);
@@ -4567,7 +4567,12 @@ function App() {
             file = new File([blob], media.name || 'media', { type: blob.type });
           }
           if (file) {
-            audioBuffers.set(mediaId, await getAudioBuffer(mediaId, file));
+            try {
+              audioBuffers.set(mediaId, await getAudioBuffer(mediaId, file));
+            } catch {
+              // Full-res failed (likely file too large) — use low-res 8kHz decode
+              audioBuffers.set(mediaId, await getAudioBufferLowRes(mediaId, file));
+            }
           }
         } catch (e) {
           console.warn(`[RemoveSilences] Failed to decode audio for ${mediaId}:`, e);

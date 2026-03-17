@@ -49,6 +49,34 @@ export async function getAudioBuffer(mediaId: string, file: File): Promise<Audio
   return audioBuffer;
 }
 
+/**
+ * Decode audio at a low sample rate (8kHz mono) for energy analysis only.
+ * Uses ~5.5x less RAM than full-quality decode, allowing large files (up to 500MB).
+ * NOT suitable for waveform rendering or precise zero-crossing — only for RMS envelope.
+ */
+const lowResAudioCache = new Map<string, AudioBuffer>();
+const MAX_LOWRES_SIZE_BYTES = 500 * 1024 * 1024;
+
+export async function getAudioBufferLowRes(mediaId: string, file: File): Promise<AudioBuffer> {
+  const cached = lowResAudioCache.get(mediaId);
+  if (cached) return cached;
+
+  const sizeMB = file.size / 1024 / 1024;
+  if (file.size > MAX_LOWRES_SIZE_BYTES) {
+    throw new Error(`File too large even for low-res audio decode (${sizeMB.toFixed(0)} MB > ${MAX_LOWRES_SIZE_BYTES / 1024 / 1024} MB limit).`);
+  }
+
+  console.log(`[AudioAnalysis] Low-res decoding audio for ${mediaId} (${sizeMB.toFixed(1)} MB)...`);
+  const arrayBuffer = await file.arrayBuffer();
+  // Decode at 8kHz mono — sufficient for silence/energy detection
+  const audioContext = new OfflineAudioContext(1, 1, 8000);
+  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+  lowResAudioCache.set(mediaId, audioBuffer);
+  console.log(`[AudioAnalysis] Low-res decoded: ${audioBuffer.duration.toFixed(1)}s, ${audioBuffer.sampleRate}Hz`);
+  return audioBuffer;
+}
+
 /** Clear cached AudioBuffers when media is removed or project is reset */
 export function clearAudioBufferCache(mediaId?: string): void {
   if (mediaId) {
