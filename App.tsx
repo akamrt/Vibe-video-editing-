@@ -4557,12 +4557,20 @@ function App() {
       const audioBuffers = new Map<string, AudioBuffer>();
       for (const mediaId of mediaIds) {
         const media = project.library.find(m => m.id === mediaId);
-        if (media?.file) {
-          try {
-            audioBuffers.set(mediaId, await getAudioBuffer(mediaId, media.file));
-          } catch (e) {
-            console.warn(`[RemoveSilences] Failed to decode audio for ${mediaId}:`, e);
+        if (!media) continue;
+        try {
+          let file = media.file;
+          // After project reload, File objects are lost — reconstruct from blob URL
+          if (!file && media.url) {
+            const resp = await fetch(media.url);
+            const blob = await resp.blob();
+            file = new File([blob], media.name || 'media', { type: blob.type });
           }
+          if (file) {
+            audioBuffers.set(mediaId, await getAudioBuffer(mediaId, file));
+          }
+        } catch (e) {
+          console.warn(`[RemoveSilences] Failed to decode audio for ${mediaId}:`, e);
         }
       }
 
