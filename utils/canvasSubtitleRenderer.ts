@@ -869,10 +869,11 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
 
     ctx.save();
 
-    // Apply global opacity (for title fade-in/fade-out)
-    if (opts.globalOpacity != null && opts.globalOpacity < 1) {
-        ctx.globalAlpha = opts.globalOpacity;
-    }
+    // Global opacity multiplier for title fade-in/fade-out.
+    // Set it here for background/glow/shadow sections that inherit from this context.
+    // Inner text drawing code that sets its own globalAlpha multiplies by this value.
+    const globalOpacity = opts.globalOpacity ?? 1;
+    ctx.globalAlpha = globalOpacity;
 
     // Apply global transforms (drag + keyframe position/scale/rotation)
     // Viewport: translate(${tx * sz.w / 100}px, ${ty * sz.h / 100}px)
@@ -894,7 +895,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     if ((!animation || animation.effects.length === 0) && !keywordAnimation) {
         drawPlainText(ctx, text, style, fontSize, scaleFactor, textPaddingV, textPaddingH, outputWidth, wordEmphases,
             wordTimings, sourceTime, eventStartTime, eventEndTime,
-            frame, fps, 0, animation?.duration ?? 0);
+            frame, fps, 0, animation?.duration ?? 0, globalOpacity);
         ctx.restore();
         return;
     }
@@ -1125,7 +1126,7 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
         if (el.rotate !== 0) ctx.rotate(el.rotate * Math.PI / 180);
         if (el.scaleVal !== 1) ctx.scale(el.scaleVal, el.scaleVal);
 
-        ctx.globalAlpha = isIdleWord ? el.opacity * hlIdleOpacity : el.opacity;
+        ctx.globalAlpha = (isIdleWord ? el.opacity * hlIdleOpacity : el.opacity) * globalOpacity;
 
         // Set font again after transforms
         ctx.font = fontStr;
@@ -1249,6 +1250,7 @@ function drawPlainText(
     fps?: number,
     animStagger?: number,
     animDuration?: number,
+    globalOpacity?: number,
 ): void {
     ctx.textAlign = (style.textAlign as CanvasTextAlign) || 'center';
     ctx.textBaseline = 'alphabetic';
@@ -1445,6 +1447,7 @@ function drawPlainText(
 
     // Text fill with blend mode — with per-word keyword coloring
     ctx.save();
+    ctx.globalAlpha = globalOpacity ?? 1;
     ctx.shadowColor = 'transparent';
     ctx.shadowBlur = 0;
     ctx.shadowOffsetX = 0;
@@ -1488,11 +1491,12 @@ function drawPlainText(
                 const isActiveToken = ptApplyHl && globalWordIdx === ptHlActiveIdx;
                 const isIdleToken = ptApplyHl && !isActiveToken && ptHlIdleOpacity < 1;
 
-                // Apply idle word opacity
+                // Apply idle word opacity (multiplied by globalOpacity for title fades)
+                const go = globalOpacity ?? 1;
                 if (isIdleToken) {
-                    ctx.globalAlpha = ptHlIdleOpacity;
+                    ctx.globalAlpha = ptHlIdleOpacity * go;
                 } else {
-                    ctx.globalAlpha = 1;
+                    ctx.globalAlpha = go;
                 }
 
                 if (isActiveToken && ptHlActiveColor) {
@@ -1546,7 +1550,7 @@ function drawPlainText(
                 xPos += tokenWidth;
             }
         }
-        ctx.globalAlpha = 1; // restore
+        ctx.globalAlpha = globalOpacity ?? 1; // restore
     } else if (hasGradient) {
         // No keywords, but has gradient — draw all lines with gradient
         ctx.globalCompositeOperation = toCompositeOp(style.gradientBlendMode) !== 'source-over'
