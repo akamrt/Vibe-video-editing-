@@ -34,6 +34,7 @@ interface PropertiesPanelProps {
   onUpdateKeywordAnimation?: (animation: TextAnimation | null) => void;
   currentVolume?: number; // Interpolated volume at current playback position (0-1)
   onAddVolumeKey?: (segId: string, volume: number) => void;
+  onAutoWrapDialogue?: () => void;
 }
 
 const BLEND_MODES = [
@@ -136,6 +137,7 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   onUpdateKeywordAnimation,
   currentVolume,
   onAddVolumeKey,
+  onAutoWrapDialogue,
 }) => {
   const [analysisFocus, setAnalysisFocus] = useState('');
   const [volumeSlider, setVolumeSlider] = useState(100);
@@ -213,6 +215,15 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                   className={`${inputClass} min-h-[80px] text-sm`}
                   placeholder="Edit subtitle text..."
                 />
+                {onAutoWrapDialogue && (
+                  <button
+                    onClick={onAutoWrapDialogue}
+                    className="w-full py-1.5 px-2 bg-[#2a2a3a] hover:bg-[#333] border border-[#444] text-[10px] text-gray-300 rounded flex items-center justify-center gap-1"
+                    title="Auto-wrap text to fit current aspect ratio"
+                  >
+                    ↩ Auto-wrap for frame
+                  </button>
+                )}
               </div>
             </Accordion>
 
