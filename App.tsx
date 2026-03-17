@@ -27,7 +27,7 @@ import { fullScanAndCenter } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
-import { getAudioBuffer, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache } from './utils/audioAnalysis';
+import { getAudioBuffer, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache, findSilenceGaps } from './utils/audioAnalysis';
 import { crossfadeVolumes } from './utils/audioCrossfade';
 import { autoWrapDialogueText } from './utils/autoWrapText';
 import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
@@ -4543,6 +4543,102 @@ function App() {
     setSelectedDialogues([]);
   };
 
+  const [removingSilences, setRemovingSilences] = useState(false);
+
+  const handleRemoveSilences = async () => {
+    if (project.segments.length === 0 || removingSilences) return;
+    setRemovingSilences(true);
+
+    try {
+      // Collect unique mediaIds from segments
+      const mediaIds = [...new Set(project.segments.map(s => s.mediaId))];
+
+      // Decode audio for each media
+      const audioBuffers = new Map<string, AudioBuffer>();
+      for (const mediaId of mediaIds) {
+        const media = project.library.find(m => m.id === mediaId);
+        if (media?.file) {
+          try {
+            audioBuffers.set(mediaId, await getAudioBuffer(mediaId, media.file));
+          } catch (e) {
+            console.warn(`[RemoveSilences] Failed to decode audio for ${mediaId}:`, e);
+          }
+        }
+      }
+
+      if (audioBuffers.size === 0) {
+        alert('No audio could be decoded from the timeline clips.');
+        return;
+      }
+
+      // Find silence gaps for each media
+      const gapsByMedia = new Map<string, Array<{ start: number; end: number }>>();
+      let totalGaps = 0;
+      let totalDuration = 0;
+
+      for (const [mediaId, audioBuf] of audioBuffers) {
+        // Only scan within the source ranges actually used by segments on the timeline
+        const mediaSegments = project.segments.filter(s => s.mediaId === mediaId);
+        const gaps = findSilenceGaps(audioBuf, 0.3, 20);
+
+        // Filter gaps to only those that fall within segment source ranges
+        const relevantGaps = gaps.filter(gap =>
+          mediaSegments.some(seg =>
+            gap.start < seg.endTime && gap.end > seg.startTime
+          )
+        );
+
+        if (relevantGaps.length > 0) {
+          gapsByMedia.set(mediaId, relevantGaps);
+          totalGaps += relevantGaps.length;
+          totalDuration += relevantGaps.reduce((sum, g) => sum + (g.end - g.start), 0);
+        }
+      }
+
+      if (totalGaps === 0) {
+        alert('No silence gaps found (>300ms).');
+        return;
+      }
+
+      // Push undo snapshot
+      pushUndo({
+        type: 'segments',
+        segments: project.segments.map(s => ({ ...s })),
+      });
+
+      setProject(prev => {
+        let newSegments = [...prev.segments];
+
+        // Process each media's gaps in descending time order
+        for (const [mediaId, gaps] of gapsByMedia) {
+          const sortedDesc = [...gaps].sort((a, b) => b.start - a.start);
+          for (const gap of sortedDesc) {
+            newSegments = removeSourceRange(newSegments, mediaId, gap.start, gap.end);
+          }
+        }
+
+        // Ripple-close all gaps on the timeline
+        newSegments = rippleCloseGaps(newSegments);
+
+        // Update subtitle events that overlap removed silence regions
+        let newLibrary = [...prev.library];
+        for (const [mediaId, gaps] of gapsByMedia) {
+          const asFillers = gaps.map(g => ({ startTime: g.start, endTime: g.end, mediaId, text: '', type: 'filler' as const }));
+          newLibrary = updateSubtitleEvents(newLibrary, mediaId, asFillers);
+        }
+
+        return { ...prev, segments: newSegments, library: newLibrary, currentTime: 0 };
+      });
+
+      setSelectedSegmentIds([]);
+      setSelectedDialogues([]);
+
+      console.log(`[RemoveSilences] Removed ${totalGaps} silence gaps (${totalDuration.toFixed(1)}s total)`);
+    } finally {
+      setRemovingSilences(false);
+    }
+  };
+
   const handleRemoveTranscriptWords = async (words: RemovedWord[]) => {
     if (words.length === 0) return;
 
@@ -5292,6 +5388,17 @@ function App() {
           disabled={project.segments.length === 0 || status !== ProcessingStatus.IDLE}
           className="p-2 rounded text-amber-400 hover:text-white hover:bg-[#333] disabled:opacity-50">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" /></svg>
+        </button>
+
+        <button
+          title={removingSilences ? 'Removing silences...' : 'Remove Silences'}
+          onClick={handleRemoveSilences}
+          disabled={project.segments.length === 0 || removingSilences || status !== ProcessingStatus.IDLE}
+          className={`p-2 rounded hover:text-white hover:bg-[#333] disabled:opacity-50 ${removingSilences ? 'text-purple-300 animate-pulse' : 'text-purple-400'}`}>
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+          </svg>
         </button>
 
       </div>

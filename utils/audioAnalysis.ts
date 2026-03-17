@@ -310,6 +310,104 @@ export function snapFillerRange(
   return { startTime: snappedStart, endTime: snappedEnd };
 }
 
+// ── Silence Gap Detection ────────────────────────────────
+
+export interface SilenceGap {
+  /** Start of the silence gap in source-video seconds */
+  start: number;
+  /** End of the silence gap in source-video seconds */
+  end: number;
+}
+
+/**
+ * Scan an entire AudioBuffer and return all silence gaps >= minGapDuration.
+ *
+ * Uses the same proven analysis pipeline as findNearestSilence:
+ * - 30ms RMS windows with 67% overlap
+ * - Adaptive noise floor (10th percentile)
+ * - Quiet threshold = noiseFloor × 3
+ * - Zero-crossing refinement at boundaries for click-free cuts
+ * - Padding pulled inward from speech edges
+ */
+export function findSilenceGaps(
+  audioBuffer: AudioBuffer,
+  minGapDuration: number = 0.3,
+  paddingMs: number = 20
+): SilenceGap[] {
+  const sampleRate = audioBuffer.sampleRate;
+  const samples = audioBuffer.getChannelData(0);
+  const analysisWindowMs = 30;
+  const windowSizeSamples = Math.floor((analysisWindowMs / 1000) * sampleRate);
+  const stepSamples = Math.floor(windowSizeSamples / 3); // ~67% overlap
+  const paddingSec = paddingMs / 1000;
+
+  // Build full-clip energy envelope
+  const envelope = buildEnergyEnvelope(samples, 0, samples.length, windowSizeSamples, stepSamples);
+  if (envelope.length === 0) return [];
+
+  // Adaptive threshold
+  const noiseFloor = estimateNoiseFloor(envelope);
+  const quietThreshold = Math.max(noiseFloor * 3, 0.005);
+
+  // Find contiguous quiet regions
+  const gaps: SilenceGap[] = [];
+  let regionStartIdx = -1;
+
+  for (let i = 0; i < envelope.length; i++) {
+    if (envelope[i].rms < quietThreshold) {
+      if (regionStartIdx === -1) regionStartIdx = i;
+    } else {
+      if (regionStartIdx !== -1) {
+        // Close this quiet region
+        const startSample = envelope[regionStartIdx].sample;
+        const endSample = envelope[i - 1].sample;
+        const startTime = startSample / sampleRate;
+        const endTime = endSample / sampleRate;
+        const duration = endTime - startTime;
+
+        if (duration >= minGapDuration) {
+          // Refine boundaries to zero-crossings
+          const refinedStart = findNearestZeroCrossing(samples, startSample) / sampleRate;
+          const refinedEnd = findNearestZeroCrossing(samples, endSample) / sampleRate;
+
+          // Apply padding inward (away from speech edges)
+          const paddedStart = refinedStart + paddingSec;
+          const paddedEnd = refinedEnd - paddingSec;
+
+          if (paddedStart < paddedEnd) {
+            gaps.push({ start: paddedStart, end: paddedEnd });
+          }
+        }
+        regionStartIdx = -1;
+      }
+    }
+  }
+
+  // Close final region if open
+  if (regionStartIdx !== -1) {
+    const startSample = envelope[regionStartIdx].sample;
+    const endSample = envelope[envelope.length - 1].sample;
+    const startTime = startSample / sampleRate;
+    const endTime = endSample / sampleRate;
+
+    if (endTime - startTime >= minGapDuration) {
+      const refinedStart = findNearestZeroCrossing(samples, startSample) / sampleRate;
+      const refinedEnd = findNearestZeroCrossing(samples, endSample) / sampleRate;
+      const paddedStart = refinedStart + paddingSec;
+      const paddedEnd = refinedEnd - paddingSec;
+
+      if (paddedStart < paddedEnd) {
+        gaps.push({ start: paddedStart, end: paddedEnd });
+      }
+    }
+  }
+
+  const totalRemoved = gaps.reduce((sum, g) => sum + (g.end - g.start), 0);
+  console.log(`[AudioAnalysis] Found ${gaps.length} silence gaps >= ${minGapDuration}s (${totalRemoved.toFixed(1)}s total), noise floor=${noiseFloor.toFixed(4)}, threshold=${quietThreshold.toFixed(4)}`);
+
+  return gaps;
+}
+
 // ── Clip Boundary Snapping ───────────────────────────────
 
 export interface SnappedClipRange {
