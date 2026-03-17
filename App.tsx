@@ -1501,6 +1501,13 @@ function App() {
 
     let exportFrameCount = 0;
 
+    // Keep a copy of the last successfully drawn frame to prevent black flashes
+    // when a video element hasn't seeked to the right time yet at cut boundaries.
+    const lastGoodFrame = document.createElement('canvas');
+    lastGoodFrame.width = outputWidth;
+    lastGoodFrame.height = outputHeight;
+    const lastGoodCtx = lastGoodFrame.getContext('2d')!;
+
     const renderLoop = () => {
       // Check current time from fresh project ref
       const currentTime = projectRef.current.currentTime;
@@ -1516,10 +1523,6 @@ function App() {
 
       exportFrameCount++;
 
-      // Draw!
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, outputWidth, outputHeight);
-
       // Find ALL active segments (Multi-track support)
       const activeSegments = projectRef.current.segments
         .filter(s => currentTime >= s.timelineStart && currentTime < (s.timelineStart + (s.endTime - s.startTime)))
@@ -1529,6 +1532,22 @@ function App() {
       const shouldLog = exportFrameCount <= 5 || exportFrameCount % 60 === 0;
       if (shouldLog) {
         console.log(`[Export Frame ${exportFrameCount}] t=${currentTime.toFixed(3)}s, activeSegs=${activeSegments.length}, template=${projectRef.current.activeSubtitleTemplate?.name || 'NONE'}`);
+      }
+
+      // Check if any segment has video ready — if not, hold the last good frame
+      // to prevent black flashes at cut boundaries while video seeks.
+      const anyVideoReady = activeSegments.some(s => {
+        const v = videoRefs.current.get(s.id);
+        return v && v.readyState >= 2;
+      });
+
+      if (anyVideoReady || activeSegments.length === 0) {
+        // Clear to black only when we have video to draw (or no segments at all)
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, outputWidth, outputHeight);
+      } else {
+        // No video ready yet — redraw last good frame to avoid black flash
+        ctx.drawImage(lastGoodFrame, 0, 0);
       }
 
       activeSegments.forEach(activeSeg => {
@@ -1744,6 +1763,12 @@ function App() {
           topOffset: (titleStyle as any).topOffset ?? 15,
           globalOpacity: titleOpacity,
         });
+      }
+
+      // Save this frame as the last good frame (for fallback at cut boundaries)
+      if (anyVideoReady) {
+        lastGoodCtx.clearRect(0, 0, outputWidth, outputHeight);
+        lastGoodCtx.drawImage(canvas, 0, 0);
       }
 
       requestAnimationFrame(renderLoop);

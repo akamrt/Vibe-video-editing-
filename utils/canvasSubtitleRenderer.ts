@@ -673,17 +673,42 @@ function drawWordHighlightBox(
 
     const activeRect = wordRects[activeIdx];
 
-    // Interpolate toward next word during gap between words
+    // Smooth slide transition between words.
+    // The viewport uses CSS `transition: left 150ms` for smooth movement.
+    // We replicate this by lerping from the previous word's position when
+    // we're at the start of a new word (within transitionMs of its start).
+    const transitionMs = style.wordHighlightTransitionMs ?? 150;
+    const transitionSec = transitionMs / 1000;
     let finalRect = { ...activeRect };
+
     if (info.gapProgress > 0 && info.nextIndex >= 0 && info.nextIndex < wordRects.length) {
+        // In the gap between words — lerp toward next word
         const nextRect = wordRects[info.nextIndex];
-        const t = info.gapProgress;
+        const t = easeOutCubic(info.gapProgress);
         finalRect = {
             x: lerp(activeRect.x, nextRect.x, t),
             y: lerp(activeRect.y, nextRect.y, t),
             width: lerp(activeRect.width, nextRect.width, t),
             height: lerp(activeRect.height, nextRect.height, t),
         };
+    } else if (activeIdx > 0 && info.progress < 1) {
+        // At the start of a new word — slide from previous word over transitionSec.
+        // Use the word timing to compute how far into the transition we are.
+        const timings = wordTimings && wordTimings.length > 0 ? wordTimings : null;
+        if (timings && activeIdx < timings.length) {
+            const wordStart = timings[activeIdx].start;
+            const elapsed = sourceTime - wordStart;
+            if (elapsed >= 0 && elapsed < transitionSec) {
+                const prevRect = wordRects[activeIdx - 1];
+                const t = easeOutCubic(elapsed / transitionSec);
+                finalRect = {
+                    x: lerp(prevRect.x, activeRect.x, t),
+                    y: lerp(prevRect.y, activeRect.y, t),
+                    width: lerp(prevRect.width, activeRect.width, t),
+                    height: lerp(prevRect.height, activeRect.height, t),
+                };
+            }
+        }
     }
 
     // Apply padding, scale, and manual offsets
