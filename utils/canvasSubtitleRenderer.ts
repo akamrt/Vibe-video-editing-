@@ -734,6 +734,62 @@ function drawWordHighlightBox(
         ctx.fillRect(bx, by, scaledW, scaledH);
     }
 
+    // ── Keyword shimmer (gradient sweep across box) ──
+    if (isKeywordActive && isInFlight && !!style.wordHighlightKwShimmerEnabled) {
+        const shimmerColor = style.wordHighlightKwShimmerColor ?? '#FFFFFF';
+        // Sweep position: -100% → 200% of box width over the effect duration
+        const sweepPos = lerp(-1, 2, rawProgress);
+        const sweepX = bx + scaledW * sweepPos;
+        const bandWidth = scaledW * 0.3; // shimmer band is 30% of box width
+
+        ctx.save();
+        // Clip to box shape
+        ctx.beginPath();
+        if (ctx.roundRect && hlRadius > 0) {
+            ctx.roundRect(bx, by, scaledW, scaledH, hlRadius);
+        } else {
+            ctx.rect(bx, by, scaledW, scaledH);
+        }
+        ctx.clip();
+
+        const grad = ctx.createLinearGradient(sweepX - bandWidth, by, sweepX + bandWidth, by);
+        grad.addColorStop(0, 'transparent');
+        grad.addColorStop(0.5, shimmerColor);
+        grad.addColorStop(1, 'transparent');
+        ctx.globalAlpha = lerp(0.5, 0, easeOutCubic(rawProgress));
+        ctx.fillStyle = grad;
+        ctx.fillRect(bx, by, scaledW, scaledH);
+        ctx.restore();
+    }
+
+    // ── Keyword particles (sparkle dots emanating from box center) ──
+    if (isKeywordActive && isInFlight && !!style.wordHighlightKwParticlesEnabled) {
+        const particleCount = style.wordHighlightKwParticleCount ?? 6;
+        const particleColor = style.wordHighlightKwParticleColor ?? '#FFD700';
+        const cx = bx + scaledW / 2;
+        const cy = by + scaledH / 2;
+        const maxDist = 30 * scaleFactor;
+
+        ctx.save();
+        for (let i = 0; i < particleCount; i++) {
+            const angle = (i / particleCount) * Math.PI * 2 + 0.3;
+            const dist = lerp(0, maxDist, rawProgress);
+            const dx = Math.cos(angle) * dist;
+            const dy = Math.sin(angle) * dist - lerp(0, 15 * scaleFactor, rawProgress); // float upward
+            const size = lerp(4 * scaleFactor, 1 * scaleFactor, rawProgress);
+            const opacity = lerp(1, 0, easeOutCubic(rawProgress));
+
+            ctx.globalAlpha = opacity;
+            ctx.fillStyle = particleColor;
+            ctx.shadowColor = particleColor;
+            ctx.shadowBlur = size;
+            ctx.beginPath();
+            ctx.arc(cx + dx, cy + dy, size / 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+
     ctx.restore();
 }
 
