@@ -278,6 +278,20 @@ export interface SubtitleStyle {
   wordHighlightFlightGlowBlur?: number;       // in-flight glow blur px, default 20
   wordHighlightFlightScaleEnabled?: boolean;
   wordHighlightFlightScale?: number;          // multiplier on top of wordHighlightScale, default 1.25
+
+  // Keyword highlight effects (replace normal in-flight effects when active word is a keyword)
+  wordHighlightKwInvertEnabled?: boolean;     // invert box/text colors
+  wordHighlightKwShimmerEnabled?: boolean;    // animated gradient sweep across box
+  wordHighlightKwShimmerColor?: string;       // shimmer highlight color, default '#FFFFFF'
+  wordHighlightKwShimmerSpeed?: number;       // shimmer cycle duration in seconds, default 0.6
+  wordHighlightKwParticlesEnabled?: boolean;  // floating sparkle particles from box
+  wordHighlightKwParticleCount?: number;      // number of particles, default 6
+  wordHighlightKwParticleColor?: string;      // particle color, default '#FFD700'
+  wordHighlightKwGlowEnabled?: boolean;       // keyword-specific glow surge
+  wordHighlightKwGlowColor?: string;          // keyword glow color, runtime fallback: keyword color
+  wordHighlightKwGlowBlur?: number;           // keyword glow blur px, default 30
+  wordHighlightKwScaleEnabled?: boolean;      // keyword-specific scale pop
+  wordHighlightKwScale?: number;              // keyword scale multiplier, default 1.4
 }
 
 // ============ TITLE LAYER ============
@@ -366,6 +380,20 @@ export interface TitleStyle {
   wordHighlightFlightGlowBlur?: number;
   wordHighlightFlightScaleEnabled?: boolean;
   wordHighlightFlightScale?: number;
+
+  // Keyword highlight effects (replace normal in-flight effects when active word is a keyword)
+  wordHighlightKwInvertEnabled?: boolean;
+  wordHighlightKwShimmerEnabled?: boolean;
+  wordHighlightKwShimmerColor?: string;
+  wordHighlightKwShimmerSpeed?: number;
+  wordHighlightKwParticlesEnabled?: boolean;
+  wordHighlightKwParticleCount?: number;
+  wordHighlightKwParticleColor?: string;
+  wordHighlightKwGlowEnabled?: boolean;
+  wordHighlightKwGlowColor?: string;
+  wordHighlightKwGlowBlur?: number;
+  wordHighlightKwScaleEnabled?: boolean;
+  wordHighlightKwScale?: number;
 }
 
 export interface TitleLayer {

@@ -608,12 +608,43 @@ function drawWordHighlightBox(
     const isInFlight = rawProgress < 1;
     const easedP = easeOutCubic(rawProgress);
 
-    // Derive current values
-    const currentHlColor = (flightColorEnabled && isInFlight) ? lerpColor(flightColor, hlColor, easedP) : hlColor;
-    const currentHlOpacity = (flightColorEnabled && isInFlight) ? lerp(flightColorOpacity, hlOpacity, easedP) : hlOpacity;
-    const currentGlowBlur = (flightGlowEnabled && isInFlight) ? lerp(flightGlowBlurFlight, glowBlur, easedP) : glowBlur;
-    const currentGlowColor = (flightGlowEnabled && isInFlight) ? flightGlowColor : (style.wordHighlightGlowColor ?? null);
-    const currentScale = (flightScaleEnabled && isInFlight) ? lerp(hlScale * flightScale, hlScale, easedP) : hlScale;
+    // Check if active word is a keyword — keyword effects replace normal in-flight
+    const kwSet = new Set((wordEmphases ?? []).filter(kw => kw.enabled).map(kw => kw.wordIndex));
+    const isKeywordActive = kwSet.has(activeIdx);
+
+    let currentHlColor: string;
+    let currentHlOpacity: number;
+    let currentGlowBlur: number;
+    let currentGlowColor: string | null;
+    let currentScale: number;
+
+    if (isKeywordActive) {
+        const kwInvert = !!style.wordHighlightKwInvertEnabled;
+        const kwGlowEnabled = !!style.wordHighlightKwGlowEnabled;
+        const kwEntry = (wordEmphases ?? []).find(kw => kw.enabled && kw.wordIndex === activeIdx);
+        const kwColor = kwEntry?.color || '#FFD700';
+        const kwGlowColor = style.wordHighlightKwGlowColor ?? kwColor;
+        const kwGlowBlurVal = (style.wordHighlightKwGlowBlur ?? 30) * scaleFactor;
+        const kwScaleEnabled = !!style.wordHighlightKwScaleEnabled;
+        const kwScaleVal = style.wordHighlightKwScale ?? 1.4;
+
+        if (kwInvert && isInFlight) {
+            const textColor = style.wordHighlightActiveColor || '#FFFFFF';
+            currentHlColor = lerpColor(textColor, hlColor, easedP);
+        } else {
+            currentHlColor = hlColor;
+        }
+        currentHlOpacity = hlOpacity;
+        currentGlowBlur = (kwGlowEnabled && isInFlight) ? lerp(kwGlowBlurVal, glowBlur, easedP) : glowBlur;
+        currentGlowColor = (kwGlowEnabled && isInFlight) ? kwGlowColor : (style.wordHighlightGlowColor ?? null);
+        currentScale = (kwScaleEnabled && isInFlight) ? lerp(hlScale * kwScaleVal, hlScale, easedP) : hlScale;
+    } else {
+        currentHlColor = (flightColorEnabled && isInFlight) ? lerpColor(flightColor, hlColor, easedP) : hlColor;
+        currentHlOpacity = (flightColorEnabled && isInFlight) ? lerp(flightColorOpacity, hlOpacity, easedP) : hlOpacity;
+        currentGlowBlur = (flightGlowEnabled && isInFlight) ? lerp(flightGlowBlurFlight, glowBlur, easedP) : glowBlur;
+        currentGlowColor = (flightGlowEnabled && isInFlight) ? flightGlowColor : (style.wordHighlightGlowColor ?? null);
+        currentScale = (flightScaleEnabled && isInFlight) ? lerp(hlScale * flightScale, hlScale, easedP) : hlScale;
+    }
 
     const activeRect = wordRects[activeIdx];
 

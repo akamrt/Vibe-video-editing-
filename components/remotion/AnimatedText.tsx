@@ -231,8 +231,20 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
   }, [wordHighlightEnabled, highlightWordIndex, wordTimings, text,
       eventStartTime, eventEndTime, animation.duration, frame, fps]);
 
+  // Detect if the highlight is on a keyword word
+  const isKeywordActive = useMemo(() => {
+    if (highlightWordIndex < 0 || !emphasisMap) return false;
+    return emphasisMap.has(highlightWordIndex);
+  }, [highlightWordIndex, emphasisMap]);
+
+  const activeKwColor = useMemo(() => {
+    if (!isKeywordActive || !emphasisMap) return '#FFD700';
+    return emphasisMap.get(highlightWordIndex)?.color || '#FFD700';
+  }, [isKeywordActive, emphasisMap, highlightWordIndex]);
+
   // Build highlight box position + style — applies settled values and lerps in-flight effects
-  const highlightBoxStyle = useMemo((): React.CSSProperties | null => {
+  // When active word is a keyword, keyword effects REPLACE normal in-flight effects.
+  const highlightBoxInfo = useMemo((): { style: React.CSSProperties; shimmer: boolean; shimmerColor: string; shimmerProgress: number; particles: boolean; particleCount: number; particleColor: string; particleProgress: number; borderRadius: number } | null => {
     if (!wordHighlightEnabled || !wordHighlightStyle || highlightWordIndex < 0) return null;
     const rect = wordRects.get(highlightWordIndex);
     if (!rect || rect.width === 0) return null;
@@ -259,38 +271,73 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
     const offsetX = wordHighlightStyle.wordHighlightOffsetX ?? 0;
     const offsetY = wordHighlightStyle.wordHighlightOffsetY ?? 0;
 
-    // In-flight effect fields
-    const flightColorEnabled = !!wordHighlightStyle.wordHighlightFlightColorEnabled;
-    const flightColor = wordHighlightStyle.wordHighlightFlightColor ?? '#FFFFFF';
-    const flightColorOpacity = wordHighlightStyle.wordHighlightFlightColorOpacity ?? 1.0;
-    const flightGlowEnabled = !!wordHighlightStyle.wordHighlightFlightGlowEnabled;
-    const flightGlowColor = wordHighlightStyle.wordHighlightFlightGlowColor ?? hlColor;
-    const flightGlowBlur = wordHighlightStyle.wordHighlightFlightGlowBlur ?? 20;
-    const flightScaleEnabled = !!wordHighlightStyle.wordHighlightFlightScaleEnabled;
-    const flightScale = wordHighlightStyle.wordHighlightFlightScale ?? 1.25;
-
-    // Lerp factors
     const isInFlight = wordAnimProgress < 1;
     const easedP = easeOutCubic(wordAnimProgress);
 
-    // Color Burst: lerp box color and opacity from flight → settled
-    const currentColor = (flightColorEnabled && isInFlight)
-      ? lerpColor(flightColor, hlColor, easedP)
-      : hlColor;
-    const currentOpacity = (flightColorEnabled && isInFlight)
-      ? lerp(flightColorOpacity, hlOpacity, easedP)
-      : hlOpacity;
+    let currentColor: string;
+    let currentOpacity: number;
+    let currentGlowBlur: number;
+    let currentGlowColor: string | null;
+    let currentScale: number;
+    let shimmerActive = false;
+    let shimmerColor = '#FFFFFF';
+    let particlesActive = false;
+    let particleCount = 6;
+    let particleColor = '#FFD700';
 
-    // Glow Surge: lerp glow blur from flightGlowBlur → static glowBlur (replaces static glow during flight)
-    const currentGlowBlur = (flightGlowEnabled && isInFlight)
-      ? lerp(flightGlowBlur, glowBlur, easedP)
-      : glowBlur;
-    const currentGlowColor = (flightGlowEnabled && isInFlight) ? flightGlowColor : glowColor;
+    if (isKeywordActive) {
+      // ── Keyword effects (replace normal in-flight) ──
+      const kwInvert = !!wordHighlightStyle.wordHighlightKwInvertEnabled;
+      const kwGlowEnabled = !!wordHighlightStyle.wordHighlightKwGlowEnabled;
+      const kwGlowColor = wordHighlightStyle.wordHighlightKwGlowColor ?? activeKwColor;
+      const kwGlowBlurVal = wordHighlightStyle.wordHighlightKwGlowBlur ?? 30;
+      const kwScaleEnabled = !!wordHighlightStyle.wordHighlightKwScaleEnabled;
+      const kwScaleVal = wordHighlightStyle.wordHighlightKwScale ?? 1.4;
 
-    // Scale Boost: flightScale is a multiplier on top of settled hlScale
-    const currentScale = (flightScaleEnabled && isInFlight)
-      ? lerp(hlScale * flightScale, hlScale, easedP)
-      : hlScale;
+      // Invert Flash: swap text and box colors, decaying back
+      if (kwInvert && isInFlight) {
+        const textColor = wordHighlightStyle.wordHighlightActiveColor || '#FFFFFF';
+        currentColor = lerpColor(textColor, hlColor, easedP);
+        currentOpacity = hlOpacity;
+      } else {
+        currentColor = hlColor;
+        currentOpacity = hlOpacity;
+      }
+
+      // Keyword Glow
+      currentGlowBlur = (kwGlowEnabled && isInFlight)
+        ? lerp(kwGlowBlurVal, glowBlur, easedP) : glowBlur;
+      currentGlowColor = (kwGlowEnabled && isInFlight) ? kwGlowColor : glowColor;
+
+      // Keyword Scale
+      currentScale = (kwScaleEnabled && isInFlight)
+        ? lerp(hlScale * kwScaleVal, hlScale, easedP) : hlScale;
+
+      // Shimmer
+      shimmerActive = !!wordHighlightStyle.wordHighlightKwShimmerEnabled && isInFlight;
+      shimmerColor = wordHighlightStyle.wordHighlightKwShimmerColor ?? '#FFFFFF';
+
+      // Particles
+      particlesActive = !!wordHighlightStyle.wordHighlightKwParticlesEnabled && isInFlight;
+      particleCount = wordHighlightStyle.wordHighlightKwParticleCount ?? 6;
+      particleColor = wordHighlightStyle.wordHighlightKwParticleColor ?? '#FFD700';
+    } else {
+      // ── Normal in-flight effects ──
+      const flightColorEnabled = !!wordHighlightStyle.wordHighlightFlightColorEnabled;
+      const flightColor = wordHighlightStyle.wordHighlightFlightColor ?? '#FFFFFF';
+      const flightColorOpacity = wordHighlightStyle.wordHighlightFlightColorOpacity ?? 1.0;
+      const flightGlowEnabled = !!wordHighlightStyle.wordHighlightFlightGlowEnabled;
+      const flightGlowColor = wordHighlightStyle.wordHighlightFlightGlowColor ?? hlColor;
+      const flightGlowBlurVal = wordHighlightStyle.wordHighlightFlightGlowBlur ?? 20;
+      const flightScaleEnabled = !!wordHighlightStyle.wordHighlightFlightScaleEnabled;
+      const flightScaleVal = wordHighlightStyle.wordHighlightFlightScale ?? 1.25;
+
+      currentColor = (flightColorEnabled && isInFlight) ? lerpColor(flightColor, hlColor, easedP) : hlColor;
+      currentOpacity = (flightColorEnabled && isInFlight) ? lerp(flightColorOpacity, hlOpacity, easedP) : hlOpacity;
+      currentGlowBlur = (flightGlowEnabled && isInFlight) ? lerp(flightGlowBlurVal, glowBlur, easedP) : glowBlur;
+      currentGlowColor = (flightGlowEnabled && isInFlight) ? flightGlowColor : glowColor;
+      currentScale = (flightScaleEnabled && isInFlight) ? lerp(hlScale * flightScaleVal, hlScale, easedP) : hlScale;
+    }
 
     const baseW = rect.width + 2 * paddingH;
     const baseH = rect.height + 2 * paddingV;
@@ -308,30 +355,40 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
       shadows.push(`0 0 ${currentGlowBlur * 1.5}px ${currentGlowColor}`);
     }
 
-    // CSS transition: exclude width/height while in-flight (Scale Boost drives those via frame math)
     const slidePart = `left ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
       + `top ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1)`;
     const sizePart = `, width ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1), `
       + `height ${transitionMs}ms cubic-bezier(0.25, 0.1, 0.25, 1)`;
 
     return {
-      position: 'absolute',
-      left,
-      top,
-      width: scaledW,
-      height: scaledH,
-      backgroundColor: currentColor.startsWith('rgb(')
-        ? currentColor.replace('rgb(', 'rgba(').replace(')', `, ${currentOpacity})`)
-        : hexToRgba(currentColor, currentOpacity),
+      style: {
+        position: 'absolute' as const,
+        left,
+        top,
+        width: scaledW,
+        height: scaledH,
+        backgroundColor: currentColor.startsWith('rgb(')
+          ? currentColor.replace('rgb(', 'rgba(').replace(')', `, ${currentOpacity})`)
+          : hexToRgba(currentColor, currentOpacity),
+        borderRadius: hlRadius,
+        mixBlendMode: hlBlendMode as React.CSSProperties['mixBlendMode'],
+        boxShadow: shadows.length > 0 ? shadows.join(', ') : undefined,
+        transition: isNewChunk ? 'none' : (isInFlight ? slidePart : slidePart + sizePart),
+        pointerEvents: 'none' as const,
+        zIndex: 0,
+        overflow: 'hidden' as const,
+      },
+      shimmer: shimmerActive,
+      shimmerColor,
+      shimmerProgress: wordAnimProgress,
+      particles: particlesActive,
+      particleCount,
+      particleColor,
+      particleProgress: wordAnimProgress,
       borderRadius: hlRadius,
-      mixBlendMode: hlBlendMode as React.CSSProperties['mixBlendMode'],
-      boxShadow: shadows.length > 0 ? shadows.join(', ') : undefined,
-      transition: isNewChunk ? 'none' : (isInFlight ? slidePart : slidePart + sizePart),
-      pointerEvents: 'none',
-      zIndex: 0,
     };
   }, [wordHighlightEnabled, wordHighlightStyle, highlightWordIndex, wordRects, eventStartTime,
-      wordAnimProgress]);
+      wordAnimProgress, isKeywordActive, activeKwColor]);
 
   const idleOpacity = wordHighlightEnabled ? (wordHighlightStyle?.wordHighlightIdleOpacity ?? 1.0) : 1.0;
   const activeColor = wordHighlightEnabled ? (wordHighlightStyle?.wordHighlightActiveColor || null) : null;
@@ -372,7 +429,52 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
       }}
     >
       {/* Highlight box — rendered first so it's visually behind the text */}
-      {highlightBoxStyle && <div style={highlightBoxStyle} />}
+      {highlightBoxInfo && (
+        <div style={highlightBoxInfo.style}>
+          {/* Shimmer gradient sweep overlay */}
+          {highlightBoxInfo.shimmer && (() => {
+            const p = highlightBoxInfo.shimmerProgress;
+            // Sweep position: -100% → 200% over the effect duration
+            const sweepPos = lerp(-100, 200, p);
+            return (
+              <div style={{
+                position: 'absolute', inset: 0,
+                borderRadius: highlightBoxInfo.borderRadius,
+                background: `linear-gradient(110deg, transparent ${sweepPos - 30}%, ${highlightBoxInfo.shimmerColor}88 ${sweepPos}%, transparent ${sweepPos + 30}%)`,
+                pointerEvents: 'none',
+                opacity: lerp(0.9, 0, easeOutCubic(p)),
+              }} />
+            );
+          })()}
+          {/* Particle burst overlay */}
+          {highlightBoxInfo.particles && (() => {
+            const p = highlightBoxInfo.particleProgress;
+            const particles = [];
+            for (let i = 0; i < highlightBoxInfo.particleCount; i++) {
+              const angle = (i / highlightBoxInfo.particleCount) * Math.PI * 2 + 0.3;
+              const dist = lerp(0, 30, p);
+              const dx = Math.cos(angle) * dist;
+              const dy = Math.sin(angle) * dist - lerp(0, 15, p); // float upward
+              const size = lerp(4, 1, p);
+              const opacity = lerp(1, 0, easeOutCubic(p));
+              particles.push(
+                <div key={i} style={{
+                  position: 'absolute',
+                  left: '50%', top: '50%',
+                  width: size, height: size,
+                  borderRadius: '50%',
+                  backgroundColor: highlightBoxInfo.particleColor,
+                  transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`,
+                  opacity,
+                  pointerEvents: 'none',
+                  boxShadow: `0 0 ${size}px ${highlightBoxInfo.particleColor}`,
+                }} />
+              );
+            }
+            return <>{particles}</>;
+          })()}
+        </div>
+      )}
 
       {elements.map((el, rawIndex) => {
         const staggerIndex = animatableIndices[rawIndex];

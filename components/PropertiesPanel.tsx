@@ -620,6 +620,78 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                         </div>
                       </div>
                     </Group>
+                    <Group title="Keyword Effects">
+                      <p className="text-xs text-gray-400 mb-2">Special effects when highlight lands on a keyword. Replaces normal in-flight effects.</p>
+                      <div className="space-y-3">
+                        {/* Invert Flash */}
+                        <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                          <input type="checkbox" checked={!!subtitleStyle.wordHighlightKwInvertEnabled} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightKwInvertEnabled: e.target.checked })} className="accent-blue-500" />
+                          Invert Flash
+                        </label>
+                        {/* Shimmer */}
+                        <div>
+                          <label className="flex items-center gap-2 text-xs text-gray-300 mb-2 cursor-pointer">
+                            <input type="checkbox" checked={!!subtitleStyle.wordHighlightKwShimmerEnabled} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightKwShimmerEnabled: e.target.checked })} className="accent-blue-500" />
+                            Shimmer
+                          </label>
+                          {subtitleStyle.wordHighlightKwShimmerEnabled && (
+                            <div className="pl-4 space-y-2">
+                              <Field label="Shimmer Color" stack={true}>
+                                <ColorPicker value={subtitleStyle.wordHighlightKwShimmerColor || '#FFFFFF'} onChange={(v) => onUpdateSubtitleStyle({ wordHighlightKwShimmerColor: v })} />
+                              </Field>
+                            </div>
+                          )}
+                        </div>
+                        {/* Particles */}
+                        <div>
+                          <label className="flex items-center gap-2 text-xs text-gray-300 mb-2 cursor-pointer">
+                            <input type="checkbox" checked={!!subtitleStyle.wordHighlightKwParticlesEnabled} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightKwParticlesEnabled: e.target.checked })} className="accent-blue-500" />
+                            Particle Burst
+                          </label>
+                          {subtitleStyle.wordHighlightKwParticlesEnabled && (
+                            <div className="pl-4 space-y-2">
+                              <Field label="Particle Color" stack={true}>
+                                <ColorPicker value={subtitleStyle.wordHighlightKwParticleColor || '#FFD700'} onChange={(v) => onUpdateSubtitleStyle({ wordHighlightKwParticleColor: v })} />
+                              </Field>
+                              <Field label="Count" rightLabel={`${subtitleStyle.wordHighlightKwParticleCount ?? 6}`} stack={true}>
+                                <input type="range" min="2" max="12" step="1" value={subtitleStyle.wordHighlightKwParticleCount ?? 6} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightKwParticleCount: parseInt(e.target.value) })} className={rangeClass} />
+                              </Field>
+                            </div>
+                          )}
+                        </div>
+                        {/* Keyword Glow */}
+                        <div>
+                          <label className="flex items-center gap-2 text-xs text-gray-300 mb-2 cursor-pointer">
+                            <input type="checkbox" checked={!!subtitleStyle.wordHighlightKwGlowEnabled} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightKwGlowEnabled: e.target.checked })} className="accent-blue-500" />
+                            Keyword Glow
+                          </label>
+                          {subtitleStyle.wordHighlightKwGlowEnabled && (
+                            <div className="pl-4 space-y-2">
+                              <Field label="Glow Color" stack={true}>
+                                <ColorPicker value={subtitleStyle.wordHighlightKwGlowColor || subtitleStyle.wordHighlightColor || '#FFD700'} onChange={(v) => onUpdateSubtitleStyle({ wordHighlightKwGlowColor: v })} />
+                              </Field>
+                              <Field label="Glow Blur" rightLabel={`${subtitleStyle.wordHighlightKwGlowBlur ?? 30}px`} stack={true}>
+                                <input type="range" min="0" max="50" step="1" value={subtitleStyle.wordHighlightKwGlowBlur ?? 30} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightKwGlowBlur: parseInt(e.target.value) })} className={rangeClass} />
+                              </Field>
+                            </div>
+                          )}
+                        </div>
+                        {/* Keyword Scale */}
+                        <div>
+                          <label className="flex items-center gap-2 text-xs text-gray-300 mb-2 cursor-pointer">
+                            <input type="checkbox" checked={!!subtitleStyle.wordHighlightKwScaleEnabled} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightKwScaleEnabled: e.target.checked })} className="accent-blue-500" />
+                            Keyword Scale Pop
+                          </label>
+                          {subtitleStyle.wordHighlightKwScaleEnabled && (
+                            <div className="pl-4 space-y-2">
+                              <Field label="Scale" rightLabel={`${subtitleStyle.wordHighlightKwScale ?? 1.4}×`} stack={true}>
+                                <input type="range" min="1" max="2.5" step="0.05" value={subtitleStyle.wordHighlightKwScale ?? 1.4} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightKwScale: parseFloat(e.target.value) })} className={rangeClass} />
+                              </Field>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </Group>
                     <Group title="Position Offset">
                       <Field label="Offset X" rightLabel={`${subtitleStyle.wordHighlightOffsetX ?? 0}px`} stack={true}>
                         <input type="range" min="-20" max="20" step="1" value={subtitleStyle.wordHighlightOffsetX ?? 0} onChange={(e) => onUpdateSubtitleStyle({ wordHighlightOffsetX: parseInt(e.target.value) })} className={rangeClass} />
