@@ -160,6 +160,7 @@ function App() {
   const [project, setProject] = useState<ProjectState>(INITIAL_STATE);
   const projectRef = useRef(project);
   useEffect(() => { projectRef.current = project; }, [project]);
+  const safeZoneRef = useRef<HTMLDivElement>(null);
 
   // Server health polling — shows banner when backend is unreachable
   useEffect(() => {
@@ -1372,6 +1373,9 @@ function App() {
   const handleExportVideo = async (settings: ExportSettings) => {
     console.log('[Export] Starting REAL-TIME export:', settings);
 
+    // Capture safe zone height from DOM BEFORE export mode changes layout
+    const measuredSafeZoneHeight = safeZoneRef.current?.getBoundingClientRect().height || 0;
+
     // 0. Render ALL segments so their video elements exist for audio connection
     setIsExporting(true);
     await new Promise(r => setTimeout(r, 300)); // Wait for React to render all video elements
@@ -1427,19 +1431,21 @@ function App() {
     canvas.height = outputHeight;
     const ctx = canvas.getContext('2d')!;
 
-    // Calculate the viewport safe zone height at the moment of export.
-    // The viewport uses CSS font sizes (e.g. 16px) designed for a viewport of this height.
-    // We need this to scale fonts/positions proportionally for the export resolution.
-    let safeZoneHeight = viewportSize.height || 360;
-    const arPresetExport = viewportSettings.previewAspectRatio !== 'custom'
-      ? ASPECT_RATIO_PRESETS[viewportSettings.previewAspectRatio]
-      : null;
-    if (arPresetExport && viewportSize.width > 0 && viewportSize.height > 0) {
-      const cr = viewportSize.width / viewportSize.height;
-      if (cr > arPresetExport.ratio) {
-        safeZoneHeight = viewportSize.height;
-      } else {
-        safeZoneHeight = viewportSize.width / arPresetExport.ratio;
+    // Use actual DOM-measured safe zone height for accurate scaling.
+    // Falls back to computed value if ref wasn't available.
+    let safeZoneHeight = measuredSafeZoneHeight;
+    if (safeZoneHeight <= 0) {
+      safeZoneHeight = viewportSize.height || 360;
+      const arPresetExport = viewportSettings.previewAspectRatio !== 'custom'
+        ? ASPECT_RATIO_PRESETS[viewportSettings.previewAspectRatio]
+        : null;
+      if (arPresetExport && viewportSize.width > 0 && viewportSize.height > 0) {
+        const cr = viewportSize.width / viewportSize.height;
+        if (cr > arPresetExport.ratio) {
+          safeZoneHeight = viewportSize.height;
+        } else {
+          safeZoneHeight = viewportSize.width / arPresetExport.ratio;
+        }
       }
     }
 
@@ -5591,7 +5597,7 @@ function App() {
                     }
                   }
                   return (
-                    <div style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none' }}>
+                    <div ref={safeZoneRef} style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none' }}>
 
                       {/* Animated Subtitle Overlay */}
                       {activeSubtitleEvent && (() => {
