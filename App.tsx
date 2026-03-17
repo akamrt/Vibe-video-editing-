@@ -1529,6 +1529,19 @@ function App() {
         const clipTime = currentTime - activeSeg.timelineStart;
         const segDuration = activeSeg.endTime - activeSeg.startTime;
 
+        // --- Frame time validation (prevents jitter at cut boundaries) ---
+        if (vid && vid.readyState >= 2) {
+          const expectedSourceTime = activeSeg.startTime + clipTime;
+          const timeDiff = Math.abs(vid.currentTime - expectedSourceTime);
+          const frameDuration = 1 / settings.fps;
+          if (timeDiff > frameDuration * 2) {
+            if (shouldLog) {
+              console.log(`[Export] Skipping seg ${activeSeg.id}: vid.t=${vid.currentTime.toFixed(3)}, expected=${expectedSourceTime.toFixed(3)}, diff=${timeDiff.toFixed(3)}`);
+            }
+            return; // skip this segment in forEach
+          }
+        }
+
         // --- VIDEO DRAWING ---
         if (vid && vid.readyState >= 2) {
           const transform = getCombinedTransform(activeSeg.keyframes, clipTime, currentTime);
