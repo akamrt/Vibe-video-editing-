@@ -2709,16 +2709,40 @@ function App() {
         throw new Error('Source video not found in library');
       }
 
-      // 2. Download the video from YouTube
-      console.log('[Export Short] Downloading video:', videoRecord.url);
-      const downloadRes = await fetch(`/api/download?url=${encodeURIComponent(videoRecord.url)}&_t=${Date.now()}`);
+      // 2. Try local cache first, fall back to YouTube download
+      let blob: Blob;
+      const videoId = extractYoutubeVideoId(videoRecord.url);
+      let usedCache = false;
 
-      if (!downloadRes.ok) {
-        const errText = await downloadRes.text();
-        throw new Error(`Download failed: ${downloadRes.status} ${errText}`);
+      if (videoId) {
+        try {
+          const cacheRes = await fetch(`/api/local-cache?videoId=${videoId}`);
+          const cache = await cacheRes.json();
+          if (cache.hasVideo) {
+            console.log(`[Export Short] Found local cache for ${videoId}. Loading locally...`);
+            const localVideoRes = await fetch(`/api/local-video?videoId=${videoId}`);
+            if (localVideoRes.ok) {
+              blob = await localVideoRes.blob();
+              usedCache = true;
+              console.log('[Export Short] Loaded from local cache, size:', blob.size);
+            }
+          }
+        } catch (e) {
+          console.warn('[Export Short] Local cache check failed, falling back to download:', e);
+        }
       }
 
-      const blob = await downloadRes.blob();
+      if (!usedCache) {
+        console.log('[Export Short] Downloading video:', videoRecord.url);
+        const downloadRes = await fetch(`/api/download?url=${encodeURIComponent(videoRecord.url)}&_t=${Date.now()}`);
+
+        if (!downloadRes.ok) {
+          const errText = await downloadRes.text();
+          throw new Error(`Download failed: ${downloadRes.status} ${errText}`);
+        }
+
+        blob = await downloadRes.blob();
+      }
       console.log('[Export Short] Blob received size:', blob.size);
 
       const file = new File([blob], `${short.title}.mp4`, { type: 'video/mp4' });
