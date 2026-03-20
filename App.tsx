@@ -985,7 +985,7 @@ function App() {
 
       if (selectedSegmentIds.length > 0) {
         if (e.key === 'Delete') performDelete(selectedSegmentIds, false);
-        else if (e.key === 'Backspace') performDelete(selectedSegmentIds, true);
+        else if (e.key === 'Backspace') performDelete(selectedSegmentIds, false);
       } else if (selectedDialogue) {
         if (e.key === 'Delete' || e.key === 'Backspace') {
           handleDeleteDialogue(selectedDialogue.mediaId, selectedDialogue.index);
@@ -3675,13 +3675,12 @@ function App() {
           });
         }
       });
-      // Clean up orphaned audio links: if the deleted segment was an unlinked
-      // audio clip, restore its parent video segment back to the normal linked
-      // state so the A1 lane no longer shows a ghost reference.
+      // Clean up orphaned audio links: if the deleted segment was the unlinked
+      // audio counterpart, keep the video muted (audioLinked: false) but clear
+      // linkedSegmentId so the A1 lane filter can hide the ghost reference.
       newSegments = newSegments.map(s => {
         if (s.linkedSegmentId && deletedIdSet.has(s.linkedSegmentId) && s.type !== 'audio') {
-          const { audioLinked: _a, linkedSegmentId: _l, ...rest } = s;
-          return rest as typeof s;
+          return { ...s, linkedSegmentId: undefined };
         }
         return s;
       });

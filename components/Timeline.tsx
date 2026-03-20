@@ -1131,7 +1131,14 @@ const Timeline: React.FC<TimelineProps> = ({
                     );
                   })}
 
-                  {layoutSegments.filter(s => s.track === trackId).map((seg) => {
+                  {layoutSegments.filter(s => {
+                    if (s.track !== trackId) return false;
+                    // Hide muted video segments whose audio counterpart has been deleted —
+                    // audioLinked:false with no linkedSegmentId means the clip is muted but
+                    // the audio segment it was paired with no longer exists.
+                    if (s.type !== 'audio' && s.audioLinked === false && !s.linkedSegmentId) return false;
+                    return true;
+                  }).map((seg) => {
                     const isSelected = selectedSegmentIds.includes(seg.id);
                     const isUnlinked = seg.audioLinked === false || seg.type === 'audio';
                     const isAudioOnly = seg.type === 'audio';
