@@ -9,6 +9,7 @@ import { fetchAllTrends, getDefaultTrendState } from '../services/trendsService'
 import { TrendsTicker } from '../components/TrendsTicker';
 import { RepostRanker } from '../components/RepostRanker';
 import { TrendPromptBuilder } from '../components/TrendPromptBuilder';
+import { listShortsFiles, saveShortsToFile, loadShortsFromFile, SavedShortsInfo } from '../services/saveApi';
 
 // ==================== Types ====================
 
@@ -69,6 +70,10 @@ export const ContentLibraryPage: React.FC<{
     // External AI Input
     const [externalAiJson, setExternalAiJson] = useState('');
     const [isGeneratingPrompt, setIsGeneratingPrompt] = useState(false);
+
+    // Saved shorts files (on disk)
+    const [savedShortsFileList, setSavedShortsFileList] = useState<SavedShortsInfo[]>([]);
+    const [shortsSource, setShortsSource] = useState<'indexeddb' | string>('indexeddb');
 
     // Filler detection
     const [isDetectingFillers, setIsDetectingFillers] = useState(false);
@@ -229,6 +234,12 @@ export const ContentLibraryPage: React.FC<{
                 setGeneratedShort(result.short);
                 setRefinementPrompt(''); // Clear refinement after success
                 loadData(); // Refresh shorts list
+                // Auto-save shorts to file
+                const videoRecord = videos.find(v => v.id === shortTargetVideo);
+                contentDB.getAllShorts().then(allShorts => {
+                    const videoShorts = allShorts.filter(s => s.videoId === shortTargetVideo);
+                    saveShortsToFile(shortTargetVideo, videoRecord?.title || shortTargetVideo, videoShorts).catch(e => console.warn('Shorts file save failed:', e));
+                });
             } else {
                 alert('Failed to generate short: ' + (result.error || 'Unknown error'));
             }
@@ -294,6 +305,12 @@ export const ContentLibraryPage: React.FC<{
                 setGeneratedShort(result.short);
                 setExternalAiJson(''); // Clear input after success
                 loadData(); // Refresh shorts list
+                // Auto-save shorts to file
+                const videoRecord = videos.find(v => v.id === shortTargetVideo);
+                contentDB.getAllShorts().then(allShorts => {
+                    const videoShorts = allShorts.filter(s => s.videoId === shortTargetVideo);
+                    saveShortsToFile(shortTargetVideo, videoRecord?.title || shortTargetVideo, videoShorts).catch(e => console.warn('Shorts file save failed:', e));
+                });
                 if (result.shorts && result.shorts.length > 1) {
                     alert(`Successfully imported ${result.shorts.length} shorts! Showing preview for the first one. Close this modal to see all generated shorts in the library.`);
                 }
@@ -511,8 +528,19 @@ export const ContentLibraryPage: React.FC<{
 
     const handleDeleteShort = async (shortId: string) => {
         if (!confirm('Delete this generated short?')) return;
+        // Find which video this short belongs to before deleting
+        const shortToDelete = generatedShorts.find(s => s.id === shortId);
         await contentDB.deleteShort(shortId);
         loadData();
+        // Update shorts file on disk
+        if (shortToDelete) {
+            const videoId = shortToDelete.videoId;
+            const videoRecord = videos.find(v => v.id === videoId);
+            contentDB.getAllShorts().then(allShorts => {
+                const remaining = allShorts.filter(s => s.videoId === videoId);
+                saveShortsToFile(videoId, videoRecord?.title || videoId, remaining).catch(e => console.warn('Shorts file save failed:', e));
+            });
+        }
     };
 
     // ==================== Import Logic ====================
@@ -838,7 +866,7 @@ export const ContentLibraryPage: React.FC<{
                 <div className="flex bg-[#111] border-b border-[#222]">
                     <button onClick={() => setActiveTab('videos')} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'videos' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>📹 Videos</button>
                     <button onClick={() => setActiveTab('ai-search')} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'ai-search' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>🔍 AI Search</button>
-                    <button onClick={() => setActiveTab('shorts')} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'shorts' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>⚡ Generated Shorts</button>
+                    <button onClick={() => { setActiveTab('shorts'); listShortsFiles().then(setSavedShortsFileList).catch(() => {}); }} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'shorts' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>⚡ Generated Shorts</button>
                     <button onClick={() => setActiveTab('trends')} className={`px-6 py-3 text-sm font-medium border-b-2 ${activeTab === 'trends' ? 'border-indigo-500 text-white' : 'border-transparent text-gray-400 hover:text-white'}`}>📈 Trends</button>
                 </div>
 
@@ -1064,7 +1092,37 @@ export const ContentLibraryPage: React.FC<{
                 {activeTab === 'shorts' && (
                     <div className="flex-1 overflow-auto p-4">
                         <div className="flex items-center justify-between mb-4">
-                            <h2 className="text-xl font-bold">⚡ Generated Shorts</h2>
+                            <div className="flex items-center gap-4">
+                                <h2 className="text-xl font-bold">⚡ Generated Shorts</h2>
+                                {/* Saved shorts files dropdown */}
+                                <select
+                                    value={shortsSource}
+                                    onChange={async (e) => {
+                                        const val = e.target.value;
+                                        setShortsSource(val);
+                                        if (val === 'indexeddb') {
+                                            loadData();
+                                        } else {
+                                            try {
+                                                const data = await loadShortsFromFile(val);
+                                                if (data && data.shorts) {
+                                                    setGeneratedShorts(data.shorts as GeneratedShort[]);
+                                                }
+                                            } catch (err) {
+                                                console.error('Failed to load shorts file:', err);
+                                            }
+                                        }
+                                    }}
+                                    className="bg-[#222] border border-[#444] text-xs text-gray-300 rounded px-2 py-1"
+                                >
+                                    <option value="indexeddb">Current Session (Browser)</option>
+                                    {savedShortsFileList.map(sf => (
+                                        <option key={sf.videoId} value={sf.videoId}>
+                                            {sf.videoTitle || sf.videoId} ({sf.count} shorts)
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
                             {onToggleAutoCenter && (
                                 <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
                                     <input

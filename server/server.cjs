@@ -10,6 +10,7 @@ const { extractVideoId, getTranscript } = require('./transcript.cjs');
 const { getYtDlpPath, getPythonTrackerPath, getEnvWithBinPath, getFfmpegPath } = require('./binpath.cjs');
 const { transcribeFile, assemblyAIToAnalysisEvents } = require('./assemblyai.cjs');
 const localStore = require('./localStore.cjs');
+const saveStore = require('./saveStore.cjs');
 
 // Resolve yt-dlp path once at startup
 const YT_DLP = getYtDlpPath();
@@ -2017,6 +2018,92 @@ app.post('/api/keys', (req, res) => {
 });
 
 // ==================== SPA Fallback (Electron production) ====================
+// ==================== File-Based Save/Load ====================
+
+// --- Projects ---
+app.get('/api/saves/projects', (req, res) => {
+    try {
+        res.json(saveStore.listProjectFiles());
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/saves/projects/:name', express.json({ limit: '50mb' }), (req, res) => {
+    try {
+        const safeName = saveStore.saveProjectFile(req.params.name, req.body);
+        res.json({ success: true, name: safeName });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/saves/projects/:name', (req, res) => {
+    try {
+        const data = saveStore.loadProjectFile(req.params.name);
+        if (!data) return res.status(404).json({ error: 'Project not found' });
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/saves/projects/:name', (req, res) => {
+    try {
+        const deleted = saveStore.deleteProjectFile(req.params.name);
+        res.json({ success: deleted });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- Shorts ---
+app.get('/api/saves/shorts', (req, res) => {
+    try {
+        res.json(saveStore.listShortsFiles());
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/saves/shorts/:videoId', express.json({ limit: '50mb' }), (req, res) => {
+    try {
+        const { videoTitle, shorts } = req.body;
+        const safeName = saveStore.saveShortsFile(req.params.videoId, videoTitle || '', shorts || []);
+        res.json({ success: true, name: safeName });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/saves/shorts/:videoId', (req, res) => {
+    try {
+        const data = saveStore.loadShortsFile(req.params.videoId);
+        if (!data) return res.status(404).json({ error: 'Shorts not found' });
+        res.json(data);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- Export/Import All ---
+app.get('/api/saves/export-all', (req, res) => {
+    try {
+        res.json(saveStore.exportAll());
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/saves/import-all', express.json({ limit: '200mb' }), (req, res) => {
+    try {
+        const result = saveStore.importAll(req.body);
+        res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // This must be the LAST route — catch-all for client-side routing
 if (isElectron && fs.existsSync(distPath)) {
     app.get('*', (req, res) => {

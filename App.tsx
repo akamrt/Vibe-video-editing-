@@ -32,6 +32,7 @@ import { crossfadeVolumes } from './utils/audioCrossfade';
 import { autoWrapDialogueText } from './utils/autoWrapText';
 import { startHealthPolling, stopHealthPolling, onStatusChange } from './services/serverHealth';
 import { loadGoogleFont } from './services/googleFontsService';
+import { listSavedProjects, saveProjectToFile, loadProjectFromFile, deleteProjectFile, exportAllData, importAllData, SavedProjectInfo } from './services/saveApi';
 
 const INITIAL_SUBTITLE_STYLE: SubtitleStyle = {
   fontFamily: 'Arial',
@@ -268,6 +269,8 @@ function App() {
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [savedProjects, setSavedProjects] = useState<Array<{ id: string; name: string; savedAt: number; segmentCount: number; duration: number }>>([]);
   const [projectName, setProjectName] = useState('');
+  const [showLoadMenu, setShowLoadMenu] = useState(false);
+  const [fileProjects, setFileProjects] = useState<SavedProjectInfo[]>([]);
   const [showYoutubeModal, setShowYoutubeModal] = useState(false);
   const [showFillerModal, setShowFillerModal] = useState(false);
   const [fillerDetections, setFillerDetections] = useState<FillerDetectionWithMedia[]>([]);
@@ -3232,6 +3235,12 @@ function App() {
 
   const handleSwapTracks = (trackA: number, trackB: number) => {
     if (trackA === trackB) return;
+    // Prevent swapping between audio-only and video tracks
+    const aIsAudioOnly = project.segments.some(s => (s.track || 0) === trackA && s.type === 'audio')
+      && !project.segments.some(s => (s.track || 0) === trackA && s.type !== 'audio');
+    const bIsAudioOnly = project.segments.some(s => (s.track || 0) === trackB && s.type === 'audio')
+      && !project.segments.some(s => (s.track || 0) === trackB && s.type !== 'audio');
+    if (aIsAudioOnly !== bIsAudioOnly) return; // Don't swap across categories
     pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
     setProject(prev => ({
       ...prev,
@@ -5517,12 +5526,14 @@ function App() {
           <div className="flex-1 bg-black flex flex-col relative overflow-hidden">
             {/* Top Navigation Bar */}
             <div className="absolute top-0 right-0 z-50 flex gap-2 p-2 bg-[#1a1a1a]/90 rounded-bl-lg border-l border-b border-[#333]">
-              {/* Quick Save */}
+              {/* Quick Save (IndexedDB + file) */}
               <button
                 onClick={async () => {
                   setIsSaving(true);
                   try {
                     await contentDB.saveProject(project);
+                    // Also save to disk for portability
+                    saveProjectToFile('autosave', project).catch(e => console.warn('File save failed:', e));
                     setTimeout(() => setIsSaving(false), 1000);
                   } catch (e) {
                     console.error(e);
@@ -5535,6 +5546,77 @@ function App() {
               >
                 {isSaving ? 'Saved!' : 'Save'}
               </button>
+              {/* Load Menu */}
+              <div className="relative">
+                <button
+                  onClick={async () => {
+                    if (!showLoadMenu) {
+                      try {
+                        const list = await listSavedProjects();
+                        setFileProjects(list);
+                      } catch { setFileProjects([]); }
+                    }
+                    setShowLoadMenu(p => !p);
+                  }}
+                  className="px-2 py-1 text-xs rounded font-medium bg-[#333] text-gray-300 hover:text-white hover:bg-[#444]"
+                >
+                  Load ▾
+                </button>
+                {showLoadMenu && (
+                  <>
+                  <div className="fixed inset-0 z-[99]" onClick={() => setShowLoadMenu(false)} />
+                  <div className="absolute top-full right-0 mt-1 w-72 bg-[#1a1a1a] border border-[#444] rounded-lg shadow-2xl z-[100] overflow-hidden" onClick={e => e.stopPropagation()}>
+                    <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-3 pt-2 pb-1">Saved Files (saves/projects/)</div>
+                    <div className="max-h-64 overflow-y-auto">
+                      {fileProjects.length === 0 ? (
+                        <div className="px-3 pb-3 text-xs text-gray-600">No saved project files yet</div>
+                      ) : (
+                        fileProjects.map(fp => (
+                          <div key={fp.filename} className="flex items-center gap-2 px-3 py-1.5 hover:bg-[#252525] group">
+                            <button
+                              onClick={async () => {
+                                try {
+                                  const loaded = await loadProjectFromFile(fp.name);
+                                  if (loaded) {
+                                    setProject({ ...INITIAL_STATE, ...(loaded as unknown as Partial<ProjectState>), isPlaying: false });
+                                    setShowLoadMenu(false);
+                                  }
+                                } catch (err) {
+                                  console.error('Load failed:', err);
+                                  alert('Failed to load project file');
+                                }
+                              }}
+                              className="flex-1 text-left min-w-0"
+                            >
+                              <div className="text-xs text-gray-200 font-medium truncate">{fp.name}</div>
+                              <div className="text-[10px] text-gray-500">
+                                {fp.segmentCount} clips &middot; {fp.duration.toFixed(1)}s &middot; {new Date(fp.savedAt).toLocaleDateString()}
+                              </div>
+                            </button>
+                            <button
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                try {
+                                  await deleteProjectFile(fp.name);
+                                  const list = await listSavedProjects();
+                                  setFileProjects(list);
+                                } catch (err) {
+                                  console.error('Delete failed:', err);
+                                }
+                              }}
+                              className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 text-xs px-1"
+                              title="Delete"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                  </>
+                )}
+              </div>
               {/* Project Menu */}
               <div className="relative">
                 <button
@@ -5553,7 +5635,7 @@ function App() {
                   <>
                   <div className="fixed inset-0 z-[99]" onClick={() => setShowProjectMenu(false)} />
                   <div className="absolute top-full right-0 mt-1 w-72 bg-[#1a1a1a] border border-[#444] rounded-lg shadow-2xl z-[100] overflow-hidden" onClick={e => e.stopPropagation()}>
-                    {/* Save As */}
+                    {/* Save As (to file + IndexedDB) */}
                     <div className="p-3 border-b border-[#333]">
                       <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Save As</div>
                       <div className="flex gap-1.5">
@@ -5564,7 +5646,11 @@ function App() {
                           className="flex-1 bg-[#111] border border-[#444] rounded px-2 py-1 text-xs text-white focus:border-blue-500 outline-none"
                           onKeyDown={e => {
                             if (e.key === 'Enter' && projectName.trim()) {
-                              contentDB.saveNamedProject(projectName.trim(), project).then(() => {
+                              const name = projectName.trim();
+                              Promise.all([
+                                contentDB.saveNamedProject(name, project),
+                                saveProjectToFile(name, project).catch(err => console.warn('File save failed:', err)),
+                              ]).then(() => {
                                 setProjectName('');
                                 contentDB.listProjects().then(setSavedProjects);
                               });
@@ -5574,7 +5660,11 @@ function App() {
                         <button
                           onClick={() => {
                             if (!projectName.trim()) return;
-                            contentDB.saveNamedProject(projectName.trim(), project).then(() => {
+                            const name = projectName.trim();
+                            Promise.all([
+                              contentDB.saveNamedProject(name, project),
+                              saveProjectToFile(name, project).catch(err => console.warn('File save failed:', err)),
+                            ]).then(() => {
                               setProjectName('');
                               contentDB.listProjects().then(setSavedProjects);
                             });
@@ -5586,9 +5676,9 @@ function App() {
                         </button>
                       </div>
                     </div>
-                    {/* Saved Projects List */}
+                    {/* Saved Projects List (IndexedDB) */}
                     <div className="max-h-48 overflow-y-auto">
-                      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-3 pt-2 pb-1">Saved Projects</div>
+                      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-3 pt-2 pb-1">Saved Projects (Browser)</div>
                       {savedProjects.length === 0 ? (
                         <div className="px-3 pb-3 text-xs text-gray-600">No saved projects yet</div>
                       ) : (
@@ -5626,51 +5716,100 @@ function App() {
                       )}
                     </div>
                     {/* File Import/Export */}
-                    <div className="border-t border-[#333] p-2 flex gap-1.5">
-                      <button
-                        onClick={() => {
-                          const data = JSON.stringify(
-                            { ...project, isPlaying: false, library: project.library.map(m => ({ ...m, file: undefined })) },
-                            null,
-                            2
-                          );
-                          const blob = new Blob([data], { type: 'application/json' });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `vibecut-project-${new Date().toISOString().slice(0, 10)}.json`;
-                          a.click();
-                          URL.revokeObjectURL(url);
-                          setShowProjectMenu(false);
-                        }}
-                        className="flex-1 px-2 py-1.5 text-xs rounded bg-[#252525] text-gray-300 hover:text-white hover:bg-[#333] font-medium text-center"
-                      >
-                        Export .json
-                      </button>
-                      <button
-                        onClick={() => {
-                          const input = document.createElement('input');
-                          input.type = 'file';
-                          input.accept = '.json';
-                          input.onchange = async (e) => {
-                            const file = (e.target as HTMLInputElement).files?.[0];
-                            if (!file) return;
+                    <div className="border-t border-[#333] p-2 flex flex-col gap-1.5">
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => {
+                            const data = JSON.stringify(
+                              { ...project, isPlaying: false, library: project.library.map(m => ({ ...m, file: undefined })) },
+                              null,
+                              2
+                            );
+                            const blob = new Blob([data], { type: 'application/json' });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = `vibecut-project-${new Date().toISOString().slice(0, 10)}.json`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                            setShowProjectMenu(false);
+                          }}
+                          className="flex-1 px-2 py-1.5 text-xs rounded bg-[#252525] text-gray-300 hover:text-white hover:bg-[#333] font-medium text-center"
+                        >
+                          Export .json
+                        </button>
+                        <button
+                          onClick={() => {
+                            const input = document.createElement('input');
+                            input.type = 'file';
+                            input.accept = '.json';
+                            input.onchange = async (e) => {
+                              const file = (e.target as HTMLInputElement).files?.[0];
+                              if (!file) return;
+                              try {
+                                const text = await file.text();
+                                const imported = JSON.parse(text) as ProjectState;
+                                setProject({ ...INITIAL_STATE, ...imported, isPlaying: false });
+                                setShowProjectMenu(false);
+                              } catch (err) {
+                                console.error('Import failed:', err);
+                                alert('Failed to import project file');
+                              }
+                            };
+                            input.click();
+                          }}
+                          className="flex-1 px-2 py-1.5 text-xs rounded bg-[#252525] text-gray-300 hover:text-white hover:bg-[#333] font-medium text-center"
+                        >
+                          Import .json
+                        </button>
+                      </div>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={async () => {
                             try {
-                              const text = await file.text();
-                              const imported = JSON.parse(text) as ProjectState;
-                              setProject({ ...INITIAL_STATE, ...imported, isPlaying: false });
+                              const blob = await exportAllData();
+                              const url = URL.createObjectURL(blob);
+                              const a = document.createElement('a');
+                              a.href = url;
+                              a.download = `vibecut-full-export-${new Date().toISOString().slice(0, 10)}.json`;
+                              a.click();
+                              URL.revokeObjectURL(url);
                               setShowProjectMenu(false);
                             } catch (err) {
-                              console.error('Import failed:', err);
-                              alert('Failed to import project file');
+                              console.error('Export all failed:', err);
+                              alert('Failed to export all data');
                             }
-                          };
-                          input.click();
-                        }}
-                        className="flex-1 px-2 py-1.5 text-xs rounded bg-[#252525] text-gray-300 hover:text-white hover:bg-[#333] font-medium text-center"
-                      >
-                        Import .json
-                      </button>
+                          }}
+                          className="flex-1 px-2 py-1.5 text-xs rounded bg-green-900/50 text-green-300 hover:text-white hover:bg-green-800/50 font-medium text-center"
+                        >
+                          Export All Data
+                        </button>
+                        <button
+                          onClick={() => {
+                            const input = document.createElement('input');
+                            input.type = 'file';
+                            input.accept = '.json';
+                            input.onchange = async (e) => {
+                              const file = (e.target as HTMLInputElement).files?.[0];
+                              if (!file) return;
+                              try {
+                                const text = await file.text();
+                                const bundle = JSON.parse(text);
+                                const result = await importAllData(bundle);
+                                alert(`Imported ${result.projectCount} projects, ${result.shortsCount} shorts files`);
+                                setShowProjectMenu(false);
+                              } catch (err) {
+                                console.error('Import all failed:', err);
+                                alert('Failed to import data bundle');
+                              }
+                            };
+                            input.click();
+                          }}
+                          className="flex-1 px-2 py-1.5 text-xs rounded bg-green-900/50 text-green-300 hover:text-white hover:bg-green-800/50 font-medium text-center"
+                        >
+                          Import All Data
+                        </button>
+                      </div>
                     </div>
                   </div>
                   </>

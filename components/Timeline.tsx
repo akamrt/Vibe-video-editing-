@@ -222,6 +222,23 @@ const Timeline: React.FC<TimelineProps> = ({
   const maxTrack = useMemo(() => Math.max(0, ...segments.map(s => s.track || 0)), [segments]);
   const tracks = useMemo(() => Array.from({ length: maxTrack + 1 }, (_, i) => i), [maxTrack]);
 
+  // Split tracks into video tracks (have video/blank content or are track 0) and audio-only tracks
+  const { videoTrackIds, audioOnlyTrackIds } = useMemo(() => {
+    const videoIds: number[] = [];
+    const audioIds: number[] = [];
+    for (const trackId of tracks) {
+      const hasVideo = segments.some(s => (s.track || 0) === trackId && s.type !== 'audio');
+      if (hasVideo || trackId === 0) {
+        videoIds.push(trackId);
+      } else {
+        const hasAudio = segments.some(s => (s.track || 0) === trackId && s.type === 'audio');
+        if (hasAudio) audioIds.push(trackId);
+        // else: empty non-zero track, skip entirely
+      }
+    }
+    return { videoTrackIds: videoIds, audioOnlyTrackIds: audioIds };
+  }, [tracks, segments]);
+
   const calculateTime = (e: MouseEvent | React.MouseEvent) => {
     if (!containerRef.current || duration === 0) return 0;
     const rect = containerRef.current.getBoundingClientRect();
@@ -321,7 +338,7 @@ const Timeline: React.FC<TimelineProps> = ({
         return;
       }
 
-      // Track drag-to-reorder: detect hovered track
+      // Track drag-to-reorder: detect hovered track (same category only)
       if (trackDragState) {
         document.body.style.cursor = 'grabbing';
         const trackGroups = containerRef.current?.querySelectorAll('[data-track-id]');
@@ -333,7 +350,14 @@ const Timeline: React.FC<TimelineProps> = ({
               hoveredTrack = parseInt(el.getAttribute('data-track-id') || '0', 10);
             }
           });
-          setTrackDropTarget(hoveredTrack !== trackDragState.sourceTrackId ? hoveredTrack : null);
+          // Only allow dropping within the same category (video↔video, audio-only↔audio-only)
+          if (hoveredTrack !== null && hoveredTrack !== trackDragState.sourceTrackId) {
+            const sourceIsAudioOnly = audioOnlyTrackIds.includes(trackDragState.sourceTrackId);
+            const targetIsAudioOnly = audioOnlyTrackIds.includes(hoveredTrack);
+            setTrackDropTarget(sourceIsAudioOnly === targetIsAudioOnly ? hoveredTrack : null);
+          } else {
+            setTrackDropTarget(null);
+          }
         }
         return;
       }
@@ -862,8 +886,8 @@ const Timeline: React.FC<TimelineProps> = ({
             </div>
           </div>
 
-          {/* TRACKS (Video + Audio Pairs) */}
-          {tracks.slice().reverse().map(trackId => {
+          {/* TRACKS — Video tracks (with paired audio lanes) */}
+          {videoTrackIds.slice().reverse().map(trackId => {
             const hasVideoOnTrack = layoutSegments.some(s => s.track === trackId && s.type !== 'audio');
             const hasAudioOnTrack = layoutSegments.some(s => s.track === trackId && (s.type === 'audio' || (s.type !== 'blank' && s.audioLinked !== false)));
             // Always show at least one track pair for track 0 (main timeline)
@@ -1207,6 +1231,74 @@ const Timeline: React.FC<TimelineProps> = ({
             </div>
           );
           })}
+
+          {/* AUDIO-ONLY TRACKS — rendered below all video tracks */}
+          {audioOnlyTrackIds.map((trackId, idx) => (
+            <div key={`audio-track-group-${trackId}`} data-track-id={trackId} className={`flex flex-col w-full border-b transition-colors ${trackDropTarget === trackId ? 'border-blue-400 bg-blue-500/20' : 'border-[#333]'}`}>
+              <div className="h-16 relative w-full flex bg-[#111111]">
+                <div
+                  className={`sticky left-0 w-12 min-w-[3rem] h-full bg-[#181818] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-green-500 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)] select-none ${trackDragState ? 'cursor-grabbing' : 'cursor-grab'}`}
+                  onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setTrackContextMenu({ x: e.clientX, y: e.clientY, trackId }); }}
+                  onMouseDown={(e) => { if (e.button !== 0) return; e.stopPropagation(); setTrackDragState({ sourceTrackId: trackId, initialY: e.clientY }); }}
+                >A{idx + 1 + videoTrackIds.length}</div>
+                <div className="relative flex-1 h-full">
+                  <div className="absolute inset-x-0 top-1/2 h-[1px] bg-white/5" />
+
+                  {/* AUDIO OVERLAP ZONES */}
+                  {overlapZones.filter(z => z.track === trackId).map((zone, i) => {
+                    const leftSeg = segments.find(s => s.id === zone.leftSegId);
+                    if (!leftSeg || leftSeg.type !== 'audio') return null;
+                    const curve = leftSeg.transitionOut?.audioCurve || 'linear';
+                    return (
+                      <div
+                        key={`audio-overlap-${i}`}
+                        className="absolute top-1 bottom-1 z-20 flex items-center justify-center cursor-pointer group/azone transition-all duration-200"
+                        onClick={(e) => { e.stopPropagation(); onEditTransition(zone.leftSegId, 'out', e.clientX, e.clientY); }}
+                        style={{
+                          left: `${zone.left}%`, width: `${zone.width}%`,
+                          background: 'linear-gradient(90deg, rgba(34,197,94,0.08), rgba(34,197,94,0.25), rgba(34,197,94,0.08))',
+                          borderTop: '2px solid rgba(34,197,94,0.5)', borderBottom: '2px solid rgba(34,197,94,0.5)', borderRadius: 4
+                        }}
+                        title={`Audio crossfade (${curve})`}
+                      >
+                        <div className="bg-black/80 rounded-full px-1.5 py-0.5 border border-green-500/40 shadow-lg transform transition-transform group-hover/azone:scale-110 flex items-center gap-1">
+                          <span className="text-[9px] text-green-300">{curve === 'equalPower' ? '⚡' : '〰'}</span>
+                          <span className="text-[8px] text-green-300/60">xfade</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {layoutSegments.filter(s => s.track === trackId && s.type === 'audio').map((seg) => {
+                    const isSelected = selectedSegmentIds.includes(seg.id);
+                    return (
+                      <div
+                        key={`ao-${seg.id}`}
+                        className={`absolute top-1 bottom-1 group/audio ${
+                          isSelected
+                            ? 'bg-green-800/50 border-green-400/60 cursor-move'
+                            : 'bg-green-900/40 border-green-400/40 border-dashed cursor-move'
+                        } border rounded overflow-hidden flex items-center justify-center transition-colors`}
+                        style={{ left: `${seg.leftPercent}%`, width: `${seg.widthPercent}%` }}
+                        onMouseDown={(e) => startDrag(e, seg, 'move')}
+                        onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setAudioContextMenu({ x: e.clientX, y: e.clientY, segId: seg.id }); }}
+                      >
+                        <div className="absolute left-0 top-0 bottom-0 w-3 cursor-col-resize z-30 hover:bg-green-400/20" onMouseDown={(e) => startDrag(e, seg, 'leftTrim')} />
+                        <div className="absolute right-0 top-0 bottom-0 w-3 cursor-col-resize z-30 hover:bg-green-400/20" onMouseDown={(e) => startDrag(e, seg, 'rightTrim')} />
+                        {mediaFiles?.get(seg.mediaId) && (
+                          <WaveformCanvas mediaId={seg.mediaId} file={mediaFiles.get(seg.mediaId)!} startTime={seg.startTime} endTime={seg.endTime} />
+                        )}
+                        {!mediaFiles?.get(seg.mediaId) && (
+                          <div className="absolute inset-0 opacity-40 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMCAxMCIgcHJlc2VydmVBc3BlY3RSYXRpbz0ibm9uZSI+PHBhdGggZD0iTTAgNWw1LTUgNSA1di01SDB6IiBmaWxsPSIjZmZmIi8+PC9zdmc+')] " style={{ backgroundSize: '10px 100%' }} />
+                        )}
+                        <span className="text-[10px] text-white/50 relative z-10 pointer-events-none">{seg.description}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          ))}
 
           {/* PLAYHEAD */}
           <div className="absolute top-0 bottom-0 w-[2px] bg-red-500 z-[80] pointer-events-none shadow-[0_0_10px_rgba(239,68,68,0.8)]" style={{ left: `calc(3rem + (100% - 3rem) * ${(currentTime / (duration || 1))})` }}>
