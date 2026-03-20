@@ -683,6 +683,9 @@ const Timeline: React.FC<TimelineProps> = ({
     const MAX_VIEWPORT_RENDERED = 400; // Only render this many *within the view*
 
     layoutSegments.forEach(seg => {
+      // Audio-only segments share mediaId with their video counterpart — skip them
+      // here to avoid duplicating dialogue events at the same timeline position.
+      if (seg.type === 'audio') return;
       const analysis = analyses[seg.mediaId];
       if (!analysis) return;
 
@@ -1133,10 +1136,10 @@ const Timeline: React.FC<TimelineProps> = ({
 
                   {layoutSegments.filter(s => {
                     if (s.track !== trackId) return false;
-                    // Hide muted video segments whose audio counterpart has been deleted —
-                    // audioLinked:false with no linkedSegmentId means the clip is muted but
-                    // the audio segment it was paired with no longer exists.
-                    if (s.type !== 'audio' && s.audioLinked === false && !s.linkedSegmentId) return false;
+                    // Unlinked video segments (audioLinked:false) belong in V1, not A1.
+                    // Only the separated audio-only segment (type:'audio') should appear in A1.
+                    // This also handles the "deleted audio" case: video stays muted but A1 is empty.
+                    if (s.type !== 'audio' && s.audioLinked === false) return false;
                     return true;
                   }).map((seg) => {
                     const isSelected = selectedSegmentIds.includes(seg.id);
