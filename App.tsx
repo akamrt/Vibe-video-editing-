@@ -444,7 +444,9 @@ function App() {
   const currentTopMedia = useMemo(() => {
     if (selectedSegmentIds.length === 1) {
       const seg = project.segments.find(s => s.id === selectedSegmentIds[0]);
-      if (seg) return project.library.find(m => m.id === seg.mediaId);
+      // Skip audio-only segments — they have no analysis, so they should not
+      // override the visual context used for subtitle/dialogue display.
+      if (seg && seg.type !== 'audio') return project.library.find(m => m.id === seg.mediaId);
     }
 
     if (activeSegments.length > 0) {
@@ -6055,7 +6057,8 @@ function App() {
                         // Apply keyframe-based transforms on top of drag offset
                         let subKfTransform = '';
                         if (activeSubtitleEvent.keyframes && activeSubtitleEvent.keyframes.length > 0) {
-                          const topSeg = activeSegments[activeSegments.length - 1];
+                          const visualSegsKf = activeSegments.filter(s => s.type !== 'audio');
+                          const topSeg = visualSegsKf.length > 0 ? visualSegsKf[visualSegsKf.length - 1] : activeSegments[activeSegments.length - 1];
                           const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
                           const subTime = sourceTime - activeSubtitleEvent.startTime;
                           const kfTransform = getInterpolatedTransform(activeSubtitleEvent.keyframes, subTime);
@@ -6081,7 +6084,8 @@ function App() {
                         const kwAnim = activeSubtitleEvent.keywordAnimation || subTemplate?.keywordAnimation || project.activeKeywordAnimation || null;
 
                         if (subAnim && subAnim.effects.length > 0) {
-                          const topSeg = activeSegments[activeSegments.length - 1];
+                          const visualSegsAnim = activeSegments.filter(s => s.type !== 'audio');
+                          const topSeg = visualSegsAnim.length > 0 ? visualSegsAnim[visualSegsAnim.length - 1] : activeSegments[activeSegments.length - 1];
                           const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
                           const localFrame = Math.round((sourceTime - activeSubtitleEvent.startTime) * REMOTION_FPS);
                           const { fontSize: _tfs, ...tplStyleNoSize } = subTemplate?.style || {};
@@ -6123,7 +6127,8 @@ function App() {
                         // Fallback: plain text (no template applied)
                         // If word highlight is enabled, use AnimatedText with a no-op animation so it
                         // can measure word positions and render the highlight box.
-                        const topSegFb = activeSegments[activeSegments.length - 1];
+                        const visualSegsFb = activeSegments.filter(s => s.type !== 'audio');
+                        const topSegFb = visualSegsFb.length > 0 ? visualSegsFb[visualSegsFb.length - 1] : activeSegments[activeSegments.length - 1];
                         const sourceTimeFb = topSegFb ? topSegFb.startTime + (project.currentTime - topSegFb.timelineStart) : 0;
                         if (displayStyle.wordHighlightEnabled) {
                           const noOpAnim = { scope: 'word' as const, effects: [], duration: 0, stagger: 0 };
