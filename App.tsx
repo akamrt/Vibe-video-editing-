@@ -3661,6 +3661,7 @@ function App() {
       segmentsToDelete.sort((a, b) => b.timelineStart - a.timelineStart);
 
       let newSegments = [...prev.segments];
+      const deletedIdSet = new Set(segmentsToDelete.map(s => s.id));
       segmentsToDelete.forEach(seg => {
         const deletedDuration = seg.endTime - seg.startTime;
         const deletedStart = seg.timelineStart;
@@ -3673,6 +3674,16 @@ function App() {
             return s;
           });
         }
+      });
+      // Clean up orphaned audio links: if the deleted segment was an unlinked
+      // audio clip, restore its parent video segment back to the normal linked
+      // state so the A1 lane no longer shows a ghost reference.
+      newSegments = newSegments.map(s => {
+        if (s.linkedSegmentId && deletedIdSet.has(s.linkedSegmentId) && s.type !== 'audio') {
+          const { audioLinked: _a, linkedSegmentId: _l, ...rest } = s;
+          return rest as typeof s;
+        }
+        return s;
       });
       return { ...prev, segments: newSegments };
     });

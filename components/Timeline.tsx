@@ -569,7 +569,11 @@ const Timeline: React.FC<TimelineProps> = ({
     const hidden = new Set<string>();
 
     tracks.forEach(trackId => {
-      const trackSegs = layoutSegments.filter(s => s.track === trackId);
+      // Only look at non-audio segments for overlap/transition zones.
+      // Audio segments (type === 'audio') sit on the same track as their parent
+      // video segment after unlinking, and must not be paired with it —
+      // that would create a full-clip stripe overlay on the video track.
+      const trackSegs = layoutSegments.filter(s => s.track === trackId && s.type !== 'audio');
       trackSegs.sort((a, b) => a.timelineStart - b.timelineStart);
 
       for (let i = 0; i < trackSegs.length; i++) {
