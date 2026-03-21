@@ -825,15 +825,6 @@ function App() {
             }
           } else {
             // Complex transition — render on canvas
-            // Exception: for B-roll solo transitions (no cross-neighbor), use DOM opacity instead
-            // of canvas so the "null" frame is transparent (V1 shows through), not black.
-            const isBRollSolo = seg.track > 0 && seg.audioLinked === false
-              && seg.type !== 'audio' && !isCrossTransitionDriver;
-            if (isBRollSolo) {
-              // opacity = activeProgress covers both intro (0→1) and outro (1→0)
-              opacity = activeProgress;
-            } else {
-
             const tCanvas = transitionCanvasRef.current;
             const vw = videoEl.videoWidth;
             const vh = videoEl.videoHeight;
@@ -851,6 +842,7 @@ function App() {
                 }
 
                 // Helper: capture a video element frame to an offscreen canvas
+                // Letterbox areas are left transparent so V1 shows through beneath B-roll
                 const captureFrame = (el: HTMLVideoElement) => {
                   const fc = document.createElement('canvas');
                   fc.width = cw; fc.height = ch;
@@ -861,8 +853,6 @@ function App() {
                   let dw: number, dh: number, dx: number, dy: number;
                   if (car > ear) { dh = ch; dw = ch * ear; dx = (cw - dw) / 2; dy = 0; }
                   else { dw = cw; dh = cw / ear; dx = 0; dy = (ch - dh) / 2; }
-                  // Don't fill with black — leave letterbox areas transparent so layers
-                  // below (e.g. V1) show through during B-roll canvas transitions
                   fctx.drawImage(el, dx, dy, dw, dh);
                   return fc;
                 };
@@ -871,6 +861,24 @@ function App() {
                 // Capture neighbor frame for cross-transitions
                 const neighborFrame = overlapNeighborEl && overlapNeighborEl.readyState >= 2
                   ? captureFrame(overlapNeighborEl) : null;
+
+                // For B-roll solo transitions, capture the current V1 frame to use as the
+                // background instead of black, so wipe/shape effects show correctly over V1
+                const isBRollSegment = seg.track > 0 && seg.audioLinked === false && seg.type !== 'audio';
+                let v1BackgroundFrame: HTMLCanvasElement | null = null;
+                if (isBRollSegment && !isCrossTransitionDriver) {
+                  const v1Seg = project.segments.find(s =>
+                    s.track === 0 &&
+                    project.currentTime >= s.timelineStart &&
+                    project.currentTime < s.timelineStart + (s.endTime - s.startTime)
+                  );
+                  if (v1Seg) {
+                    const v1El = videoRefs.current.get(v1Seg.id);
+                    if (v1El && v1El.readyState >= 2) {
+                      v1BackgroundFrame = captureFrame(v1El);
+                    }
+                  }
+                }
 
                 tCanvas.style.display = 'block';
                 tCanvas.style.zIndex = '50';
@@ -889,13 +897,14 @@ function App() {
                     transition: activeTransition,
                   });
                 } else {
-                  // SOLO TRANSITION: fade from/to black
+                  // SOLO TRANSITION: for B-roll use V1 as background so effects show
+                  // correctly; for V1 segments use null (fade from/to black)
                   renderTransitionCanvas({
                     ctx,
                     width: cw,
                     height: ch,
-                    outFrame: isIntro ? null : thisFrame,
-                    inFrame: isIntro ? thisFrame : null,
+                    outFrame: isIntro ? v1BackgroundFrame : thisFrame,
+                    inFrame: isIntro ? thisFrame : v1BackgroundFrame,
                     progress: activeProgress,
                     transition: activeTransition,
                   });
@@ -906,7 +915,6 @@ function App() {
                 if (overlapNeighborEl) overlapNeighborEl.style.opacity = '0';
               }
             }
-            } // end else (!isBRollSolo)
           }
         }
 
