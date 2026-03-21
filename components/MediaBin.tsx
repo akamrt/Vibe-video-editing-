@@ -7,9 +7,11 @@ interface MediaBinProps {
   onAddToTimeline: (item: MediaItem) => void;
   onSelect: (item: MediaItem) => void;
   onYoutubeClick: () => void;
+  swapActive?: boolean;
+  onSwapMedia?: (item: MediaItem) => void;
 }
 
-const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, onSelect, onYoutubeClick }) => {
+const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, onSelect, onYoutubeClick, swapActive, onSwapMedia }) => {
   return (
     <div className="h-full flex flex-col bg-[#1e1e1e] border-r border-[#333]">
       <div className="p-4 border-b border-[#333] flex justify-between items-center bg-[#252525]">
@@ -28,6 +30,12 @@ const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, o
           </label>
         </div>
       </div>
+
+      {swapActive && (
+        <div className="px-3 py-1.5 bg-orange-500/20 border-b border-orange-500/40 text-[10px] text-orange-300 font-medium text-center">
+          Click swap to replace the selected clip
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto p-2 space-y-2">
         {items.length === 0 && (
@@ -54,6 +62,15 @@ const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, o
                 <div className="text-[11px] font-medium truncate text-gray-200">{item.name}</div>
                 <div className="text-[9px] text-gray-500 font-mono">{item.duration.toFixed(1)}s</div>
               </div>
+              {swapActive && onSwapMedia && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onSwapMedia(item); }}
+                  className="opacity-0 group-hover:opacity-100 p-1 bg-orange-600 rounded hover:bg-orange-500 transition-all"
+                  title="Swap into selected clip"
+                >
+                  <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg>
+                </button>
+              )}
               <button
                 onClick={(e) => { e.stopPropagation(); onAddToTimeline(item); }}
                 className="opacity-0 group-hover:opacity-100 p-1 bg-blue-600 rounded hover:bg-blue-500 transition-all"

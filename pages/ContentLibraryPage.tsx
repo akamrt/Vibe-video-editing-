@@ -1330,7 +1330,7 @@ export const ContentLibraryPage: React.FC<{
                         </div>
 
                         {!generatedShort ? (
-                            <div className="p-6">
+                            <div className="flex-1 overflow-auto p-6">
                                 <p className="text-sm text-gray-400 mb-4">Generate a viral short from: <span className="text-white font-medium">{videos.find(v => v.id === shortTargetVideo)?.title}</span></p>
                                 <div className="space-y-4">
                                     <div>
@@ -1433,7 +1433,7 @@ export const ContentLibraryPage: React.FC<{
                                 </div>
 
                                 {/* Preview Player Area */}
-                                <div className="bg-black rounded-xl mb-4 relative overflow-hidden" style={{ aspectRatio: '9/16', maxHeight: '400px', margin: '0 auto', width: 'fit-content' }}>
+                                <div className="bg-black rounded-xl mb-4 relative overflow-hidden" style={{ aspectRatio: '9/16', maxHeight: '280px', margin: '0 auto', width: 'fit-content' }}>
                                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-purple-900/30 to-black/80">
                                         {/* Hook Title Display - appears at top during preview */}
                                         {(previewClipIndex === 0 || !isPreviewPlaying) && generatedShort.hookTitle && (
