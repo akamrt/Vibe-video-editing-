@@ -62,7 +62,22 @@ export interface ShortSegment {
     removedWordIndices?: number[];
 }
 
-// ==================== B-Roll (Pexels Stock Footage) ====================
+// ==================== B-Roll (Pexels) ====================
+
+export interface BRollSuggestion {
+    id: string;
+    clipIndex: number;            // Which clip this overlays (0-based)
+    offsetInClip: number;         // Seconds into the clip where B-roll starts
+    duration: number;             // 2-5 seconds
+    searchQuery: string;          // Pexels search term
+    rationale: string;            // Why LLM suggested this
+    approved: boolean;            // Default: true
+    pexelsResults?: PexelsVideoResult[];
+    pexelsPhotos?: PexelsPhotoResult[];
+    selectedVideoIndex?: number;  // Which result the user picked (default: 0)
+    selectedPhotoIndex?: number;  // If a photo is selected instead of video
+    selectedType?: 'video' | 'photo'; // Which type is selected
+}
 
 export interface PexelsVideoResult {
     id: number;
@@ -84,6 +99,16 @@ export interface BRollSuggestion {
     approved: boolean;         // User toggle, default: true
     pexelsResults?: PexelsVideoResult[];
     selectedVideoIndex?: number; // Which Pexels result to use (default: 0)
+}
+
+export interface PexelsPhotoResult {
+    id: number;
+    url: string;                  // Pexels page URL
+    thumbnailUrl: string;         // Medium preview
+    fullUrl: string;              // High-res download
+    photographer: string;
+    width: number;
+    height: number;
 }
 
 // ==================== Scan Center Cache ====================
