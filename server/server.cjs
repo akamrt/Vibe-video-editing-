@@ -1042,12 +1042,12 @@ EDITING RULES:
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — Identify 3-8 moments where stock footage would enhance the visual storytelling.
-    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion, concept).
-    Be generous — look for any moment where a visual could reinforce the message, not just the most obvious ones.
-    Do NOT suggest B-roll for moments where the speaker's raw emotion or delivery IS the content.
+12. B-ROLL SUGGESTIONS — Identify 10-20 moments where stock footage or still images would enhance the visual storytelling.
+    Be very generous — suggest B-roll for any concrete noun, action, place, emotion, or concept the speaker references.
+    Aim for at least one suggestion per clip. Cover both action moments (video) and contemplative moments (stills work great).
+    Do NOT suggest B-roll only when the speaker's raw personal emotion or delivery IS the content.
     For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
-    duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
+    duration (2-5s), searchQuery (concise Pexels search term, e.g. "sunset ocean waves" or "person praying hands"),
     and rationale (one sentence why this helps).
 
 PLATFORM STRATEGY:
@@ -1229,12 +1229,12 @@ EDITING RULES:
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — Identify 3-8 moments where stock footage would enhance the visual storytelling.
-    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion, concept).
-    Be generous — look for any moment where a visual could reinforce the message, not just the most obvious ones.
-    Do NOT suggest B-roll for moments where the speaker's raw emotion or delivery IS the content.
+12. B-ROLL SUGGESTIONS — Identify 10-20 moments where stock footage or still images would enhance the visual storytelling.
+    Be very generous — suggest B-roll for any concrete noun, action, place, emotion, or concept the speaker references.
+    Aim for at least one suggestion per clip. Cover both action moments (video) and contemplative moments (stills work great).
+    Do NOT suggest B-roll only when the speaker's raw personal emotion or delivery IS the content.
     For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
-    duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
+    duration (2-5s), searchQuery (concise Pexels search term, e.g. "sunset ocean waves" or "person praying hands"),
     and rationale (one sentence why this helps).
 
 PLATFORM STRATEGY:
@@ -2046,6 +2046,45 @@ app.get('/api/pexels/search', async (req, res) => {
         res.json(result);
     } catch (error) {
         console.error('Pexels search error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/pexels/photos', async (req, res) => {
+    if (!PEXELS_API_KEY) {
+        return res.status(400).json({ error: 'PEXELS_API_KEY not configured' });
+    }
+
+    const { query, per_page = 8, orientation = 'portrait' } = req.query;
+    if (!query) return res.status(400).json({ error: 'Missing query parameter' });
+
+    const cacheKey = `pexels_photos_${query}_${per_page}_${orientation}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    try {
+        const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=${per_page}&orientation=${orientation}`;
+        const response = await fetch(url, { headers: { 'Authorization': PEXELS_API_KEY } });
+
+        if (response.status === 429) return res.status(429).json({ error: 'Pexels rate limit reached.' });
+        if (!response.ok) throw new Error(`Pexels photos API error: ${response.status}`);
+
+        const data = await response.json();
+        const photos = (data.photos || []).map(p => ({
+            id: p.id,
+            url: p.url,
+            thumbnailUrl: p.src.medium,
+            fullUrl: p.src.large2x || p.src.original,
+            photographer: p.photographer,
+            width: p.width,
+            height: p.height,
+        }));
+
+        const result = { photos };
+        setCache(cacheKey, result);
+        res.json(result);
+    } catch (error) {
+        console.error('Pexels photos error:', error.message);
         res.status(500).json({ error: error.message });
     }
 });

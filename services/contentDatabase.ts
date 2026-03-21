@@ -73,7 +73,10 @@ export interface BRollSuggestion {
     rationale: string;            // Why LLM suggested this
     approved: boolean;            // Default: true
     pexelsResults?: PexelsVideoResult[];
+    pexelsPhotos?: PexelsPhotoResult[];
     selectedVideoIndex?: number;  // Which result the user picked (default: 0)
+    selectedPhotoIndex?: number;  // If a photo is selected instead of video
+    selectedType?: 'video' | 'photo'; // Which type is selected
 }
 
 export interface PexelsVideoResult {
@@ -82,6 +85,16 @@ export interface PexelsVideoResult {
     thumbnailUrl: string;         // Preview image
     videoFileUrl: string;         // Direct download (HD)
     duration: number;             // Pexels video duration in seconds
+}
+
+export interface PexelsPhotoResult {
+    id: number;
+    url: string;                  // Pexels page URL
+    thumbnailUrl: string;         // Medium preview
+    fullUrl: string;              // High-res download
+    photographer: string;
+    width: number;
+    height: number;
 }
 
 // ==================== Scan Center Cache ====================

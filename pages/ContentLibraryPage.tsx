@@ -1445,9 +1445,13 @@ export const ContentLibraryPage: React.FC<{
                                 {/* B-Roll Suggestions */}
                                 {generatedShort.bRollSuggestions && generatedShort.bRollSuggestions.length > 0 && (
                                     <div className="mb-4 p-3 bg-[#1a1a2e] rounded-lg border border-indigo-500/30">
-                                        <div className="text-xs text-indigo-400 font-bold mb-2">🎬 B-ROLL SUGGESTIONS</div>
+                                        <div className="text-xs text-indigo-400 font-bold mb-2">🎬 B-ROLL SUGGESTIONS ({generatedShort.bRollSuggestions.length})</div>
                                         <div className="space-y-3">
-                                            {generatedShort.bRollSuggestions.map((broll, bIdx) => (
+                                            {generatedShort.bRollSuggestions.map((broll, bIdx) => {
+                                                const selectedType = broll.selectedType ?? 'video';
+                                                const hasVideos = broll.pexelsResults && broll.pexelsResults.length > 0;
+                                                const hasPhotos = broll.pexelsPhotos && broll.pexelsPhotos.length > 0;
+                                                return (
                                                 <div key={broll.id} className={`p-2 rounded border ${broll.approved ? 'border-green-500/40 bg-green-900/10' : 'border-red-500/30 bg-red-900/10 opacity-60'}`}>
                                                     <div className="flex items-center justify-between mb-1">
                                                         <span className="text-xs text-gray-400">
@@ -1468,35 +1472,91 @@ export const ContentLibraryPage: React.FC<{
                                                     </div>
                                                     <div className="text-xs text-gray-300 mb-1">🔍 "{broll.searchQuery}"</div>
                                                     <div className="text-[10px] text-gray-500 mb-2">{broll.rationale}</div>
-                                                    {broll.pexelsResults && broll.pexelsResults.length > 0 && (
+
+                                                    {/* Video / Photo tab switcher */}
+                                                    {(hasVideos || hasPhotos) && (
+                                                        <div className="flex gap-1 mb-1.5">
+                                                            {hasVideos && (
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const updated = { ...generatedShort };
+                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
+                                                                            i === bIdx ? { ...s, selectedType: 'video' } : s
+                                                                        );
+                                                                        setGeneratedShort(updated);
+                                                                    }}
+                                                                    className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 ${selectedType === 'video' ? 'bg-indigo-600 text-white' : 'bg-[#222] text-gray-400 hover:text-white'}`}
+                                                                >
+                                                                    🎬 Video
+                                                                </button>
+                                                            )}
+                                                            {hasPhotos && (
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const updated = { ...generatedShort };
+                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
+                                                                            i === bIdx ? { ...s, selectedType: 'photo' } : s
+                                                                        );
+                                                                        setGeneratedShort(updated);
+                                                                    }}
+                                                                    className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 ${selectedType === 'photo' ? 'bg-indigo-600 text-white' : 'bg-[#222] text-gray-400 hover:text-white'}`}
+                                                                >
+                                                                    🖼 Photo
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    )}
+
+                                                    {/* Video thumbnails */}
+                                                    {selectedType === 'video' && hasVideos && (
                                                         <div className="flex gap-1.5 overflow-x-auto pb-1">
-                                                            {broll.pexelsResults.map((vid, vIdx) => (
+                                                            {broll.pexelsResults!.map((vid, vIdx) => (
                                                                 <div
                                                                     key={vid.id}
                                                                     onClick={() => {
                                                                         const updated = { ...generatedShort };
                                                                         updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
-                                                                            i === bIdx ? { ...s, selectedVideoIndex: vIdx } : s
+                                                                            i === bIdx ? { ...s, selectedVideoIndex: vIdx, selectedType: 'video' } : s
                                                                         );
                                                                         setGeneratedShort(updated);
                                                                     }}
-                                                                    className={`flex-shrink-0 cursor-pointer rounded overflow-hidden border-2 transition-all ${(broll.selectedVideoIndex ?? 0) === vIdx ? 'border-indigo-400 shadow-lg shadow-indigo-500/20' : 'border-transparent opacity-60 hover:opacity-90'}`}
+                                                                    className={`flex-shrink-0 cursor-pointer rounded overflow-hidden border-2 transition-all ${selectedType === 'video' && (broll.selectedVideoIndex ?? 0) === vIdx ? 'border-indigo-400 shadow-lg shadow-indigo-500/20' : 'border-transparent opacity-60 hover:opacity-90'}`}
                                                                 >
-                                                                    <img
-                                                                        src={vid.thumbnailUrl}
-                                                                        alt={`B-roll option ${vIdx + 1}`}
-                                                                        className="w-20 h-14 object-cover"
-                                                                    />
+                                                                    <img src={vid.thumbnailUrl} alt={`Video ${vIdx + 1}`} className="w-20 h-14 object-cover" />
                                                                     <div className="text-[9px] text-center text-gray-400 py-0.5">{vid.duration}s</div>
                                                                 </div>
                                                             ))}
                                                         </div>
                                                     )}
-                                                    {(!broll.pexelsResults || broll.pexelsResults.length === 0) && (
+
+                                                    {/* Photo thumbnails */}
+                                                    {selectedType === 'photo' && hasPhotos && (
+                                                        <div className="flex gap-1.5 overflow-x-auto pb-1">
+                                                            {broll.pexelsPhotos!.map((photo, pIdx) => (
+                                                                <div
+                                                                    key={photo.id}
+                                                                    onClick={() => {
+                                                                        const updated = { ...generatedShort };
+                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
+                                                                            i === bIdx ? { ...s, selectedPhotoIndex: pIdx, selectedType: 'photo' } : s
+                                                                        );
+                                                                        setGeneratedShort(updated);
+                                                                    }}
+                                                                    className={`flex-shrink-0 cursor-pointer rounded overflow-hidden border-2 transition-all ${selectedType === 'photo' && (broll.selectedPhotoIndex ?? 0) === pIdx ? 'border-indigo-400 shadow-lg shadow-indigo-500/20' : 'border-transparent opacity-60 hover:opacity-90'}`}
+                                                                >
+                                                                    <img src={photo.thumbnailUrl} alt={`Photo ${pIdx + 1}`} className="w-20 h-14 object-cover" />
+                                                                    <div className="text-[9px] text-center text-gray-400 py-0.5">📷</div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+
+                                                    {!hasVideos && !hasPhotos && (
                                                         <div className="text-[10px] text-gray-500 italic">No stock footage found for this query</div>
                                                     )}
                                                 </div>
-                                            ))}
+                                                );
+                                            })}
                                         </div>
                                     </div>
                                 )}
