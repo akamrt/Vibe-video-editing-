@@ -50,6 +50,7 @@ export interface GeneratedShort {
     totalDuration: number;
     createdAt: Date;
     trendingTopic?: string;
+    bRollSuggestions?: BRollSuggestion[];
 }
 
 export interface ShortSegment {
@@ -59,6 +60,28 @@ export interface ShortSegment {
     text: string;
     keywords?: KeywordEmphasis[];
     removedWordIndices?: number[];
+}
+
+// ==================== B-Roll (Pexels) ====================
+
+export interface BRollSuggestion {
+    id: string;
+    clipIndex: number;            // Which clip this overlays (0-based)
+    offsetInClip: number;         // Seconds into the clip where B-roll starts
+    duration: number;             // 2-5 seconds
+    searchQuery: string;          // Pexels search term
+    rationale: string;            // Why LLM suggested this
+    approved: boolean;            // Default: true
+    pexelsResults?: PexelsVideoResult[];
+    selectedVideoIndex?: number;  // Which result the user picked (default: 0)
+}
+
+export interface PexelsVideoResult {
+    id: number;
+    url: string;                  // Pexels page URL
+    thumbnailUrl: string;         // Preview image
+    videoFileUrl: string;         // Direct download (HD)
+    duration: number;             // Pexels video duration in seconds
 }
 
 // ==================== Scan Center Cache ====================

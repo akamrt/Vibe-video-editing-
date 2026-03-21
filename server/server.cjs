@@ -382,6 +382,7 @@ const KIMI_API_KEY = process.env.KIMI_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
+const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 
 console.log(`Using Gemini Model: ${GEMINI_MODEL}`);
 console.log(`Using Gemini API Key: ${GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : 'Not Set'}`);
@@ -1041,6 +1042,12 @@ EDITING RULES:
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
+12. B-ROLL SUGGESTIONS — Identify 0-3 moments where stock footage would enhance the visual storytelling.
+    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion).
+    Do NOT suggest B-roll for abstract concepts or when the speaker's face/delivery IS the content.
+    For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
+    duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
+    and rationale (one sentence why this helps). This field is OPTIONAL — omit if no good B-roll moments exist.
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -1061,7 +1068,10 @@ Return JSON only:
   "clips": [
     { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
   ],
-  "totalDuration": number
+  "totalDuration": number,
+  "bRollSuggestions": [
+    { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "concise search terms", "rationale": "one sentence why" }
+  ]
 }`;
 
         // Use a stronger model for creative editorial decisions
@@ -1218,6 +1228,12 @@ EDITING RULES:
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
+12. B-ROLL SUGGESTIONS — Identify 0-3 moments where stock footage would enhance the visual storytelling.
+    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion).
+    Do NOT suggest B-roll for abstract concepts or when the speaker's face/delivery IS the content.
+    For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
+    duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
+    and rationale (one sentence why this helps). This field is OPTIONAL — omit if no good B-roll moments exist.
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -1240,7 +1256,10 @@ return JSON only:
       "clips": [
         { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
       ],
-      "totalDuration": number
+      "totalDuration": number,
+      "bRollSuggestions": [
+        { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "concise search terms", "rationale": "one sentence why" }
+      ]
     }
   ]
 }
@@ -1970,6 +1989,89 @@ Example: { "analyses": [{ "shortId": "abc", "trendScore": 85, "matchedTrends": [
     }
 });
 
+// ==================== Pexels B-Roll ====================
+
+app.get('/api/pexels/search', async (req, res) => {
+    if (!PEXELS_API_KEY) {
+        return res.status(400).json({
+            error: 'PEXELS_API_KEY not configured',
+            setup: 'Get a free API key at https://www.pexels.com/api/ and add PEXELS_API_KEY to your .env.local'
+        });
+    }
+
+    const { query, per_page = 5, orientation = 'portrait' } = req.query;
+    if (!query) {
+        return res.status(400).json({ error: 'Missing query parameter' });
+    }
+
+    const cacheKey = `pexels_${query}_${per_page}_${orientation}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    try {
+        const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=${per_page}&orientation=${orientation}`;
+        const response = await fetch(url, {
+            headers: { 'Authorization': PEXELS_API_KEY }
+        });
+
+        if (response.status === 429) {
+            return res.status(429).json({ error: 'Pexels rate limit reached. Try again later.' });
+        }
+        if (!response.ok) {
+            throw new Error(`Pexels API error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const videos = (data.videos || []).map(v => {
+            // Pick best video file: prefer HD, then SD, portrait-friendly
+            const files = v.video_files || [];
+            const hdFile = files.find(f => f.quality === 'hd' && f.width <= 1920)
+                || files.find(f => f.quality === 'hd')
+                || files.find(f => f.quality === 'sd')
+                || files[0];
+
+            return {
+                id: v.id,
+                url: v.url,
+                thumbnailUrl: v.image,
+                videoFileUrl: hdFile?.link || '',
+                duration: v.duration
+            };
+        }).filter(v => v.videoFileUrl);
+
+        const result = { videos };
+        setCache(cacheKey, result);
+        res.json(result);
+    } catch (error) {
+        console.error('Pexels search error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/pexels/download', async (req, res) => {
+    const { url } = req.query;
+    if (!url) {
+        return res.status(400).json({ error: 'Missing url parameter' });
+    }
+
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Pexels download failed: ${response.status}`);
+        }
+
+        res.setHeader('Content-Type', response.headers.get('content-type') || 'video/mp4');
+        const contentLength = response.headers.get('content-length');
+        if (contentLength) res.setHeader('Content-Length', contentLength);
+
+        const { Readable } = require('stream');
+        Readable.fromWeb(response.body).pipe(res);
+    } catch (error) {
+        console.error('Pexels download error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ==================== API Key Management ====================
 
 // Get current API key status (masked)
@@ -1981,6 +2083,7 @@ app.get('/api/keys', (req, res) => {
         OPENAI_API_KEY: OPENAI_API_KEY ? '******' + OPENAI_API_KEY.slice(-4) : null,
         MINIMAX_API_KEY: MINIMAX_API_KEY ? '******' + MINIMAX_API_KEY.slice(-4) : null,
         ASSEMBLYAI_API_KEY: ASSEMBLYAI_API_KEY ? '******' + ASSEMBLYAI_API_KEY.slice(-4) : null,
+        PEXELS_API_KEY: PEXELS_API_KEY ? '******' + PEXELS_API_KEY.slice(-4) : null,
     });
 });
 

@@ -2976,7 +2976,80 @@ function App() {
         return segment;
       });
 
-      // 7.5. Import into editor FIRST (user sees clips immediately)
+      // 7.5. Download and place approved B-roll on V2
+      const bRollSegments: Segment[] = [];
+      const bRollMediaItems: MediaItem[] = [];
+      const approvedBRoll = (short.bRollSuggestions || []).filter(
+        b => b.approved && b.pexelsResults && b.pexelsResults.length > 0
+      );
+
+      if (approvedBRoll.length > 0) {
+        console.log(`[Export Short] Downloading ${approvedBRoll.length} B-roll clips...`);
+        for (const broll of approvedBRoll) {
+          try {
+            const selectedVideo = broll.pexelsResults![(broll.selectedVideoIndex ?? 0)];
+            if (!selectedVideo?.videoFileUrl) continue;
+
+            // Download via server proxy to avoid CORS
+            const dlRes = await fetch(`/api/pexels/download?url=${encodeURIComponent(selectedVideo.videoFileUrl)}`);
+            if (!dlRes.ok) {
+              console.warn(`[Export Short] B-roll download failed for: ${broll.searchQuery}`);
+              continue;
+            }
+            const brollBlob = await dlRes.blob();
+            const brollFile = new File([brollBlob], `broll_${broll.searchQuery.replace(/\s+/g, '_')}.mp4`, { type: 'video/mp4' });
+            const brollUrl = URL.createObjectURL(brollBlob);
+
+            // Probe duration
+            const brollVideo = document.createElement('video');
+            brollVideo.src = brollUrl;
+            await new Promise<void>((resolve) => {
+              const timeout = setTimeout(() => resolve(), 3000);
+              brollVideo.onloadedmetadata = () => { clearTimeout(timeout); resolve(); };
+              brollVideo.onerror = () => { clearTimeout(timeout); resolve(); };
+            });
+            const brollDuration = brollVideo.duration || selectedVideo.duration || broll.duration;
+
+            // Create MediaItem for B-roll
+            const brollMediaItem: MediaItem = {
+              id: Math.random().toString(36).substr(2, 9),
+              file: brollFile,
+              url: brollUrl,
+              duration: brollDuration,
+              name: `B-Roll: ${broll.searchQuery}`,
+              analysis: null,
+            };
+            bRollMediaItems.push(brollMediaItem);
+
+            // Calculate timeline position from the V1 segment it overlays
+            const targetV1Segment = newSegments[broll.clipIndex];
+            if (!targetV1Segment) continue;
+            const brollTimelineStart = targetV1Segment.timelineStart + broll.offsetInClip;
+            const brollEndTime = Math.min(broll.duration, brollDuration);
+
+            bRollSegments.push({
+              id: Math.random().toString(36).substr(2, 9),
+              mediaId: brollMediaItem.id,
+              startTime: 0,
+              endTime: brollEndTime,
+              timelineStart: brollTimelineStart,
+              track: 1, // V2 — renders on top of V1
+              description: `B-Roll: ${broll.searchQuery}`,
+              color: 'hsl(200, 60%, 35%)',
+              type: 'video',
+              audioLinked: false,
+              transitionIn: { type: 'FADE' as TransitionType, duration: 0.3, easing: 'easeOut' },
+              transitionOut: { type: 'FADE' as TransitionType, duration: 0.3, easing: 'easeIn' },
+            });
+
+            console.log(`[Export Short] B-roll placed: "${broll.searchQuery}" at ${brollTimelineStart.toFixed(1)}s on V2`);
+          } catch (e) {
+            console.warn(`[Export Short] B-roll failed for "${broll.searchQuery}":`, e);
+          }
+        }
+      }
+
+      // 7.6. Import into editor FIRST (user sees clips immediately)
       const titleLayer: TitleLayer = {
         id: Math.random().toString(36).substr(2, 9),
         text: short.hookTitle || short.title,
@@ -3009,7 +3082,8 @@ function App() {
 
       setProject(prev => ({
         ...prev,
-        segments: [...prev.segments, ...newSegments],
+        library: [...prev.library, ...bRollMediaItems],
+        segments: [...prev.segments, ...newSegments, ...bRollSegments],
         titleLayer: titleLayer,
         ...(defaultSubtitleTemplate ? { activeSubtitleTemplate: defaultSubtitleTemplate } : {}),
       }));

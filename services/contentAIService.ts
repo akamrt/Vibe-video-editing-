@@ -5,7 +5,7 @@
  * This keeps the API key secure on the server and avoids browser rate limits.
  */
 
-import { contentDB, VideoRecord, TranscriptSegment, GeneratedShort, ShortSegment, generateId } from "./contentDatabase";
+import { contentDB, VideoRecord, TranscriptSegment, GeneratedShort, ShortSegment, BRollSuggestion, PexelsVideoResult, generateId } from "./contentDatabase";
 import { trackServerUsage } from "./costTracker";
 
 // ==================== Types ====================
@@ -133,6 +133,16 @@ export async function searchTranscripts(query: string): Promise<SearchResult[]> 
 }
 
 /**
+ * Search Pexels for B-roll stock footage.
+ */
+async function searchPexelsBRoll(query: string, count: number = 5): Promise<PexelsVideoResult[]> {
+    const res = await fetch(`/api/pexels/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=portrait`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.videos || [];
+}
+
+/**
  * Generate a short-form video edit from a single sermon.
  */
 export interface ExistingShortContext {
@@ -244,6 +254,45 @@ export async function generateShort(
             totalDuration: json.totalDuration || shortSegments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0),
             createdAt: new Date()
         };
+
+        // Fetch Pexels B-roll thumbnails if LLM suggested any
+        if (json.bRollSuggestions && Array.isArray(json.bRollSuggestions) && json.bRollSuggestions.length > 0) {
+            try {
+                const keysRes = await fetch('/api/keys');
+                const keys = await keysRes.json();
+                if (keys.PEXELS_API_KEY) {
+                    const bRollResults = await Promise.all(
+                        json.bRollSuggestions.map(async (suggestion: any): Promise<BRollSuggestion | null> => {
+                            try {
+                                const results = await searchPexelsBRoll(suggestion.searchQuery);
+                                if (results.length === 0) return null;
+                                return {
+                                    id: generateId(),
+                                    clipIndex: suggestion.clipIndex ?? 0,
+                                    offsetInClip: suggestion.offsetInClip ?? 0,
+                                    duration: suggestion.duration ?? 3,
+                                    searchQuery: suggestion.searchQuery || '',
+                                    rationale: suggestion.rationale || '',
+                                    approved: true,
+                                    pexelsResults: results,
+                                    selectedVideoIndex: 0,
+                                };
+                            } catch (e) {
+                                console.warn('[ContentAI] Pexels search failed for:', suggestion.searchQuery, e);
+                                return null;
+                            }
+                        })
+                    );
+                    const validSuggestions = bRollResults.filter((s): s is BRollSuggestion => s !== null);
+                    if (validSuggestions.length > 0) {
+                        generatedShort.bRollSuggestions = validSuggestions;
+                        console.log(`[ContentAI] Found ${validSuggestions.length} B-roll suggestions with Pexels results`);
+                    }
+                }
+            } catch (e) {
+                console.warn('[ContentAI] B-roll enrichment skipped:', e);
+            }
+        }
 
         // Save to database
         await contentDB.addShort(generatedShort);

@@ -1442,6 +1442,65 @@ export const ContentLibraryPage: React.FC<{
                                     </div>
                                 </div>
 
+                                {/* B-Roll Suggestions */}
+                                {generatedShort.bRollSuggestions && generatedShort.bRollSuggestions.length > 0 && (
+                                    <div className="mb-4 p-3 bg-[#1a1a2e] rounded-lg border border-indigo-500/30">
+                                        <div className="text-xs text-indigo-400 font-bold mb-2">🎬 B-ROLL SUGGESTIONS</div>
+                                        <div className="space-y-3">
+                                            {generatedShort.bRollSuggestions.map((broll, bIdx) => (
+                                                <div key={broll.id} className={`p-2 rounded border ${broll.approved ? 'border-green-500/40 bg-green-900/10' : 'border-red-500/30 bg-red-900/10 opacity-60'}`}>
+                                                    <div className="flex items-center justify-between mb-1">
+                                                        <span className="text-xs text-gray-400">
+                                                            Clip {broll.clipIndex + 1} @ +{broll.offsetInClip.toFixed(1)}s — {broll.duration}s
+                                                        </span>
+                                                        <button
+                                                            onClick={() => {
+                                                                const updated = { ...generatedShort };
+                                                                updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
+                                                                    i === bIdx ? { ...s, approved: !s.approved } : s
+                                                                );
+                                                                setGeneratedShort(updated);
+                                                            }}
+                                                            className={`text-xs px-2 py-0.5 rounded ${broll.approved ? 'bg-green-600/30 text-green-300 hover:bg-red-600/30 hover:text-red-300' : 'bg-red-600/30 text-red-300 hover:bg-green-600/30 hover:text-green-300'}`}
+                                                        >
+                                                            {broll.approved ? '✓ Approved' : '✗ Rejected'}
+                                                        </button>
+                                                    </div>
+                                                    <div className="text-xs text-gray-300 mb-1">🔍 "{broll.searchQuery}"</div>
+                                                    <div className="text-[10px] text-gray-500 mb-2">{broll.rationale}</div>
+                                                    {broll.pexelsResults && broll.pexelsResults.length > 0 && (
+                                                        <div className="flex gap-1.5 overflow-x-auto pb-1">
+                                                            {broll.pexelsResults.map((vid, vIdx) => (
+                                                                <div
+                                                                    key={vid.id}
+                                                                    onClick={() => {
+                                                                        const updated = { ...generatedShort };
+                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
+                                                                            i === bIdx ? { ...s, selectedVideoIndex: vIdx } : s
+                                                                        );
+                                                                        setGeneratedShort(updated);
+                                                                    }}
+                                                                    className={`flex-shrink-0 cursor-pointer rounded overflow-hidden border-2 transition-all ${(broll.selectedVideoIndex ?? 0) === vIdx ? 'border-indigo-400 shadow-lg shadow-indigo-500/20' : 'border-transparent opacity-60 hover:opacity-90'}`}
+                                                                >
+                                                                    <img
+                                                                        src={vid.thumbnailUrl}
+                                                                        alt={`B-roll option ${vIdx + 1}`}
+                                                                        className="w-20 h-14 object-cover"
+                                                                    />
+                                                                    <div className="text-[9px] text-center text-gray-400 py-0.5">{vid.duration}s</div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                    {(!broll.pexelsResults || broll.pexelsResults.length === 0) && (
+                                                        <div className="text-[10px] text-gray-500 italic">No stock footage found for this query</div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
                                 {generatedShort.segments.some(s => s.keywords && s.keywords.length > 0) && (
                                     <div className="mb-4">
                                         <div className="text-xs text-gray-500 mb-2">KEYWORD EMPHASIS</div>
