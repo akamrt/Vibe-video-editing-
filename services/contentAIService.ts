@@ -595,6 +595,18 @@ export async function importManualShort(
                 createdAt: new Date()
             };
 
+            // Fetch B-roll from Pexels if ChatGPT/external AI provided suggestions
+            if (shortData.bRollSuggestions && Array.isArray(shortData.bRollSuggestions) && shortData.bRollSuggestions.length > 0) {
+                try {
+                    const bRollSuggestions = await fetchBRollForSuggestions(shortData.bRollSuggestions);
+                    if (bRollSuggestions.length > 0) {
+                        generatedShort.bRollSuggestions = bRollSuggestions;
+                    }
+                } catch (e) {
+                    console.warn('[ImportJSON] B-roll fetch failed (non-fatal):', e);
+                }
+            }
+
             await contentDB.addShort(generatedShort);
             generatedShorts.push(generatedShort);
         }
