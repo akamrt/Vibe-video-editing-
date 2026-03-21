@@ -825,6 +825,15 @@ function App() {
             }
           } else {
             // Complex transition — render on canvas
+            // Exception: for B-roll solo transitions (no cross-neighbor), use DOM opacity instead
+            // of canvas so the "null" frame is transparent (V1 shows through), not black.
+            const isBRollSolo = seg.track > 0 && seg.audioLinked === false
+              && seg.type !== 'audio' && !isCrossTransitionDriver;
+            if (isBRollSolo) {
+              // opacity = activeProgress covers both intro (0→1) and outro (1→0)
+              opacity = activeProgress;
+            } else {
+
             const tCanvas = transitionCanvasRef.current;
             const vw = videoEl.videoWidth;
             const vh = videoEl.videoHeight;
@@ -852,8 +861,8 @@ function App() {
                   let dw: number, dh: number, dx: number, dy: number;
                   if (car > ear) { dh = ch; dw = ch * ear; dx = (cw - dw) / 2; dy = 0; }
                   else { dw = cw; dh = cw / ear; dx = 0; dy = (ch - dh) / 2; }
-                  fctx.fillStyle = '#000';
-                  fctx.fillRect(0, 0, cw, ch);
+                  // Don't fill with black — leave letterbox areas transparent so layers
+                  // below (e.g. V1) show through during B-roll canvas transitions
                   fctx.drawImage(el, dx, dy, dw, dh);
                   return fc;
                 };
@@ -897,6 +906,7 @@ function App() {
                 if (overlapNeighborEl) overlapNeighborEl.style.opacity = '0';
               }
             }
+            } // end else (!isBRollSolo)
           }
         }
 
@@ -2238,6 +2248,19 @@ function App() {
     if (autoCenterOnImport && !isAudio) {
       setTimeout(() => autoCenterSegment(newSeg.id, newSeg.startTime, newSeg.endTime, newSeg.timelineStart), 0);
     }
+  };
+
+  const handleSwapMedia = (newItem: MediaItem) => {
+    if (selectedSegmentIds.length !== 1) return;
+    const segId = selectedSegmentIds[0];
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === segId
+          ? { ...s, mediaId: newItem.id, startTime: 0, endTime: newItem.duration, description: newItem.name }
+          : s
+      )
+    }));
   };
 
   const handleInsertBlank = (insertionTime: number) => {
@@ -4290,6 +4313,9 @@ function App() {
           ...seg,
           id: Math.random().toString(36).substr(2, 9),
           startTime: fillerEnd,
+          // Update timelineStart to the old timeline position of fillerEnd so rippleCloseGaps
+          // can correctly remap B-roll positions after silence removal
+          timelineStart: seg.timelineStart + (fillerEnd - seg.startTime),
           keyframes: filterKeyframesForRange(seg.keyframes, fillerEnd - seg.startTime, seg.endTime - seg.startTime),
           trackingData: undefined,
         });
@@ -4329,6 +4355,9 @@ function App() {
           ...seg,
           id: Math.random().toString(36).substr(2, 9),
           startTime: fillerEnd,
+          // Update timelineStart to old timeline position of fillerEnd so rippleCloseGaps
+          // builds correct v1Map for B-roll repositioning
+          timelineStart: seg.timelineStart + (fillerEnd - seg.startTime),
           transitionIn: undefined,
           keyframes: filterKeyframesForRange(seg.keyframes, fillerEnd - seg.startTime, seg.endTime - seg.startTime),
           trackingData: undefined,
@@ -4339,25 +4368,62 @@ function App() {
     return result;
   };
 
-  /** Pack segments sequentially per track with no gaps */
+  /** Pack segments sequentially per track with no gaps.
+   * B-roll overlay segments (track > 0, audioLinked === false, non-audio) are excluded
+   * from pack-from-zero and instead repositioned to stay aligned with V1 content. */
   const rippleCloseGaps = (segments: Segment[]): Segment[] => {
+    // Identify B-roll: unlinked video overlays on V2+ tracks
+    const isBRoll = (s: Segment) => s.track > 0 && s.audioLinked === false && s.type !== 'audio';
+    const bRollSegs = segments.filter(isBRoll);
+    const regularSegs = segments.filter(s => !isBRoll(s));
+
     const tracks = new Map<number, Segment[]>();
-    for (const seg of segments) {
+    for (const seg of regularSegs) {
       const list = tracks.get(seg.track) || [];
       list.push(seg);
       tracks.set(seg.track, list);
     }
 
     const result: Segment[] = [];
-    for (const [, trackSegments] of tracks) {
-      const sorted = [...trackSegments].sort((a, b) => a.timelineStart - b.timelineStart);
+
+    // Ripple-close V1 (track 0) first and record the position mapping
+    const v1Sorted = (tracks.get(0) || []).sort((a, b) => a.timelineStart - b.timelineStart);
+    let v1Cursor = 0;
+    const v1Map: Array<{ oldStart: number; oldEnd: number; newStart: number }> = [];
+    for (const seg of v1Sorted) {
+      const dur = seg.endTime - seg.startTime;
+      v1Map.push({ oldStart: seg.timelineStart, oldEnd: seg.timelineStart + dur, newStart: v1Cursor });
+      result.push({ ...seg, timelineStart: v1Cursor });
+      v1Cursor += dur;
+    }
+
+    // Ripple-close all other regular tracks (linked audio, etc.)
+    for (const [track, trackSegs] of tracks) {
+      if (track === 0) continue;
+      const sorted = [...trackSegs].sort((a, b) => a.timelineStart - b.timelineStart);
       let cursor = 0;
       for (const seg of sorted) {
-        const duration = seg.endTime - seg.startTime;
+        const dur = seg.endTime - seg.startTime;
         result.push({ ...seg, timelineStart: cursor });
-        cursor += duration;
+        cursor += dur;
       }
     }
+
+    // Reposition B-roll by mapping through V1's position changes
+    for (const broll of bRollSegs) {
+      let newPos = broll.timelineStart;
+      if (v1Map.length > 0) {
+        // Find the last V1 segment whose oldStart <= broll position, map proportionally
+        for (const entry of v1Map) {
+          if (entry.oldStart <= broll.timelineStart) {
+            const offset = Math.min(broll.timelineStart - entry.oldStart, entry.oldEnd - entry.oldStart);
+            newPos = entry.newStart + offset;
+          }
+        }
+      }
+      result.push({ ...broll, timelineStart: newPos });
+    }
+
     return result;
   };
 
@@ -5306,6 +5372,8 @@ function App() {
               onAddToTimeline={handleAddToTimeline}
               onSelect={m => setSelectedMediaId(m.id)}
               onYoutubeClick={() => setShowYoutubeModal(true)}
+              swapActive={selectedSegmentIds.length === 1}
+              onSwapMedia={handleSwapMedia}
             />
           )}
           {activeLeftTab === 'properties' && (

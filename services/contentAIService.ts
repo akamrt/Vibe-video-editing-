@@ -135,7 +135,7 @@ export async function searchTranscripts(query: string): Promise<SearchResult[]> 
 /**
  * Search Pexels for B-roll stock footage.
  */
-async function searchPexelsBRoll(query: string, count: number = 5): Promise<PexelsVideoResult[]> {
+async function searchPexelsBRoll(query: string, count: number = 10): Promise<PexelsVideoResult[]> {
     const res = await fetch(`/api/pexels/search?query=${encodeURIComponent(query)}&per_page=${count}&orientation=portrait`);
     if (!res.ok) return [];
     const data = await res.json();
