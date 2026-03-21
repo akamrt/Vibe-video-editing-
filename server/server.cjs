@@ -1042,12 +1042,13 @@ EDITING RULES:
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — Identify 0-3 moments where stock footage would enhance the visual storytelling.
-    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion).
-    Do NOT suggest B-roll for abstract concepts or when the speaker's face/delivery IS the content.
+12. B-ROLL SUGGESTIONS — Identify 3-8 moments where stock footage would enhance the visual storytelling.
+    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion, concept).
+    Be generous — look for any moment where a visual could reinforce the message, not just the most obvious ones.
+    Do NOT suggest B-roll for moments where the speaker's raw emotion or delivery IS the content.
     For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
     duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
-    and rationale (one sentence why this helps). This field is OPTIONAL — omit if no good B-roll moments exist.
+    and rationale (one sentence why this helps).
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -1228,12 +1229,13 @@ EDITING RULES:
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — Identify 0-3 moments where stock footage would enhance the visual storytelling.
-    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion).
-    Do NOT suggest B-roll for abstract concepts or when the speaker's face/delivery IS the content.
+12. B-ROLL SUGGESTIONS — Identify 3-8 moments where stock footage would enhance the visual storytelling.
+    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion, concept).
+    Be generous — look for any moment where a visual could reinforce the message, not just the most obvious ones.
+    Do NOT suggest B-roll for moments where the speaker's raw emotion or delivery IS the content.
     For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
     duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
-    and rationale (one sentence why this helps). This field is OPTIONAL — omit if no good B-roll moments exist.
+    and rationale (one sentence why this helps).
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
