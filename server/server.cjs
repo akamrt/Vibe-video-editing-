@@ -1047,7 +1047,7 @@ EDITING RULES:
     Do NOT suggest B-roll for abstract concepts or when the speaker's face/delivery IS the content.
     For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
     duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
-    and rationale (one sentence why this helps).
+    and rationale (one sentence why this helps). This field is OPTIONAL — omit if no good B-roll moments exist.
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -1233,7 +1233,7 @@ EDITING RULES:
     Do NOT suggest B-roll for abstract concepts or when the speaker's face/delivery IS the content.
     For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
     duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
-    and rationale (one sentence why this helps).
+    and rationale (one sentence why this helps). This field is OPTIONAL — omit if no good B-roll moments exist.
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -2027,6 +2027,7 @@ app.get('/api/pexels/search', async (req, res) => {
             const files = v.video_files || [];
             const hdFile = files.find(f => f.quality === 'hd' && f.height >= 720)
                 || files.find(f => f.quality === 'hd')
+                || files.find(f => f.quality === 'sd')
                 || files[0];
             return {
                 id: v.id,

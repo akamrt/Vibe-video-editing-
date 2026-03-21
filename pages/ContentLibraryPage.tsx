@@ -1541,60 +1541,56 @@ export const ContentLibraryPage: React.FC<{
 
                                 {/* B-Roll Suggestions */}
                                 {generatedShort.bRollSuggestions && generatedShort.bRollSuggestions.length > 0 && (
-                                    <div className="mb-4">
-                                        <div className="text-xs text-gray-500 mb-2">B-ROLL SUGGESTIONS</div>
+                                    <div className="mb-4 p-3 bg-[#1a1a2e] rounded-lg border border-indigo-500/30">
+                                        <div className="text-xs text-indigo-400 font-bold mb-2">🎬 B-ROLL SUGGESTIONS</div>
                                         <div className="space-y-3">
-                                            {generatedShort.bRollSuggestions.map((suggestion, sIdx) => (
-                                                <div key={suggestion.id} className={`rounded-lg border p-3 ${suggestion.approved ? 'bg-teal-900/20 border-teal-500/40' : 'bg-[#1a1a1a] border-[#333] opacity-60'}`}>
-                                                    <div className="flex items-center justify-between mb-2">
-                                                        <div className="flex items-center gap-2">
-                                                            <span className="text-xs px-2 py-0.5 rounded bg-teal-600/30 text-teal-300">
-                                                                Clip {suggestion.clipIndex + 1} @ {suggestion.offsetInClip.toFixed(1)}s
-                                                            </span>
-                                                            <span className="text-xs text-gray-400">{suggestion.duration}s</span>
-                                                        </div>
+                                            {generatedShort.bRollSuggestions.map((broll, bIdx) => (
+                                                <div key={broll.id} className={`p-2 rounded border ${broll.approved ? 'border-green-500/40 bg-green-900/10' : 'border-red-500/30 bg-red-900/10 opacity-60'}`}>
+                                                    <div className="flex items-center justify-between mb-1">
+                                                        <span className="text-xs text-gray-400">
+                                                            Clip {broll.clipIndex + 1} @ +{broll.offsetInClip.toFixed(1)}s — {broll.duration}s
+                                                        </span>
                                                         <button
                                                             onClick={() => {
                                                                 const updated = { ...generatedShort };
-                                                                updated.bRollSuggestions = [...(updated.bRollSuggestions || [])];
-                                                                updated.bRollSuggestions[sIdx] = { ...updated.bRollSuggestions[sIdx], approved: !suggestion.approved };
+                                                                updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
+                                                                    i === bIdx ? { ...s, approved: !s.approved } : s
+                                                                );
                                                                 setGeneratedShort(updated);
                                                             }}
-                                                            className={`text-xs px-2 py-1 rounded font-medium ${suggestion.approved ? 'bg-green-600/30 text-green-300 hover:bg-red-600/30 hover:text-red-300' : 'bg-red-600/30 text-red-300 hover:bg-green-600/30 hover:text-green-300'}`}
+                                                            className={`text-xs px-2 py-0.5 rounded ${broll.approved ? 'bg-green-600/30 text-green-300 hover:bg-red-600/30 hover:text-red-300' : 'bg-red-600/30 text-red-300 hover:bg-green-600/30 hover:text-green-300'}`}
                                                         >
-                                                            {suggestion.approved ? 'Approved' : 'Rejected'}
+                                                            {broll.approved ? '✓ Approved' : '✗ Rejected'}
                                                         </button>
                                                     </div>
-                                                    <div className="text-xs text-gray-400 mb-2">
-                                                        <span className="text-teal-400 font-medium">{suggestion.searchQuery}</span>
-                                                        {suggestion.rationale && <span className="ml-2 text-gray-500">— {suggestion.rationale}</span>}
-                                                    </div>
-                                                    {/* Thumbnail strip */}
-                                                    {suggestion.pexelsResults && suggestion.pexelsResults.length > 0 && (
-                                                        <div className="flex gap-2 overflow-x-auto pb-1">
-                                                            {suggestion.pexelsResults.map((video, vIdx) => (
-                                                                <button
-                                                                    key={video.id}
+                                                    <div className="text-xs text-gray-300 mb-1">🔍 "{broll.searchQuery}"</div>
+                                                    <div className="text-[10px] text-gray-500 mb-2">{broll.rationale}</div>
+                                                    {broll.pexelsResults && broll.pexelsResults.length > 0 && (
+                                                        <div className="flex gap-1.5 overflow-x-auto pb-1">
+                                                            {broll.pexelsResults.map((vid, vIdx) => (
+                                                                <div
+                                                                    key={vid.id}
                                                                     onClick={() => {
                                                                         const updated = { ...generatedShort };
-                                                                        updated.bRollSuggestions = [...(updated.bRollSuggestions || [])];
-                                                                        updated.bRollSuggestions[sIdx] = { ...updated.bRollSuggestions[sIdx], selectedVideoIndex: vIdx };
+                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
+                                                                            i === bIdx ? { ...s, selectedVideoIndex: vIdx } : s
+                                                                        );
                                                                         setGeneratedShort(updated);
                                                                     }}
-                                                                    className={`flex-shrink-0 rounded overflow-hidden border-2 transition-colors ${(suggestion.selectedVideoIndex ?? 0) === vIdx ? 'border-teal-400' : 'border-transparent hover:border-gray-500'}`}
+                                                                    className={`flex-shrink-0 cursor-pointer rounded overflow-hidden border-2 transition-all ${(broll.selectedVideoIndex ?? 0) === vIdx ? 'border-indigo-400 shadow-lg shadow-indigo-500/20' : 'border-transparent opacity-60 hover:opacity-90'}`}
                                                                 >
                                                                     <img
-                                                                        src={video.thumbnailUrl}
-                                                                        alt={suggestion.searchQuery}
+                                                                        src={vid.thumbnailUrl}
+                                                                        alt={`B-roll option ${vIdx + 1}`}
                                                                         className="w-20 h-14 object-cover"
                                                                     />
-                                                                    <div className="text-[9px] text-gray-500 text-center py-0.5">{video.duration}s</div>
-                                                                </button>
+                                                                    <div className="text-[9px] text-center text-gray-400 py-0.5">{vid.duration}s</div>
+                                                                </div>
                                                             ))}
                                                         </div>
                                                     )}
-                                                    {suggestion.pexelsResults && suggestion.pexelsResults.length === 0 && (
-                                                        <div className="text-xs text-gray-600 italic">No footage found</div>
+                                                    {(!broll.pexelsResults || broll.pexelsResults.length === 0) && (
+                                                        <div className="text-[10px] text-gray-500 italic">No stock footage found for this query</div>
                                                     )}
                                                 </div>
                                             ))}
