@@ -3007,9 +3007,73 @@ function App() {
         },
       } : null;
 
+      // 7.7. Download and place approved B-roll on V2
+      const bRollMediaItems: MediaItem[] = [];
+      const bRollSegments: Segment[] = [];
+      const approvedBRoll = (short.bRollSuggestions || []).filter(
+        s => s.approved && s.pexelsResults && s.pexelsResults.length > 0
+      );
+
+      if (approvedBRoll.length > 0) {
+        console.log(`[Export Short] Downloading ${approvedBRoll.length} B-roll clips...`);
+        for (const broll of approvedBRoll) {
+          try {
+            const selectedVideo = broll.pexelsResults![(broll.selectedVideoIndex ?? 0)];
+            if (!selectedVideo?.videoFileUrl) continue;
+
+            // Download via server proxy
+            const dlRes = await fetch(`/api/pexels/download?url=${encodeURIComponent(selectedVideo.videoFileUrl)}`);
+            if (!dlRes.ok) { console.warn('[Export Short] B-roll download failed:', dlRes.status); continue; }
+            const brollBlob = await dlRes.blob();
+            const brollFile = new File([brollBlob], `broll_${broll.searchQuery.replace(/\s+/g, '_')}.mp4`, { type: 'video/mp4' });
+            const brollUrl = URL.createObjectURL(brollBlob);
+
+            // Probe duration
+            const brollVideo = document.createElement('video');
+            brollVideo.src = brollUrl;
+            await new Promise(r => { brollVideo.onloadedmetadata = r; setTimeout(r, 3000); });
+            const brollDuration = brollVideo.duration && isFinite(brollVideo.duration) ? brollVideo.duration : broll.duration;
+
+            const brollMediaItem: MediaItem = {
+              id: Math.random().toString(36).substr(2, 9),
+              file: brollFile,
+              url: brollUrl,
+              duration: brollDuration,
+              name: `B-Roll: ${broll.searchQuery}`,
+              analysis: null,
+            };
+            bRollMediaItems.push(brollMediaItem);
+
+            // Calculate timeline position: find V1 segment for this clip index
+            const v1Seg = newSegments[broll.clipIndex];
+            if (!v1Seg) continue;
+            const brollTimelineStart = v1Seg.timelineStart + broll.offsetInClip;
+            const brollEndTime = Math.min(broll.duration, brollDuration);
+
+            bRollSegments.push({
+              id: Math.random().toString(36).substr(2, 9),
+              mediaId: brollMediaItem.id,
+              startTime: 0,
+              endTime: brollEndTime,
+              timelineStart: brollTimelineStart,
+              track: 1, // V2 — renders on top of V1
+              description: `B-Roll: ${broll.searchQuery}`,
+              color: '#0d9488', // teal
+              audioLinked: false, // No audio from B-roll
+              transitionIn: { type: 'FADE' as TransitionType, duration: 0.3, easing: 'easeOut' },
+              transitionOut: { type: 'FADE' as TransitionType, duration: 0.3, easing: 'easeIn' },
+            });
+            console.log(`[Export Short] B-roll placed: "${broll.searchQuery}" at ${brollTimelineStart.toFixed(1)}s on V2`);
+          } catch (e) {
+            console.warn(`[Export Short] B-roll "${broll.searchQuery}" failed:`, e);
+          }
+        }
+      }
+
       setProject(prev => ({
         ...prev,
-        segments: [...prev.segments, ...newSegments],
+        library: [...prev.library, ...bRollMediaItems],
+        segments: [...prev.segments, ...newSegments, ...bRollSegments],
         titleLayer: titleLayer,
         ...(defaultSubtitleTemplate ? { activeSubtitleTemplate: defaultSubtitleTemplate } : {}),
       }));
@@ -4538,34 +4602,78 @@ function App() {
           ?.filter(e => e.type === 'dialogue' && e.wordTimings?.length)
           .flatMap(e => e.wordTimings!) || [];
 
+        // Sort word timings by start time for gap-based snapping
+        const sortedWordTimings = [...allWordTimings].sort((a, b) => a.start - b.start);
+
         const sortedDesc = [...fillers].sort((a, b) => b.startTime - a.startTime);
         for (const filler of sortedDesc) {
           let start = filler.startTime;
           let end = filler.endTime;
 
-          // For repeated words ("the the"), only remove the second occurrence
-          // The AI marks the full range covering both words — keep the first half
-          if (filler.type === 'repeated') {
-            start = (start + end) / 2;
-          }
-
-          // When wordTimings are available, refine boundaries using exact word timestamps
-          if (allWordTimings.length > 0) {
-            // Find words that overlap the filler time range
-            const matchingWords = allWordTimings.filter(w =>
+          if (sortedWordTimings.length > 1) {
+            // === Word-gap precision (same approach as handleSplit) ===
+            // Find words that fall within the filler's time range
+            const matchingWords = sortedWordTimings.filter(w =>
               w.start >= start - 0.05 && w.end <= end + 0.05
             );
-            if (matchingWords.length > 0) {
-              start = matchingWords[0].start;
-              end = matchingWords[matchingWords.length - 1].end;
-            }
-          }
 
-          // Snap cut points to silence boundaries for clean audio edges
-          if (audioBuf) {
-            const snapped = snapFillerRange(audioBuf, start, end);
-            start = snapped.startTime;
-            end = snapped.endTime;
+            if (matchingWords.length > 0) {
+              // For repeated words ("the the"), use word timings to find the exact duplicate
+              // instead of naive midpoint — keep the first occurrence, remove from second onward
+              let fillerWords = matchingWords;
+              if (filler.type === 'repeated' && matchingWords.length >= 2) {
+                // Keep first half of matched words, remove second half
+                const halfIdx = Math.ceil(matchingWords.length / 2);
+                fillerWords = matchingWords.slice(halfIdx);
+              }
+
+              const firstFillerWord = fillerWords[0];
+              const lastFillerWord = fillerWords[fillerWords.length - 1];
+
+              // Find the gap BEFORE the first filler word (between previous word and filler)
+              const prevWordIdx = sortedWordTimings.findIndex(w => w === firstFillerWord) - 1;
+              if (prevWordIdx >= 0) {
+                const gapStart = sortedWordTimings[prevWordIdx].end;
+                const gapEnd = firstFillerWord.start;
+                // Snap to midpoint of the gap (lands in silence between words)
+                start = gapEnd > gapStart ? (gapStart + gapEnd) / 2 : firstFillerWord.start;
+              } else {
+                start = firstFillerWord.start;
+              }
+
+              // Find the gap AFTER the last filler word (between filler and next word)
+              const nextWordIdx = sortedWordTimings.findIndex(w => w === lastFillerWord) + 1;
+              if (nextWordIdx < sortedWordTimings.length) {
+                const gapStart = lastFillerWord.end;
+                const gapEnd = sortedWordTimings[nextWordIdx].start;
+                // Snap to midpoint of the gap (lands in silence between words)
+                end = gapEnd > gapStart ? (gapStart + gapEnd) / 2 : lastFillerWord.end;
+              } else {
+                end = lastFillerWord.end;
+              }
+            } else {
+              // No matching words found — fall back to repeated-word midpoint heuristic
+              if (filler.type === 'repeated') {
+                start = (start + end) / 2;
+              }
+              // Fall back to audio silence snap
+              if (audioBuf) {
+                const snapped = snapFillerRange(audioBuf, start, end);
+                start = snapped.startTime;
+                end = snapped.endTime;
+              }
+            }
+          } else {
+            // No word timings available — use legacy approach
+            if (filler.type === 'repeated') {
+              start = (start + end) / 2;
+            }
+            // Snap cut points to silence boundaries for clean audio edges
+            if (audioBuf) {
+              const snapped = snapFillerRange(audioBuf, start, end);
+              start = snapped.startTime;
+              end = snapped.endTime;
+            }
           }
 
           newSegments = removeSourceRange(newSegments, mediaId, start, end);
@@ -5178,6 +5286,8 @@ function App() {
       onExportShort={handleExportShort}
       autoCenterOnImport={autoCenterOnImport}
       onToggleAutoCenter={setAutoCenterOnImport}
+      project={project}
+      onProjectLoad={(loaded) => setProject(prev => ({ ...prev, ...loaded, isPlaying: false }))}
     />;
   }
 

@@ -382,6 +382,7 @@ const KIMI_API_KEY = process.env.KIMI_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
+const PEXELS_API_KEY = process.env.PEXELS_API_KEY;
 
 console.log(`Using Gemini Model: ${GEMINI_MODEL}`);
 console.log(`Using Gemini API Key: ${GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : 'Not Set'}`);
@@ -1041,6 +1042,12 @@ EDITING RULES:
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
+12. B-ROLL SUGGESTIONS — Identify 0-3 moments where stock footage would enhance the visual storytelling.
+    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion).
+    Do NOT suggest B-roll for abstract concepts or when the speaker's face/delivery IS the content.
+    For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
+    duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
+    and rationale (one sentence why this helps).
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -1060,6 +1067,9 @@ Return JSON only:
   "resolution": "the closing payoff line",
   "clips": [
     { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
+  ],
+  "bRollSuggestions": [
+    { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "descriptive stock footage query", "rationale": "why this helps" }
   ],
   "totalDuration": number
 }`;
@@ -1218,6 +1228,12 @@ EDITING RULES:
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
+12. B-ROLL SUGGESTIONS — Identify 0-3 moments where stock footage would enhance the visual storytelling.
+    B-roll works best when the speaker references something concrete and visual (a place, activity, object, emotion).
+    Do NOT suggest B-roll for abstract concepts or when the speaker's face/delivery IS the content.
+    For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
+    duration (2-5s), searchQuery (concise stock footage search, e.g. "sunset ocean waves"),
+    and rationale (one sentence why this helps).
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -1239,6 +1255,9 @@ return JSON only:
       "resolution": "the closing payoff line",
       "clips": [
         { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
+      ],
+      "bRollSuggestions": [
+        { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "descriptive stock footage query", "rationale": "why this helps" }
       ],
       "totalDuration": number
     }
@@ -1970,6 +1989,94 @@ Example: { "analyses": [{ "shortId": "abc", "trendScore": 85, "matchedTrends": [
     }
 });
 
+// ==================== Pexels B-Roll Video Search ====================
+
+app.get('/api/pexels/search', async (req, res) => {
+    const { query, per_page = '5', orientation = 'portrait' } = req.query;
+    if (!query) return res.status(400).json({ error: 'Missing query parameter' });
+
+    if (!PEXELS_API_KEY) {
+        return res.status(400).json({
+            error: 'PEXELS_API_KEY not configured',
+            setup: 'Get a free API key at https://www.pexels.com/api/ — sign up and copy your key into .env.local'
+        });
+    }
+
+    // Cache (1h TTL, reuses existing trendsCache)
+    const cacheKey = `pexels_${query}_${orientation}_${per_page}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.json(cached);
+
+    try {
+        const params = new URLSearchParams({ query, per_page, orientation });
+        const response = await fetch(`https://api.pexels.com/videos/search?${params}`, {
+            headers: { Authorization: PEXELS_API_KEY }
+        });
+
+        if (response.status === 429) {
+            return res.status(429).json({ error: 'Pexels rate limit exceeded. Try again later.' });
+        }
+        if (!response.ok) {
+            const text = await response.text();
+            return res.status(response.status).json({ error: `Pexels API error: ${text}` });
+        }
+
+        const data = await response.json();
+        const videos = (data.videos || []).map(v => {
+            // Pick the best HD file (prefer portrait-ish, HD quality)
+            const files = v.video_files || [];
+            const hdFile = files.find(f => f.quality === 'hd' && f.height >= 720)
+                || files.find(f => f.quality === 'hd')
+                || files[0];
+            return {
+                id: v.id,
+                url: v.url,
+                thumbnailUrl: v.image || '',
+                videoFileUrl: hdFile ? hdFile.link : '',
+                duration: v.duration || 0,
+                width: hdFile ? hdFile.width : 0,
+                height: hdFile ? hdFile.height : 0,
+            };
+        }).filter(v => v.videoFileUrl);
+
+        const result = { videos };
+        setCache(cacheKey, result);
+        res.json(result);
+    } catch (error) {
+        console.error('Pexels search error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Download proxy for Pexels video files (avoids CORS)
+app.get('/api/pexels/download', async (req, res) => {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: 'Missing url parameter' });
+
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            return res.status(response.status).json({ error: `Download failed: ${response.status}` });
+        }
+        res.setHeader('Content-Type', response.headers.get('content-type') || 'video/mp4');
+        const contentLength = response.headers.get('content-length');
+        if (contentLength) res.setHeader('Content-Length', contentLength);
+        // Stream the response body to client
+        const reader = response.body.getReader();
+        const pump = async () => {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) { res.end(); return; }
+                res.write(Buffer.from(value));
+            }
+        };
+        await pump();
+    } catch (error) {
+        console.error('Pexels download error:', error);
+        if (!res.headersSent) res.status(500).json({ error: error.message });
+    }
+});
+
 // ==================== API Key Management ====================
 
 // Get current API key status (masked)
@@ -1981,6 +2088,7 @@ app.get('/api/keys', (req, res) => {
         OPENAI_API_KEY: OPENAI_API_KEY ? '******' + OPENAI_API_KEY.slice(-4) : null,
         MINIMAX_API_KEY: MINIMAX_API_KEY ? '******' + MINIMAX_API_KEY.slice(-4) : null,
         ASSEMBLYAI_API_KEY: ASSEMBLYAI_API_KEY ? '******' + ASSEMBLYAI_API_KEY.slice(-4) : null,
+        PEXELS_API_KEY: PEXELS_API_KEY ? '******' + PEXELS_API_KEY.slice(-4) : null,
     });
 });
 
@@ -2099,6 +2207,78 @@ app.post('/api/saves/import-all', express.json({ limit: '200mb' }), (req, res) =
     try {
         const result = saveStore.importAll(req.body);
         res.json({ success: true, ...result });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- Bundle Export/Import (with media files) ---
+
+// Step 1: Create bundle with project JSON (auto-copies YouTube-cached videos)
+app.post('/api/saves/export-bundle', express.json({ limit: '100mb' }), (req, res) => {
+    try {
+        const { name, project } = req.body;
+        if (!name || !project) return res.status(400).json({ error: 'name and project required' });
+        const result = saveStore.createExportBundle(name, project);
+        // Return which media items still need uploading (not YouTube-cached)
+        const library = project.library || [];
+        const needsUpload = library
+            .filter(m => !result.manifest.mediaFiles[m.id]?.filename)
+            .map(m => ({ id: m.id, name: m.name, isAudioOnly: m.isAudioOnly }));
+        res.json({ ...result, needsUpload });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Step 2: Upload a media file to the bundle (for user-imported files not in YouTube cache)
+const bundleMediaUpload = multer({
+    storage: multer.diskStorage({
+        destination: (req, _file, cb) => {
+            const tmpDir = path.join(os.tmpdir(), 'vibecut-bundle-upload');
+            if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+            cb(null, tmpDir);
+        },
+        filename: (_req, file, cb) => cb(null, `${Date.now()}_${file.originalname}`),
+    }),
+    limits: { fileSize: 5 * 1024 * 1024 * 1024 }, // 5GB max
+});
+
+app.post('/api/saves/export-bundle/:bundleId/media', bundleMediaUpload.single('file'), (req, res) => {
+    try {
+        const { bundleId } = req.params;
+        const { mediaId, originalName, isAudioOnly } = req.body;
+        if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+        const filename = saveStore.addMediaToBundle(bundleId, mediaId, req.file.path, originalName || req.file.originalname, isAudioOnly === 'true');
+        // Clean up temp file
+        try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+        res.json({ success: true, filename });
+    } catch (err) {
+        if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Step 3: Read a bundle folder for import
+app.post('/api/saves/import-bundle', express.json({ limit: '1mb' }), (req, res) => {
+    try {
+        const { bundlePath } = req.body;
+        if (!bundlePath) return res.status(400).json({ error: 'bundlePath required' });
+        const result = saveStore.readImportBundle(bundlePath);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Step 4: Serve a media file from a bundle folder
+app.get('/api/saves/import-bundle/media/:filename', (req, res) => {
+    try {
+        const bundlePath = req.query.bundle;
+        if (!bundlePath) return res.status(400).json({ error: 'bundle query param required' });
+        const filePath = saveStore.getBundleMediaPath(bundlePath, req.params.filename);
+        if (!filePath) return res.status(404).json({ error: 'Media file not found' });
+        res.sendFile(filePath);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

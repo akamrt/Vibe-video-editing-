@@ -5,7 +5,7 @@
  * This keeps the API key secure on the server and avoids browser rate limits.
  */
 
-import { contentDB, VideoRecord, TranscriptSegment, GeneratedShort, ShortSegment, generateId } from "./contentDatabase";
+import { contentDB, VideoRecord, TranscriptSegment, GeneratedShort, ShortSegment, BRollSuggestion, PexelsVideoResult, generateId } from "./contentDatabase";
 import { trackServerUsage } from "./costTracker";
 
 // ==================== Types ====================
@@ -245,6 +245,18 @@ export async function generateShort(
             createdAt: new Date()
         };
 
+        // Fetch B-roll suggestions from Pexels if LLM provided them
+        if (json.bRollSuggestions && Array.isArray(json.bRollSuggestions) && json.bRollSuggestions.length > 0) {
+            try {
+                const bRollSuggestions = await fetchBRollForSuggestions(json.bRollSuggestions);
+                if (bRollSuggestions.length > 0) {
+                    generatedShort.bRollSuggestions = bRollSuggestions;
+                }
+            } catch (e) {
+                console.warn('[ContentAI] B-roll fetch failed (non-fatal):', e);
+            }
+        }
+
         // Save to database
         await contentDB.addShort(generatedShort);
 
@@ -259,6 +271,53 @@ export async function generateShort(
             error: "Failed to generate short: " + (error instanceof Error ? error.message : "Unknown error")
         };
     }
+}
+
+// ==================== B-Roll Pexels Fetching ====================
+
+async function fetchBRollForSuggestions(rawSuggestions: any[]): Promise<BRollSuggestion[]> {
+    // Check if Pexels API key is available
+    const keysRes = await fetch('/api/keys');
+    const keys = await keysRes.json();
+    if (!keys.PEXELS_API_KEY) {
+        console.log('[ContentAI] No Pexels API key configured, skipping B-roll');
+        return [];
+    }
+
+    // Fetch Pexels results for all suggestions in parallel
+    const results = await Promise.all(
+        rawSuggestions.map(async (suggestion: any): Promise<BRollSuggestion | null> => {
+            try {
+                const query = encodeURIComponent(suggestion.searchQuery || '');
+                if (!query) return null;
+
+                const res = await fetch(`/api/pexels/search?query=${query}&per_page=5&orientation=portrait`);
+                if (!res.ok) return null;
+
+                const data = await res.json();
+                const pexelsResults: PexelsVideoResult[] = (data.videos || []);
+
+                if (pexelsResults.length === 0) return null;
+
+                return {
+                    id: generateId(),
+                    clipIndex: suggestion.clipIndex ?? 0,
+                    offsetInClip: suggestion.offsetInClip ?? 0,
+                    duration: suggestion.duration ?? 3,
+                    searchQuery: suggestion.searchQuery || '',
+                    rationale: suggestion.rationale || '',
+                    approved: true,
+                    pexelsResults,
+                    selectedVideoIndex: 0,
+                };
+            } catch (e) {
+                console.warn(`[ContentAI] Pexels search failed for "${suggestion.searchQuery}":`, e);
+                return null;
+            }
+        })
+    );
+
+    return results.filter((r): r is BRollSuggestion => r !== null);
 }
 
 export async function buildShortPrompt(

@@ -193,6 +193,215 @@ function importAll(bundle) {
     return { projectCount, shortsCount };
 }
 
+// --- Bundle Export/Import (with media files) ---
+
+function getExportsDir() {
+    const dir = path.join(__dirname, '..', 'exports');
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+    return dir;
+}
+
+/**
+ * Create a bundle export folder with project JSON.
+ * Returns the bundle ID and folder path.
+ * Media files are added separately via addMediaToBundle().
+ */
+function createExportBundle(bundleName, projectData) {
+    const safeName = sanitizeName(bundleName);
+    const timestamp = new Date().toISOString().slice(0, 10);
+    const bundleId = `${safeName}_${timestamp}_${Date.now()}`;
+    const bundleDir = path.join(getExportsDir(), bundleId);
+    const mediaDir = path.join(bundleDir, 'media');
+
+    fs.mkdirSync(bundleDir, { recursive: true });
+    fs.mkdirSync(mediaDir, { recursive: true });
+
+    // Build a manifest mapping mediaId → filename + metadata
+    const manifest = {
+        _bundleVersion: 1,
+        _exportedAt: Date.now(),
+        _projectName: bundleName,
+        mediaFiles: {}, // mediaId → { filename, originalName, youtubeVideoId, isAudioOnly }
+    };
+
+    // Auto-copy YouTube-cached videos from downloads/
+    const localStore = require('./localStore.cjs');
+    const library = projectData.library || [];
+    for (const item of library) {
+        if (item.youtubeVideoId) {
+            const cache = localStore.hasLocalCache(item.youtubeVideoId);
+            if (cache.hasVideo) {
+                const ext = '.mp4';
+                const filename = `${sanitizeName(item.id)}${ext}`;
+                fs.copyFileSync(cache.videoPath, path.join(mediaDir, filename));
+                manifest.mediaFiles[item.id] = {
+                    filename,
+                    originalName: item.name || `${item.youtubeVideoId}.mp4`,
+                    youtubeVideoId: item.youtubeVideoId,
+                    isAudioOnly: item.isAudioOnly || false,
+                };
+                console.log(`[SaveStore] Bundle: copied cached YouTube video ${item.youtubeVideoId} → ${filename}`);
+            }
+            // Also copy transcript if available
+            if (cache.hasTranscript) {
+                const transcriptFilename = `${sanitizeName(item.id)}_transcript.json`;
+                fs.copyFileSync(cache.transcriptPath, path.join(mediaDir, transcriptFilename));
+                manifest.mediaFiles[item.id] = manifest.mediaFiles[item.id] || {};
+                manifest.mediaFiles[item.id].transcriptFile = transcriptFilename;
+            }
+        }
+    }
+
+    // Save manifest
+    fs.writeFileSync(path.join(bundleDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+
+    // Save project JSON (stripped of file/url)
+    const stripped = {
+        ...projectData,
+        isPlaying: false,
+        library: library.map(m => ({
+            ...m,
+            file: undefined,
+            url: undefined,
+        })),
+    };
+    fs.writeFileSync(path.join(bundleDir, 'project.json'), JSON.stringify(stripped, null, 2), 'utf8');
+
+    // Also include shorts data for any media in the project
+    const shortsDir = getShortsDir();
+    for (const item of library) {
+        if (item.youtubeVideoId) {
+            const shortsPath = path.join(shortsDir, `${sanitizeName(item.youtubeVideoId)}.json`);
+            if (fs.existsSync(shortsPath)) {
+                fs.copyFileSync(shortsPath, path.join(bundleDir, `shorts_${sanitizeName(item.youtubeVideoId)}.json`));
+            }
+        }
+    }
+
+    const bundlePath = path.resolve(bundleDir);
+    console.log(`[SaveStore] Created export bundle: ${bundlePath}`);
+    return { bundleId, bundlePath, manifest };
+}
+
+/**
+ * Add a user-uploaded media file to an existing bundle.
+ */
+function addMediaToBundle(bundleId, mediaId, filePath, originalName, isAudioOnly) {
+    const bundleDir = path.join(getExportsDir(), bundleId);
+    const mediaDir = path.join(bundleDir, 'media');
+    const manifestPath = path.join(bundleDir, 'manifest.json');
+
+    if (!fs.existsSync(manifestPath)) {
+        throw new Error(`Bundle ${bundleId} not found`);
+    }
+
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const ext = path.extname(originalName) || '.mp4';
+    const filename = `${sanitizeName(mediaId)}${ext}`;
+    const destPath = path.join(mediaDir, filename);
+
+    fs.copyFileSync(filePath, destPath);
+
+    manifest.mediaFiles[mediaId] = {
+        ...(manifest.mediaFiles[mediaId] || {}),
+        filename,
+        originalName,
+        isAudioOnly: isAudioOnly || false,
+    };
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+
+    console.log(`[SaveStore] Bundle ${bundleId}: added media ${mediaId} → ${filename} (${(fs.statSync(destPath).size / 1024 / 1024).toFixed(1)}MB)`);
+    return filename;
+}
+
+/**
+ * Read a bundle folder for import. Returns project JSON + manifest + media file list.
+ */
+function readImportBundle(bundlePath) {
+    const resolvedPath = path.resolve(bundlePath);
+
+    if (!fs.existsSync(resolvedPath)) {
+        throw new Error(`Bundle folder not found: ${resolvedPath}`);
+    }
+
+    // Look for project.json and manifest.json
+    const projectPath = path.join(resolvedPath, 'project.json');
+    const manifestPath = path.join(resolvedPath, 'manifest.json');
+
+    if (!fs.existsSync(projectPath)) {
+        throw new Error(`No project.json found in ${resolvedPath}`);
+    }
+
+    const project = JSON.parse(fs.readFileSync(projectPath, 'utf8'));
+    const manifest = fs.existsSync(manifestPath)
+        ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+        : { mediaFiles: {} };
+
+    // List all media files present
+    const mediaDir = path.join(resolvedPath, 'media');
+    const mediaFiles = [];
+    if (fs.existsSync(mediaDir)) {
+        for (const file of fs.readdirSync(mediaDir)) {
+            if (file.endsWith('_transcript.json')) continue; // skip transcripts
+            const stat = fs.statSync(path.join(mediaDir, file));
+            mediaFiles.push({ filename: file, size: stat.size });
+        }
+    }
+
+    // Import any shorts files into saves/shorts/
+    const files = fs.readdirSync(resolvedPath);
+    let shortsImported = 0;
+    for (const file of files) {
+        if (file.startsWith('shorts_') && file.endsWith('.json')) {
+            const destPath = path.join(getShortsDir(), file.replace('shorts_', ''));
+            fs.copyFileSync(path.join(resolvedPath, file), destPath);
+            shortsImported++;
+        }
+    }
+
+    // Also copy YouTube videos into downloads cache for future use
+    const localStore = require('./localStore.cjs');
+    for (const [mediaId, info] of Object.entries(manifest.mediaFiles)) {
+        if (info.youtubeVideoId && info.filename) {
+            const srcVideo = path.join(mediaDir, info.filename);
+            if (fs.existsSync(srcVideo)) {
+                const destDir = localStore.getVideoDir(info.youtubeVideoId);
+                const destVideo = path.join(destDir, 'video.mp4');
+                if (!fs.existsSync(destVideo)) {
+                    fs.copyFileSync(srcVideo, destVideo);
+                    console.log(`[SaveStore] Import: cached YouTube video ${info.youtubeVideoId}`);
+                }
+            }
+            // Also copy transcript to downloads cache
+            if (info.transcriptFile) {
+                const srcTranscript = path.join(mediaDir, info.transcriptFile);
+                if (fs.existsSync(srcTranscript)) {
+                    const destDir = localStore.getVideoDir(info.youtubeVideoId);
+                    const destTranscript = path.join(destDir, 'transcript.json');
+                    if (!fs.existsSync(destTranscript)) {
+                        fs.copyFileSync(srcTranscript, destTranscript);
+                        console.log(`[SaveStore] Import: cached transcript for ${info.youtubeVideoId}`);
+                    }
+                }
+            }
+        }
+    }
+
+    console.log(`[SaveStore] Read import bundle: ${resolvedPath} (${mediaFiles.length} media files, ${shortsImported} shorts)`);
+    return { project, manifest, mediaFiles, bundlePath: resolvedPath, shortsImported };
+}
+
+/**
+ * Get the absolute path to a media file in a bundle.
+ */
+function getBundleMediaPath(bundlePath, filename) {
+    const filePath = path.join(path.resolve(bundlePath), 'media', filename);
+    if (!fs.existsSync(filePath)) return null;
+    return filePath;
+}
+
 module.exports = {
     getSavesDir,
     getProjectsDir,
@@ -207,4 +416,10 @@ module.exports = {
     loadShortsFile,
     exportAll,
     importAll,
+    // Bundle export/import
+    getExportsDir,
+    createExportBundle,
+    addMediaToBundle,
+    readImportBundle,
+    getBundleMediaPath,
 };

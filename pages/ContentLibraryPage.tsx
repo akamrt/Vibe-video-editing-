@@ -9,7 +9,7 @@ import { fetchAllTrends, getDefaultTrendState } from '../services/trendsService'
 import { TrendsTicker } from '../components/TrendsTicker';
 import { RepostRanker } from '../components/RepostRanker';
 import { TrendPromptBuilder } from '../components/TrendPromptBuilder';
-import { listShortsFiles, saveShortsToFile, loadShortsFromFile, SavedShortsInfo } from '../services/saveApi';
+import { listShortsFiles, saveShortsToFile, loadShortsFromFile, exportAllData, importAllData, createExportBundle, uploadMediaToBundle, readImportBundle, fetchBundleMedia, SavedShortsInfo } from '../services/saveApi';
 
 // ==================== Types ====================
 
@@ -26,9 +26,12 @@ export const ContentLibraryPage: React.FC<{
     onExportShort?: (short: GeneratedShort) => Promise<void>;
     autoCenterOnImport?: boolean;
     onToggleAutoCenter?: (enabled: boolean) => void;
-}> = ({ onNavigateToEditor, onExportShort, autoCenterOnImport = false, onToggleAutoCenter }) => {
+    project?: any;
+    onProjectLoad?: (project: any) => void;
+}> = ({ onNavigateToEditor, onExportShort, autoCenterOnImport = false, onToggleAutoCenter, project, onProjectLoad }) => {
     // State
     const [isExporting, setIsExporting] = useState(false);
+    const [bundleProgress, setBundleProgress] = useState<string | null>(null);
     const [urlInput, setUrlInput] = useState('');
     const [importing, setImporting] = useState<ImportingVideo[]>([]);
     const [videos, setVideos] = useState<VideoRecord[]>([]);
@@ -833,6 +836,100 @@ export const ContentLibraryPage: React.FC<{
                     <div className="flex justify-center">
                         <CookieUploadButton />
                     </div>
+
+                    {/* Bundle Export / Import (with media files) */}
+                    <div className="mt-3 space-y-1.5">
+                        <div className="text-[10px] text-gray-500 uppercase tracking-wider font-medium">Project Bundle</div>
+                        <button
+                            disabled={!project || !!bundleProgress}
+                            onClick={async () => {
+                                if (!project) return;
+                                try {
+                                    const name = project.library?.[0]?.name?.replace(/\.[^.]+$/, '') || 'vibecut-project';
+                                    setBundleProgress('Creating export bundle...');
+
+                                    // Step 1: Create bundle (auto-copies YouTube-cached videos)
+                                    const result = await createExportBundle(name, project);
+
+                                    // Step 2: Upload user-imported files that aren't YouTube-cached
+                                    const library = project.library || [];
+                                    for (let i = 0; i < result.needsUpload.length; i++) {
+                                        const item = result.needsUpload[i];
+                                        const mediaItem = library.find((m: any) => m.id === item.id);
+                                        if (mediaItem?.file) {
+                                            setBundleProgress(`Uploading ${item.name} (${i + 1}/${result.needsUpload.length})...`);
+                                            await uploadMediaToBundle(result.bundleId, item.id, mediaItem.file, item.isAudioOnly || false);
+                                        }
+                                    }
+
+                                    setBundleProgress(null);
+                                    alert(`Export complete!\n\nBundle saved to:\n${result.bundlePath}\n\nShare this folder with others to import.`);
+                                } catch (err: any) {
+                                    console.error('Bundle export failed:', err);
+                                    setBundleProgress(null);
+                                    alert('Export failed: ' + err.message);
+                                }
+                            }}
+                            className="w-full px-2 py-1.5 text-xs rounded bg-green-900/50 text-green-300 hover:text-white hover:bg-green-800/50 font-medium text-center disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            {bundleProgress || 'Export Project Bundle'}
+                        </button>
+                        <button
+                            disabled={!!bundleProgress}
+                            onClick={async () => {
+                                const bundlePath = prompt('Enter the path to the bundle folder:\n(the folder containing project.json and media/)');
+                                if (!bundlePath) return;
+                                try {
+                                    setBundleProgress('Reading bundle...');
+                                    const bundle = await readImportBundle(bundlePath);
+
+                                    // Reconstruct media files from the bundle
+                                    const library = (bundle.project as any).library || [];
+                                    const restoredLibrary = [];
+
+                                    for (let i = 0; i < library.length; i++) {
+                                        const item = library[i];
+                                        const mediaInfo = bundle.manifest.mediaFiles[item.id];
+
+                                        if (mediaInfo?.filename) {
+                                            setBundleProgress(`Loading media ${i + 1}/${library.length}: ${item.name || mediaInfo.originalName}...`);
+                                            try {
+                                                const { file, url } = await fetchBundleMedia(
+                                                    bundle.bundlePath,
+                                                    mediaInfo.filename,
+                                                    mediaInfo.originalName || item.name,
+                                                    mediaInfo.isAudioOnly
+                                                );
+                                                restoredLibrary.push({ ...item, file, url });
+                                            } catch (err) {
+                                                console.warn(`Failed to load media ${item.id}:`, err);
+                                                restoredLibrary.push(item); // Keep metadata even if file fails
+                                            }
+                                        } else {
+                                            restoredLibrary.push(item);
+                                        }
+                                    }
+
+                                    // Load the project with restored media
+                                    const restoredProject = { ...bundle.project, library: restoredLibrary };
+                                    if (onProjectLoad) {
+                                        onProjectLoad(restoredProject);
+                                    }
+
+                                    setBundleProgress(null);
+                                    const mediaCount = restoredLibrary.filter((m: any) => m.file).length;
+                                    alert(`Import complete!\n\n${mediaCount} media files loaded\n${bundle.shortsImported} shorts files imported\n\nSwitch to the Editor to see your project.`);
+                                } catch (err: any) {
+                                    console.error('Bundle import failed:', err);
+                                    setBundleProgress(null);
+                                    alert('Import failed: ' + err.message);
+                                }
+                            }}
+                            className="w-full px-2 py-1.5 text-xs rounded bg-green-900/50 text-green-300 hover:text-white hover:bg-green-800/50 font-medium text-center disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            Import Project Bundle
+                        </button>
+                    </div>
                 </div>
 
                 {/* Categories */}
@@ -1441,6 +1538,69 @@ export const ContentLibraryPage: React.FC<{
                                         ))}
                                     </div>
                                 </div>
+
+                                {/* B-Roll Suggestions */}
+                                {generatedShort.bRollSuggestions && generatedShort.bRollSuggestions.length > 0 && (
+                                    <div className="mb-4">
+                                        <div className="text-xs text-gray-500 mb-2">B-ROLL SUGGESTIONS</div>
+                                        <div className="space-y-3">
+                                            {generatedShort.bRollSuggestions.map((suggestion, sIdx) => (
+                                                <div key={suggestion.id} className={`rounded-lg border p-3 ${suggestion.approved ? 'bg-teal-900/20 border-teal-500/40' : 'bg-[#1a1a1a] border-[#333] opacity-60'}`}>
+                                                    <div className="flex items-center justify-between mb-2">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="text-xs px-2 py-0.5 rounded bg-teal-600/30 text-teal-300">
+                                                                Clip {suggestion.clipIndex + 1} @ {suggestion.offsetInClip.toFixed(1)}s
+                                                            </span>
+                                                            <span className="text-xs text-gray-400">{suggestion.duration}s</span>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => {
+                                                                const updated = { ...generatedShort };
+                                                                updated.bRollSuggestions = [...(updated.bRollSuggestions || [])];
+                                                                updated.bRollSuggestions[sIdx] = { ...updated.bRollSuggestions[sIdx], approved: !suggestion.approved };
+                                                                setGeneratedShort(updated);
+                                                            }}
+                                                            className={`text-xs px-2 py-1 rounded font-medium ${suggestion.approved ? 'bg-green-600/30 text-green-300 hover:bg-red-600/30 hover:text-red-300' : 'bg-red-600/30 text-red-300 hover:bg-green-600/30 hover:text-green-300'}`}
+                                                        >
+                                                            {suggestion.approved ? 'Approved' : 'Rejected'}
+                                                        </button>
+                                                    </div>
+                                                    <div className="text-xs text-gray-400 mb-2">
+                                                        <span className="text-teal-400 font-medium">{suggestion.searchQuery}</span>
+                                                        {suggestion.rationale && <span className="ml-2 text-gray-500">— {suggestion.rationale}</span>}
+                                                    </div>
+                                                    {/* Thumbnail strip */}
+                                                    {suggestion.pexelsResults && suggestion.pexelsResults.length > 0 && (
+                                                        <div className="flex gap-2 overflow-x-auto pb-1">
+                                                            {suggestion.pexelsResults.map((video, vIdx) => (
+                                                                <button
+                                                                    key={video.id}
+                                                                    onClick={() => {
+                                                                        const updated = { ...generatedShort };
+                                                                        updated.bRollSuggestions = [...(updated.bRollSuggestions || [])];
+                                                                        updated.bRollSuggestions[sIdx] = { ...updated.bRollSuggestions[sIdx], selectedVideoIndex: vIdx };
+                                                                        setGeneratedShort(updated);
+                                                                    }}
+                                                                    className={`flex-shrink-0 rounded overflow-hidden border-2 transition-colors ${(suggestion.selectedVideoIndex ?? 0) === vIdx ? 'border-teal-400' : 'border-transparent hover:border-gray-500'}`}
+                                                                >
+                                                                    <img
+                                                                        src={video.thumbnailUrl}
+                                                                        alt={suggestion.searchQuery}
+                                                                        className="w-20 h-14 object-cover"
+                                                                    />
+                                                                    <div className="text-[9px] text-gray-500 text-center py-0.5">{video.duration}s</div>
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                    {suggestion.pexelsResults && suggestion.pexelsResults.length === 0 && (
+                                                        <div className="text-xs text-gray-600 italic">No footage found</div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
 
                                 {generatedShort.segments.some(s => s.keywords && s.keywords.length > 0) && (
                                     <div className="mb-4">
