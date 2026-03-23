@@ -35,6 +35,8 @@ interface TimelineProps {
   onRelinkAudio?: (segId: string) => void;
   onDeleteTrack?: (trackId: number) => void;
   onSwapTracks?: (trackA: number, trackB: number) => void;
+  selectedInsertTrack?: number | null;
+  onSelectInsertTrack?: (trackId: number) => void;
 }
 
 /** Small canvas component that renders an audio waveform for a segment */
@@ -129,7 +131,9 @@ const Timeline: React.FC<TimelineProps> = ({
   onUnlinkAudio,
   onRelinkAudio,
   onDeleteTrack,
-  onSwapTracks
+  onSwapTracks,
+  selectedInsertTrack,
+  onSelectInsertTrack,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0); // Track scroll for virtualization
@@ -906,12 +910,33 @@ const Timeline: React.FC<TimelineProps> = ({
               {/* VIDEO TRACK — only render if track has video segments (or is track 0) */}
               {showVideoTrack && (
               <div className="h-32 relative w-full flex bg-[#151515] border-b border-[#222]">
-                {/* Sidebar Label (Sticky Left) */}
+                {/* Sidebar Label (Sticky Left) — click to select as insert target */}
                 <div
-                  className={`sticky left-0 w-12 min-w-[3rem] h-full bg-[#202020] border-r border-[#333] flex items-center justify-center text-[9px] font-bold text-blue-400 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)] select-none ${trackDragState ? 'cursor-grabbing' : 'cursor-grab'}`}
+                  className={`sticky left-0 w-12 min-w-[3rem] h-full border-r flex flex-col items-center justify-center gap-0.5 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)] select-none transition-colors
+                    ${selectedInsertTrack === trackId
+                      ? 'bg-blue-600/30 border-blue-400 ring-1 ring-inset ring-blue-400'
+                      : 'bg-[#202020] border-[#333]'}
+                    ${trackDragState ? 'cursor-grabbing' : 'cursor-pointer'}`}
+                  title={selectedInsertTrack === trackId ? `Click to deselect V${trackId + 1} — clips will auto-place` : `Click to insert clips into V${trackId + 1} at cursor`}
                   onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); setTrackContextMenu({ x: e.clientX, y: e.clientY, trackId }); }}
-                  onMouseDown={(e) => { if (e.button !== 0) return; e.stopPropagation(); setTrackDragState({ sourceTrackId: trackId, initialY: e.clientY }); }}
-                >V{trackId + 1}</div>
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.stopPropagation();
+                    // Short press = select track; longer drag = reorder
+                    setTrackDragState({ sourceTrackId: trackId, initialY: e.clientY });
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectInsertTrack?.(trackId);
+                  }}
+                >
+                  <span className={`text-[9px] font-bold ${selectedInsertTrack === trackId ? 'text-blue-300' : 'text-blue-400'}`}>
+                    V{trackId + 1}
+                  </span>
+                  {selectedInsertTrack === trackId && (
+                    <span className="text-[7px] text-blue-300 leading-none">TARGET</span>
+                  )}
+                </div>
 
                 {/* Track Content */}
                 <div className="relative flex-1 h-full">

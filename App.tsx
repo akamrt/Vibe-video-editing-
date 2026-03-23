@@ -242,6 +242,9 @@ function App() {
   const [trackingPan, setTrackingPan] = useState({ x: 0, y: 0 });
   const [editPrompt, setEditPrompt] = useState('');
 
+  // Selected track for targeted clip insertion (null = auto-place on new track)
+  const [selectedInsertTrack, setSelectedInsertTrack] = useState<number | null>(null);
+
   // Left Panel State (Media Bin vs Properties)
   const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'stock' | 'properties'>('media');
 
@@ -2299,16 +2302,19 @@ function App() {
     const duration = item.duration;
     const isAudio = !!item.isAudioOnly;
 
-    // For audio-only clips: always place on a brand-new layer above all existing audio tracks.
-    // For video clips: always place on a new track above all existing video tracks so existing
-    // layers keep their numbers (V1 stays V1, new clip becomes V2, etc.).
     let targetTrack = 0;
-    if (isAudio) {
+
+    if (selectedInsertTrack !== null && !isAudio) {
+      // User has locked a specific video track — insert there at the cursor
+      targetTrack = selectedInsertTrack;
+    } else if (isAudio) {
+      // Audio clips always go on a new audio track
       const existingAudioTracks = project.segments
         .filter(s => s.type === 'audio')
         .map(s => s.track);
       targetTrack = existingAudioTracks.length > 0 ? Math.max(...existingAudioTracks) + 1 : 1;
     } else {
+      // Default: place on a new track above all existing video tracks
       const existingVideoTracks = project.segments
         .filter(s => s.type !== 'audio')
         .map(s => s.track);
@@ -5615,6 +5621,17 @@ function App() {
           <button onClick={() => setActiveLeftTab('properties')} className={`flex-1 py-2 text-xs font-bold ${activeLeftTab === 'properties' ? 'bg-[#333] text-orange-400 border-b-2 border-orange-400' : 'text-gray-400 hover:text-white'}`}>PROPERTIES</button>
         </div>
         {/* Content */}
+        {/* Insert-track banner — shown when a track is targeted */}
+        {selectedInsertTrack !== null && (
+          <div className="flex items-center justify-between px-2 py-1 bg-blue-600/20 border-b border-blue-500/40 text-[10px] text-blue-300 font-medium">
+            <span>Adding to <strong>V{selectedInsertTrack + 1}</strong> at cursor</span>
+            <button
+              onClick={() => setSelectedInsertTrack(null)}
+              className="text-blue-400 hover:text-white ml-2 font-bold"
+              title="Clear track lock"
+            >✕</button>
+          </div>
+        )}
         <div className="flex-1 overflow-hidden">
           {activeLeftTab === 'media' && (
             <MediaBin
@@ -7305,6 +7322,8 @@ function App() {
                 onRelinkAudio={handleRelinkAudio}
                 onDeleteTrack={handleDeleteTrack}
                 onSwapTracks={handleSwapTracks}
+                selectedInsertTrack={selectedInsertTrack}
+                onSelectInsertTrack={(id) => setSelectedInsertTrack(prev => prev === id ? null : id)}
               />
             )}
             {activeBottomTab === 'graph' && (
