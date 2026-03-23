@@ -6,6 +6,7 @@ import PropertiesPanel from './components/PropertiesPanel';
 import MediaBin from './components/MediaBin';
 import ViewportOverlay from './components/ViewportOverlay';
 import ExportModal from './components/ExportModal';
+import SettingsPanel from './components/SettingsPanel';
 import GraphEditor from './components/GraphEditor';
 import { ProjectState, Segment, ChatMessage, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord } from './types';
 import RemotionPreview from './components/remotion/RemotionPreview';
@@ -314,6 +315,7 @@ function App() {
     overlayOpacity: 0.6
   });
   const [showExportModal, setShowExportModal] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showGraphEditor, setShowGraphEditor] = useState(false);
   const [activeBottomTab, setActiveBottomTab] = useState<'timeline' | 'graph'>('timeline');
   const [viewportMode, setViewportMode] = useState<'standard' | 'remotion'>('standard');
@@ -6687,6 +6689,13 @@ function App() {
                   📈 Graph
                 </button>
                 <button
+                  onClick={() => setShowSettings(true)}
+                  className="px-2 py-1 text-xs rounded bg-[#333] text-gray-400 hover:text-white"
+                  title="API Key Settings"
+                >
+                  ⚙️ Settings
+                </button>
+                <button
                   onClick={() => setShowExportModal(true)}
                   className="px-3 py-1 text-xs rounded bg-green-600 hover:bg-green-500 text-white font-medium"
                 >
@@ -7079,6 +7088,9 @@ function App() {
           </div>
         </div>
       </div>
+
+      {/* Settings Modal */}
+      <SettingsPanel isOpen={showSettings} onClose={() => setShowSettings(false)} />
 
       {/* Export Modal */}
       <ExportModal

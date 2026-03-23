@@ -16,6 +16,8 @@ const API_KEY_LABELS: Record<string, string> = {
   OPENAI_API_KEY: 'OpenAI',
   MINIMAX_API_KEY: 'MiniMax',
   ASSEMBLYAI_API_KEY: 'AssemblyAI',
+  PEXELS_API_KEY: 'Pexels (Stock Video)',
+  YOUTUBE_API_KEY: 'YouTube Data API',
 };
 
 const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose }) => {
@@ -71,7 +73,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
         className="bg-[#1e1e1e] rounded-xl shadow-2xl border border-[#333] w-full max-w-lg mx-4"
         onClick={(e) => e.stopPropagation()}
