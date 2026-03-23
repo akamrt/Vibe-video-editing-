@@ -784,7 +784,7 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                       {activeKeywordAnimation ? (
                         <div className="p-3 bg-[#111] border border-amber-900/40 rounded-md">
                           <div className="text-[10px] text-amber-400 mb-2 font-medium">{activeKeywordAnimation.name || 'Custom'}</div>
-                          <AnimationControls animation={activeKeywordAnimation} onUpdate={(updated) => onUpdateKeywordAnimation(updated)} />
+                          <AnimationControls animation={activeKeywordAnimation} onChange={(updated) => onUpdateKeywordAnimation(updated)} />
                         </div>
                       ) : (
                         <div className="text-[10px] text-gray-500 italic bg-[#151515] p-2 rounded text-center border border-[#222]">No keyword animation chosen. Use the Templates tab to set one.</div>
