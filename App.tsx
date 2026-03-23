@@ -26,6 +26,7 @@ import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo,
 import { fullScanAndCenter } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
+import StockBrowser from './components/StockBrowser';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
 import { getAudioBuffer, getAudioBufferLowRes, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache, findSilenceGaps } from './utils/audioAnalysis';
 import { crossfadeVolumes } from './utils/audioCrossfade';
@@ -233,7 +234,7 @@ function App() {
   const [editPrompt, setEditPrompt] = useState('');
 
   // Left Panel State (Media Bin vs Properties)
-  const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'properties'>('media');
+  const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'stock' | 'properties'>('media');
 
   // Right Panel State
   const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions'>('transitions');
@@ -2269,6 +2270,38 @@ function App() {
           : s
       )
     }));
+  };
+
+  const handleAddStockToLibrary = async (downloadUrl: string, name: string, duration: number, isPhoto: boolean) => {
+    try {
+      const proxyUrl = `/api/pexels/download?url=${encodeURIComponent(downloadUrl)}`;
+      const response = await fetch(proxyUrl);
+      if (!response.ok) throw new Error('Download failed');
+      const blob = await response.blob();
+      const file = new File([blob], name + (isPhoto ? '.jpg' : '.mp4'), {
+        type: isPhoto ? 'image/jpeg' : 'video/mp4'
+      });
+      const url = URL.createObjectURL(blob);
+
+      const newItem: MediaItem = {
+        id: Math.random().toString(36).substr(2, 9),
+        file,
+        url,
+        duration,
+        name,
+        analysis: null,
+      };
+
+      setProject(prev => ({
+        ...prev,
+        library: [...prev.library, newItem]
+      }));
+
+      handleAddToTimeline(newItem);
+    } catch (err) {
+      console.error('Stock download error:', err);
+      alert('Failed to download stock clip. Try again.');
+    }
   };
 
   const handleInsertBlank = (insertionTime: number) => {
@@ -5369,6 +5402,7 @@ function App() {
         {/* Tab bar */}
         <div className="flex border-b border-[#333] bg-[#252525]">
           <button onClick={() => setActiveLeftTab('media')} className={`flex-1 py-2 text-xs font-bold ${activeLeftTab === 'media' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-white'}`}>MEDIA</button>
+          <button onClick={() => setActiveLeftTab('stock')} className={`flex-1 py-2 text-xs font-bold ${activeLeftTab === 'stock' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400 hover:text-white'}`}>STOCK</button>
           <button onClick={() => setActiveLeftTab('properties')} className={`flex-1 py-2 text-xs font-bold ${activeLeftTab === 'properties' ? 'bg-[#333] text-orange-400 border-b-2 border-orange-400' : 'text-gray-400 hover:text-white'}`}>PROPERTIES</button>
         </div>
         {/* Content */}
@@ -5382,6 +5416,15 @@ function App() {
               onYoutubeClick={() => setShowYoutubeModal(true)}
               swapActive={selectedSegmentIds.length === 1}
               onSwapMedia={handleSwapMedia}
+            />
+          )}
+          {activeLeftTab === 'stock' && (
+            <StockBrowser
+              transcript={currentTopMedia?.analysis?.events
+                ?.filter(e => e.type === 'dialogue')
+                .map(e => e.details)
+                .join(' ') || ''}
+              onAddToLibrary={handleAddStockToLibrary}
             />
           )}
           {activeLeftTab === 'properties' && (

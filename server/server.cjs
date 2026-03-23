@@ -1991,6 +1991,41 @@ Example: { "analyses": [{ "shortId": "abc", "trendScore": 85, "matchedTrends": [
     }
 });
 
+// ==================== AI Stock Query Suggestions ====================
+
+app.post('/api/ai/suggest-stock-queries', async (req, res) => {
+    const { transcript } = req.body;
+    if (!transcript) return res.status(400).json({ error: 'Missing transcript' });
+
+    const truncated = transcript.substring(0, 2000);
+
+    const prompt = `Given this video transcript, suggest 6-8 concise stock footage search queries that would work well as B-roll or supplementary visuals. Return ONLY a valid JSON array of strings, nothing else.
+Focus on concrete visual concepts, not abstract ideas. Mix wide shots with close-ups.
+Example: ["sunset ocean waves", "person walking city street", "close up hands typing", "aerial view mountains", "coffee shop interior", "smartphone screen scrolling"]
+
+Transcript: ${truncated}`;
+
+    try {
+        const result = await callGemini(prompt, 'gemini-2.0-flash');
+        if (!result) {
+            return res.status(500).json({ error: 'AI returned no result' });
+        }
+
+        // Extract JSON array from response
+        const text = typeof result === 'string' ? result :
+            result.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(result);
+        const match = text.match(/\[[\s\S]*?\]/);
+        if (match) {
+            const queries = JSON.parse(match[0]);
+            return res.json({ queries });
+        }
+        res.status(500).json({ error: 'Could not parse AI response' });
+    } catch (error) {
+        console.error('Suggest stock queries error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // ==================== Pexels B-Roll ====================
 
 app.get('/api/pexels/search', async (req, res) => {
