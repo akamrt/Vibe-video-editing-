@@ -7,7 +7,7 @@ import MediaBin from './components/MediaBin';
 import ViewportOverlay from './components/ViewportOverlay';
 import ExportModal from './components/ExportModal';
 import GraphEditor from './components/GraphEditor';
-import { ProjectState, Segment, ChatMessage, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord } from './types';
+import { ProjectState, Segment, ChatMessage, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord, PivotKeyframe } from './types';
 import RemotionPreview from './components/remotion/RemotionPreview';
 import TemplateManager from './components/remotion/TemplateManager';
 import TransitionPanel from './components/TransitionPanel';
@@ -19,13 +19,14 @@ import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
 import { YoutubeImportModal } from './components/YoutubeImportModal';
 import ContentLibraryPage from './pages/ContentLibraryPage';
 import { GeneratedShort, contentDB } from './services/contentDatabase';
-import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion } from './utils/interpolation';
+import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion, getInterpolatedPivot } from './utils/interpolation';
 import { resolveGradientStops, buildGradientCSS } from './utils/gradientUtils';
 import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
 import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes, detectPersonInFrame } from './services/templateTrackingService';
-import { fullScanAndCenter } from './services/trackingBridge';
+import { fullScanAndCenter, trackHeadForPivot } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
+import { TransformGizmo } from './components/TransformGizmo';
 import StockBrowser from './components/StockBrowser';
 import ResizeHandle from './components/ResizeHandle';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
@@ -165,6 +166,11 @@ function App() {
   const projectRef = useRef(project);
   useEffect(() => { projectRef.current = project; }, [project]);
   const safeZoneRef = useRef<HTMLDivElement>(null);
+  // Gizmo element refs — assigned to the subtitle/title container divs for bounding rect measurement
+  const subtitleGizmoRef = useRef<HTMLDivElement | null>(null);
+  const titleGizmoRef = useRef<HTMLDivElement | null>(null);
+  const [showGizmos, setShowGizmos] = useState(true);
+  const [pivotTrackingProgress, setPivotTrackingProgress] = useState<{ progress: number; label: string } | null>(null);
 
   // Server health polling — shows banner when backend is unreachable
   useEffect(() => {
@@ -211,6 +217,7 @@ function App() {
   const [status, setStatus] = useState<ProcessingStatus>(ProcessingStatus.IDLE);
   const [transcriptionJobs, setTranscriptionJobs] = useState<Map<string, { status: string; progress?: string; mediaId: string }>>(new Map());
   const [isExporting, setIsExporting] = useState(false);
+  const isExportingRef = useRef(false); // Ref version readable inside playback engine closure
   const [centeringProgress, setCenteringProgress] = useState('');
   const [outOfZoneThreshold, setOutOfZoneThreshold] = useState(0); // % distance from center before centering (0=always follow)
   const [scanSmooth, setScanSmooth] = useState(false);             // Apply Gaussian smoothing after scan
@@ -575,9 +582,10 @@ function App() {
       let nextTime = p.currentTime + dt;
 
       // Master Clock Logic:
-      // If there is an active video playing, use its time as the source of truth (Video Master)
-      // This prevents drift and stuttering by ensuring the UI matches the video exact frame.
-      const activeSeg = p.segments.find(s =>
+      // During export use a wall-clock timer (dt-based) so the canvas render loop
+      // advances at a perfectly steady rate with no video-induced jumps.
+      // During normal preview, slave to the active video for drift-free playback.
+      const activeSeg = isExportingRef.current ? null : p.segments.find(s =>
         p.currentTime >= s.timelineStart &&
         p.currentTime < (s.timelineStart + (s.endTime - s.startTime))
       );
@@ -653,7 +661,9 @@ function App() {
 
         if (project.isPlaying) {
           if (videoEl.paused) videoEl.play().catch(() => { });
-          if (Math.abs(videoEl.currentTime - sourceTime) > 0.5) {
+          // Tighter tolerance during export to minimise visible drift at cut boundaries
+          const resyncThreshold = isExporting ? 0.1 : 0.5;
+          if (Math.abs(videoEl.currentTime - sourceTime) > resyncThreshold) {
             videoEl.currentTime = sourceTime;
           }
         } else {
@@ -1431,6 +1441,7 @@ function App() {
     const measuredSafeZoneHeight = safeZoneRef.current?.getBoundingClientRect().height || 0;
 
     // 0. Render ALL segments so their video elements exist for audio connection
+    isExportingRef.current = true;
     setIsExporting(true);
     await new Promise(r => setTimeout(r, 300)); // Wait for React to render all video elements
 
@@ -1527,16 +1538,55 @@ function App() {
       URL.revokeObjectURL(url);
 
       // Cleanup: revert to start
+      isExportingRef.current = false;
       setIsExporting(false);
       setProject(p => ({ ...p, isPlaying: false, currentTime: 0 }));
     };
 
-    // 4. Playback & Render Loop
+    // 4. Pre-seek all videos active at t=0 and wait for readyState >= 2 before
+    //    starting the recorder. Prevents black/blank frames at the very start.
     setProject(p => ({ ...p, isPlaying: false, currentTime: 0 }));
+    await new Promise(r => setTimeout(r, 150)); // let React re-render + sync effect fire
 
-    // Tiny delay to allow state to settle / video to seek to 0
-    await new Promise(r => setTimeout(r, 200));
+    const segsAtStart = project.segments.filter(s =>
+      0 >= s.timelineStart && 0 < s.timelineStart + (s.endTime - s.startTime)
+    );
 
+    await Promise.all(segsAtStart.map(seg => new Promise<void>(resolve => {
+      const vid = videoRefs.current.get(seg.id);
+      if (!vid) { resolve(); return; }
+      vid.pause();
+      vid.currentTime = seg.startTime;
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      const checkReady = () => { if (vid.readyState >= 2) finish(); else setTimeout(checkReady, 20); };
+      vid.addEventListener('seeked', checkReady, { once: true });
+      setTimeout(finish, 3000);
+    })));
+
+    // Pre-draw the first frame to canvas and prime lastGoodFrame so
+    // the recorder never starts with a black canvas.
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, outputWidth, outputHeight);
+    segsAtStart.forEach(seg => {
+      const vid = videoRefs.current.get(seg.id);
+      if (!vid || vid.readyState < 2 || !vid.videoWidth) return;
+      const transform = getCombinedTransform(seg.keyframes, 0, 0);
+      const coverScale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
+      const dw = vid.videoWidth * coverScale;
+      const dh = vid.videoHeight * coverScale;
+      ctx.save();
+      ctx.translate(outputWidth / 2, outputHeight / 2);
+      ctx.translate(transform.translateX * dw / 100, transform.translateY * dh / 100);
+      ctx.scale(transform.scale, transform.scale);
+      ctx.rotate(transform.rotation * Math.PI / 180);
+      ctx.drawImage(vid, -dw / 2, -dh / 2, dw, dh);
+      ctx.restore();
+    });
+    lastGoodCtx.clearRect(0, 0, outputWidth, outputHeight);
+    lastGoodCtx.drawImage(canvas, 0, 0); // Prime with real first frame
+
+    // 5. Start recorder and playback
     mediaRecorder.start();
     setProject(p => ({ ...p, isPlaying: true }));
 
@@ -2647,6 +2697,103 @@ function App() {
 
   const handleStopTracking = () => {
     trackingAbortRef.current?.abort();
+  };
+
+  // ── Head Pivot Tracking ──
+  const handleTrackHeadPivot = async (segmentId: string, applyToAll: boolean) => {
+    const targetSegments = applyToAll
+      ? project.segments.filter(s => selectedSegmentIds.includes(s.id))
+      : project.segments.filter(s => s.id === segmentId);
+
+    if (targetSegments.length === 0) return;
+
+    // Determine crop aspect ratio from current viewport/export settings
+    const arPreset = ASPECT_RATIO_PRESETS[viewportSettings.previewAspectRatio];
+    const cropAR = arPreset ? arPreset.ratio : 9 / 16;
+
+    for (const seg of targetSegments) {
+      const media = project.library.find(m => m.id === seg.mediaId);
+      const videoEl = videoRefs.current.get(seg.id);
+      if (!videoEl) {
+        console.warn('[App] handleTrackHeadPivot: no video element for segment', seg.id);
+        continue;
+      }
+
+      setPivotTrackingProgress({ progress: 0, label: 'Starting head tracker...' });
+
+      const pivotKfs = await trackHeadForPivot(
+        media?.file ?? null,
+        videoEl,
+        { startTime: seg.startTime, endTime: seg.endTime, id: seg.id },
+        cropAR,
+        (progress, label) => setPivotTrackingProgress({ progress, label }),
+      );
+
+      setPivotTrackingProgress(null);
+
+      if (!pivotKfs || pivotKfs.length === 0) {
+        console.warn('[App] handleTrackHeadPivot: no keyframes for segment', seg.id);
+        continue;
+      }
+
+      console.log(`[App] handleTrackHeadPivot: applying ${pivotKfs.length} pivot kfs to segment ${seg.id}`);
+
+      // Apply to subtitle events in this media that overlap the segment
+      const mediaItem = project.library.find(m => m.id === seg.mediaId);
+      if (mediaItem?.analysis?.events) {
+        const updatedEvents: AnalysisEvent[] = mediaItem.analysis.events.map(evt => {
+          if (evt.type !== 'dialogue') return evt;
+          if (evt.endTime <= seg.startTime || evt.startTime >= seg.endTime) return evt;
+
+          // Re-key pivot keyframes relative to this subtitle event
+          const evtPivotKfs: PivotKeyframe[] = pivotKfs
+            .filter(kf => {
+              const absTime = seg.startTime + kf.time;
+              return absTime >= evt.startTime - 0.05 && absTime <= evt.endTime + 0.05;
+            })
+            .map(kf => ({
+              time: Math.round(Math.max(0, seg.startTime + kf.time - evt.startTime) * 1000) / 1000,
+              x: kf.x,
+              y: kf.y,
+            }));
+
+          if (evtPivotKfs.length === 0) return evt;
+          return { ...evt, pivotKeyframes: evtPivotKfs };
+        });
+
+        setProject(p => ({
+          ...p,
+          library: p.library.map(m =>
+            m.id === seg.mediaId
+              ? { ...m, analysis: m.analysis ? { ...m.analysis, events: updatedEvents } : m.analysis }
+              : m
+          ),
+        }));
+      }
+
+      // Apply to title layer if it overlaps the segment
+      if (project.titleLayer) {
+        const tl = project.titleLayer;
+        if (tl.startTime < seg.endTime && tl.endTime > seg.startTime) {
+          const titlePivotKfs: PivotKeyframe[] = pivotKfs
+            .filter(kf => {
+              const absTime = seg.startTime + kf.time;
+              return absTime >= tl.startTime && absTime <= tl.endTime;
+            })
+            .map(kf => ({
+              time: Math.round(Math.max(0, seg.startTime + kf.time - tl.startTime) * 1000) / 1000,
+              x: kf.x,
+              y: kf.y,
+            }));
+          if (titlePivotKfs.length > 0) {
+            setProject(p => ({
+              ...p,
+              titleLayer: p.titleLayer ? { ...p.titleLayer, pivotKeyframes: titlePivotKfs } : null,
+            }));
+          }
+        }
+      }
+    }
   };
 
   // Strip unchecked channels from keyframes: set to defaults, then remove pure-default keyframes
@@ -6344,9 +6491,27 @@ function App() {
 
                         const fullSubTransform = [subTransform, subKfTransform].filter(Boolean).join(' ') || undefined;
 
+                        // Compute pivot-aware transform-origin for rotation/scale
+                        let subPivotOrigin: string | undefined;
+                        if (activeSubtitleEvent.pivotKeyframes && activeSubtitleEvent.pivotKeyframes.length > 0) {
+                          const visualSegsPivot = activeSegments.filter(s => s.type !== 'audio');
+                          const topSegPivot = visualSegsPivot.length > 0 ? visualSegsPivot[visualSegsPivot.length - 1] : activeSegments[activeSegments.length - 1];
+                          const sourceTimePivot = topSegPivot ? topSegPivot.startTime + (project.currentTime - topSegPivot.timelineStart) : 0;
+                          const subTimePivot = sourceTimePivot - activeSubtitleEvent.startTime;
+                          const pivot = getInterpolatedPivot(activeSubtitleEvent.pivotKeyframes, subTimePivot);
+                          if (pivot && safeZoneRef.current && subtitleGizmoRef.current) {
+                            const safeRect = safeZoneRef.current.getBoundingClientRect();
+                            const elemRect = subtitleGizmoRef.current.getBoundingClientRect();
+                            const pivPxX = (pivot.x / 100) * safeRect.width;
+                            const pivPxY = (pivot.y / 100) * safeRect.height;
+                            subPivotOrigin = `${pivPxX - (elemRect.left - safeRect.left)}px ${pivPxY - (elemRect.top - safeRect.top)}px`;
+                          }
+                        }
+
                         const containerStyle = {
                           ...styles.container,
                           transform: fullSubTransform,
+                          transformOrigin: subPivotOrigin ?? 'center',
                           pointerEvents: 'auto' as const,
                           cursor: subtitleDragState ? 'grabbing' : 'grab',
                         };
@@ -6362,7 +6527,7 @@ function App() {
                           const { fontSize: _tfs, ...tplStyleNoSize } = subTemplate?.style || {};
                           const mergedStyle = subTemplate ? { ...tplStyleNoSize, ...styles.text } : styles.text;
                           return (
-                            <div style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
+                            <div ref={subtitleGizmoRef} style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
                               <div style={{ display: 'grid' }}>
                                 {styles.blendLayers.map((layerStyle, i) => (
                                   <AnimatedText
@@ -6404,7 +6569,7 @@ function App() {
                         if (displayStyle.wordHighlightEnabled) {
                           const noOpAnim = { scope: 'word' as const, effects: [], duration: 0, stagger: 0 };
                           return (
-                            <div style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
+                            <div ref={subtitleGizmoRef} style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
                               <AnimatedText
                                 text={activeSubtitleEvent.details}
                                 animation={noOpAnim}
@@ -6504,10 +6669,23 @@ function App() {
                           });
                         };
 
+                        // Compute pivot-aware transform-origin for title
+                        let titlePivotOrigin = 'center center';
+                        if (project.titleLayer.pivotKeyframes && project.titleLayer.pivotKeyframes.length > 0) {
+                          const titlePivot = getInterpolatedPivot(project.titleLayer.pivotKeyframes, t);
+                          if (titlePivot && safeZoneRef.current && titleGizmoRef.current) {
+                            const safeRect = safeZoneRef.current.getBoundingClientRect();
+                            const titleRect = titleGizmoRef.current.getBoundingClientRect();
+                            const pivPxX = (titlePivot.x / 100) * safeRect.width;
+                            const pivPxY = (titlePivot.y / 100) * safeRect.height;
+                            titlePivotOrigin = `${pivPxX - (titleRect.left - safeRect.left)}px ${pivPxY - (titleRect.top - safeRect.top)}px`;
+                          }
+                        }
+
                         const titleContainerStyle = {
                           ...computedStyles.container,
                           transform: cssTransform,
-                          transformOrigin: 'center center',
+                          transformOrigin: titlePivotOrigin,
                           pointerEvents: 'auto' as const,
                           cursor: titleDragState ? 'grabbing' : 'grab',
                         };
@@ -6517,7 +6695,7 @@ function App() {
                         if (titleAnim && titleAnim.effects.length > 0) {
                           const localFrame = Math.round(t * REMOTION_FPS);
                           return (
-                            <div style={titleContainerStyle} onMouseDown={handleTitleMouseDown}>
+                            <div ref={titleGizmoRef} style={titleContainerStyle} onMouseDown={handleTitleMouseDown}>
                               <div style={{ display: 'grid' }}>
                                 {computedStyles.blendLayers?.map((layerStyle, i) => (
                                   <AnimatedText
@@ -6563,6 +6741,139 @@ function App() {
                               </div>
                             </div>
                           </div>
+                        );
+                      })()}
+
+                      {/* ── Transform Gizmo: Subtitle ── */}
+                      {showGizmos && activeSubtitleEvent && subtitleGizmoRef.current && (() => {
+                        const visualSegsG = activeSegments.filter(s => s.type !== 'audio');
+                        const topSegG = visualSegsG.length > 0 ? visualSegsG[visualSegsG.length - 1] : activeSegments[activeSegments.length - 1];
+                        const sourceTimeG = topSegG ? topSegG.startTime + (project.currentTime - topSegG.timelineStart) : 0;
+                        const subTimeG = sourceTimeG - activeSubtitleEvent.startTime;
+                        const kfG = activeSubtitleEvent.keyframes?.length
+                          ? getInterpolatedTransform(activeSubtitleEvent.keyframes, subTimeG)
+                          : null;
+                        const pivotG = activeSubtitleEvent.pivotKeyframes?.length
+                          ? getInterpolatedPivot(activeSubtitleEvent.pivotKeyframes, subTimeG)
+                          : null;
+                        const subEvtIdxG = currentTopMedia?.analysis?.events.indexOf(activeSubtitleEvent) ?? -1;
+
+                        return (
+                          <TransformGizmo
+                            safeZoneRef={safeZoneRef as React.RefObject<HTMLDivElement>}
+                            elementRef={subtitleGizmoRef as React.RefObject<HTMLDivElement>}
+                            translateX={activeSubtitleEvent.translateX || 0}
+                            translateY={activeSubtitleEvent.translateY || 0}
+                            scale={kfG?.scale ?? 1}
+                            rotation={kfG?.rotation ?? 0}
+                            pivotX={pivotG?.x ?? null}
+                            pivotY={pivotG?.y ?? null}
+                            onTranslateChange={(tx, ty, commit) => {
+                              if (!commit || !currentTopMedia || subEvtIdxG < 0) return;
+                              updateSelectedEvent(evt => ({ ...evt, translateX: tx, translateY: ty }));
+                            }}
+                            onRotationChange={(rot, commit) => {
+                              if (!commit || !currentTopMedia || subEvtIdxG < 0) return;
+                              const t2 = subTimeG;
+                              const baseKf = kfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
+                              const existing = activeSubtitleEvent.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
+                              if (existing) {
+                                updateSelectedEvent(evt => ({ ...evt, keyframes: evt.keyframes?.map(k => k === existing ? { ...k, rotation: rot } : k) }));
+                              } else {
+                                updateSelectedEvent(evt => ({ ...evt, keyframes: [...(evt.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: baseKf.scale, rotation: rot }] }));
+                              }
+                            }}
+                            onScaleChange={(s, commit) => {
+                              if (!commit || !currentTopMedia || subEvtIdxG < 0) return;
+                              const t2 = subTimeG;
+                              const baseKf = kfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
+                              const existing = activeSubtitleEvent.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
+                              if (existing) {
+                                updateSelectedEvent(evt => ({ ...evt, keyframes: evt.keyframes?.map(k => k === existing ? { ...k, scale: s } : k) }));
+                              } else {
+                                updateSelectedEvent(evt => ({ ...evt, keyframes: [...(evt.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: s, rotation: baseKf.rotation }] }));
+                              }
+                            }}
+                            onPivotChange={(px, py) => {
+                              if (!currentTopMedia || subEvtIdxG < 0) return;
+                              const newPivotKf: PivotKeyframe = { time: subTimeG, x: px, y: py };
+                              updateSelectedEvent(evt => ({
+                                ...evt,
+                                pivotKeyframes: [
+                                  ...(evt.pivotKeyframes?.filter(k => Math.abs(k.time - subTimeG) > 0.05) || []),
+                                  newPivotKf,
+                                ].sort((a, b) => a.time - b.time),
+                              }));
+                            }}
+                            visible={true}
+                          />
+                        );
+                      })()}
+
+                      {/* ── Transform Gizmo: Title ── */}
+                      {showGizmos && project.titleLayer && project.currentTime >= project.titleLayer.startTime && project.currentTime <= project.titleLayer.endTime && titleGizmoRef.current && (() => {
+                        const titleT = project.currentTime - project.titleLayer.startTime;
+                        const titleKfG = project.titleLayer.keyframes?.length
+                          ? getCombinedTransform(project.titleLayer.keyframes, titleT, project.currentTime)
+                          : null;
+                        const titlePivotG = project.titleLayer.pivotKeyframes?.length
+                          ? getInterpolatedPivot(project.titleLayer.pivotKeyframes, titleT)
+                          : null;
+
+                        return (
+                          <TransformGizmo
+                            safeZoneRef={safeZoneRef as React.RefObject<HTMLDivElement>}
+                            elementRef={titleGizmoRef as React.RefObject<HTMLDivElement>}
+                            translateX={titleKfG?.translateX ?? 0}
+                            translateY={titleKfG?.translateY ?? 0}
+                            scale={titleKfG?.scale ?? 1}
+                            rotation={titleKfG?.rotation ?? 0}
+                            pivotX={titlePivotG?.x ?? null}
+                            pivotY={titlePivotG?.y ?? null}
+                            onTranslateChange={(tx, ty, commit) => {
+                              if (!commit) return;
+                              const t2 = titleT;
+                              const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
+                              const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
+                              if (existing) {
+                                handleUpdateTitleLayer({ keyframes: project.titleLayer!.keyframes!.map(k => k === existing ? { ...k, translateX: tx, translateY: ty } : k) });
+                              } else {
+                                handleUpdateTitleLayer({ keyframes: [...(project.titleLayer?.keyframes || []), { time: t2, translateX: tx, translateY: ty, scale: baseKf.scale, rotation: baseKf.rotation }] });
+                              }
+                            }}
+                            onRotationChange={(rot, commit) => {
+                              if (!commit) return;
+                              const t2 = titleT;
+                              const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
+                              const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
+                              if (existing) {
+                                handleUpdateTitleLayer({ keyframes: project.titleLayer!.keyframes!.map(k => k === existing ? { ...k, rotation: rot } : k) });
+                              } else {
+                                handleUpdateTitleLayer({ keyframes: [...(project.titleLayer?.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: baseKf.scale, rotation: rot }] });
+                              }
+                            }}
+                            onScaleChange={(s, commit) => {
+                              if (!commit) return;
+                              const t2 = titleT;
+                              const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
+                              const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
+                              if (existing) {
+                                handleUpdateTitleLayer({ keyframes: project.titleLayer!.keyframes!.map(k => k === existing ? { ...k, scale: s } : k) });
+                              } else {
+                                handleUpdateTitleLayer({ keyframes: [...(project.titleLayer?.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: s, rotation: baseKf.rotation }] });
+                              }
+                            }}
+                            onPivotChange={(px, py) => {
+                              const newPivotKf: PivotKeyframe = { time: titleT, x: px, y: py };
+                              handleUpdateTitleLayer({
+                                pivotKeyframes: [
+                                  ...(project.titleLayer?.pivotKeyframes?.filter(k => Math.abs(k.time - titleT) > 0.05) || []),
+                                  newPivotKf,
+                                ].sort((a, b) => a.time - b.time),
+                              });
+                            }}
+                            visible={true}
+                          />
                         );
                       })()}
 
@@ -6672,6 +6983,13 @@ function App() {
 
               {/* Right: Export, Graph Editor & Remotion Toggle */}
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowGizmos(prev => !prev)}
+                  className={`px-2 py-1 text-xs rounded ${showGizmos ? 'bg-blue-600/40 text-blue-300' : 'bg-[#333] text-gray-400 hover:text-white'}`}
+                  title="Toggle Transform Gizmos"
+                >
+                  ✥ Gizmos
+                </button>
                 <button
                   onClick={() => setViewportMode(prev => prev === 'standard' ? 'remotion' : 'standard')}
                   className={`px-2 py-1 text-xs rounded ${viewportMode === 'remotion' ? 'bg-purple-600 text-white' : 'bg-[#333] text-gray-400 hover:text-white'}`}
@@ -6809,6 +7127,8 @@ function App() {
                     onClearTracking={handleClearTracking}
                     onClearTrackingData={handleClearTrackingData}
                     trackingProgress={trackingProgress}
+                    onTrackHeadPivot={handleTrackHeadPivot}
+                    pivotTrackingProgress={pivotTrackingProgress}
                   />
                 )}
               </div>
