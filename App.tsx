@@ -6768,12 +6768,12 @@ function App() {
                             rotation={kfG?.rotation ?? 0}
                             pivotX={pivotG?.x ?? null}
                             pivotY={pivotG?.y ?? null}
-                            onTranslateChange={(tx, ty, commit) => {
-                              if (!commit || !currentTopMedia || subEvtIdxG < 0) return;
+                            onTranslateChange={(tx, ty, _commit) => {
+                              if (!currentTopMedia || subEvtIdxG < 0) return;
                               updateSelectedEvent(evt => ({ ...evt, translateX: tx, translateY: ty }));
                             }}
-                            onRotationChange={(rot, commit) => {
-                              if (!commit || !currentTopMedia || subEvtIdxG < 0) return;
+                            onRotationChange={(rot, _commit) => {
+                              if (!currentTopMedia || subEvtIdxG < 0) return;
                               const t2 = subTimeG;
                               const baseKf = kfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
                               const existing = activeSubtitleEvent.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
@@ -6783,8 +6783,8 @@ function App() {
                                 updateSelectedEvent(evt => ({ ...evt, keyframes: [...(evt.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: baseKf.scale, rotation: rot }] }));
                               }
                             }}
-                            onScaleChange={(s, commit) => {
-                              if (!commit || !currentTopMedia || subEvtIdxG < 0) return;
+                            onScaleChange={(s, _commit) => {
+                              if (!currentTopMedia || subEvtIdxG < 0) return;
                               const t2 = subTimeG;
                               const baseKf = kfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
                               const existing = activeSubtitleEvent.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
@@ -6830,8 +6830,7 @@ function App() {
                             rotation={titleKfG?.rotation ?? 0}
                             pivotX={titlePivotG?.x ?? null}
                             pivotY={titlePivotG?.y ?? null}
-                            onTranslateChange={(tx, ty, commit) => {
-                              if (!commit) return;
+                            onTranslateChange={(tx, ty, _commit) => {
                               const t2 = titleT;
                               const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
                               const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
@@ -6841,8 +6840,7 @@ function App() {
                                 handleUpdateTitleLayer({ keyframes: [...(project.titleLayer?.keyframes || []), { time: t2, translateX: tx, translateY: ty, scale: baseKf.scale, rotation: baseKf.rotation }] });
                               }
                             }}
-                            onRotationChange={(rot, commit) => {
-                              if (!commit) return;
+                            onRotationChange={(rot, _commit) => {
                               const t2 = titleT;
                               const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
                               const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
@@ -6852,8 +6850,7 @@ function App() {
                                 handleUpdateTitleLayer({ keyframes: [...(project.titleLayer?.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: baseKf.scale, rotation: rot }] });
                               }
                             }}
-                            onScaleChange={(s, commit) => {
-                              if (!commit) return;
+                            onScaleChange={(s, _commit) => {
                               const t2 = titleT;
                               const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
                               const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };

@@ -9,6 +9,9 @@
  *
  * All screen coordinates are in safe-zone pixel space (0,0 = top-left of safeZoneRef).
  * Pivot is stored/emitted in safe-zone % (0–100 for both axes).
+ *
+ * Drag tracking uses window-level pointermove/pointerup listeners so that
+ * pointer-events: none on the SVG container does not interfere.
  */
 import React, { useCallback, useRef } from 'react';
 
@@ -23,7 +26,7 @@ export interface TransformGizmoProps {
   // Pivot in safe-zone % — null means "element center" (default CSS behavior)
   pivotX: number | null;
   pivotY: number | null;
-  // Callbacks — emit new values
+  // Callbacks — emit new values. commit=false during drag, commit=true on release.
   onTranslateChange: (tx: number, ty: number, commit: boolean) => void;
   onScaleChange: (scale: number, commit: boolean) => void;
   onRotationChange: (rotation: number, commit: boolean) => void;
@@ -45,7 +48,8 @@ interface DragState {
   startScale: number;
   startRotation: number;
   startDistFromPivot: number;
-  startAngle: number;  // angle at drag start minus current rotation
+  startAngle: number;  // atan2 angle at drag start (raw, not offset by rotation)
+  pivotAtStart: { x: number; y: number };  // pivot px snapshot at drag start
 }
 
 export const TransformGizmo: React.FC<TransformGizmoProps> = ({
@@ -108,7 +112,6 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
   ) => {
     e.stopPropagation();
     e.preventDefault();
-    (e.currentTarget as Element).setPointerCapture(e.pointerId);
 
     const pivot = getPivotPx();
     const dx = e.clientX - pivot.x;
@@ -116,7 +119,7 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
     const dist = Math.sqrt(dx * dx + dy * dy);
     const angle = Math.atan2(dy, dx) * 180 / Math.PI;
 
-    dragState.current = {
+    const ds: DragState = {
       type,
       startClientX: e.clientX,
       startClientY: e.clientY,
@@ -126,78 +129,84 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
       startRotation: rotation,
       startDistFromPivot: dist,
       startAngle: angle - rotation,
+      pivotAtStart: pivot,
     };
-  }, [getPivotPx, translateX, translateY, scale, rotation]);
+    dragState.current = ds;
 
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    const ds = dragState.current;
-    if (!ds) return;
-    e.preventDefault();
+    // ── Window-level listeners so pointer-events:none on SVG doesn't matter ──
 
-    const sz = getSafeZoneSize();
+    const handleMove = (ev: PointerEvent) => {
+      const d = dragState.current;
+      if (!d) return;
+      const sz = getSafeZoneSize();
 
-    if (ds.type === 'translate') {
-      const dx = (e.clientX - ds.startClientX) / sz.width * 100;
-      const dy = (e.clientY - ds.startClientY) / sz.height * 100;
-      onTranslateChange(ds.startTx + dx, ds.startTy + dy, false);
+      if (d.type === 'translate') {
+        const ddx = (ev.clientX - d.startClientX) / sz.width * 100;
+        const ddy = (ev.clientY - d.startClientY) / sz.height * 100;
+        onTranslateChange(d.startTx + ddx, d.startTy + ddy, false);
 
-    } else if (ds.type === 'rotate') {
-      const pivot = getPivotPx();
-      const dx = e.clientX - pivot.x;
-      const dy = e.clientY - pivot.y;
-      const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-      onRotationChange(angle - ds.startAngle, false);
+      } else if (d.type === 'rotate') {
+        const ddx = ev.clientX - d.pivotAtStart.x;
+        const ddy = ev.clientY - d.pivotAtStart.y;
+        const a = Math.atan2(ddy, ddx) * 180 / Math.PI;
+        onRotationChange(a - d.startAngle, false);
 
-    } else if (ds.type === 'scale') {
-      const pivot = getPivotPx();
-      const dx = e.clientX - pivot.x;
-      const dy = e.clientY - pivot.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (ds.startDistFromPivot > 2) {
-        onScaleChange(Math.max(0.05, ds.startScale * (dist / ds.startDistFromPivot)), false);
+      } else if (d.type === 'scale') {
+        const ddx = ev.clientX - d.pivotAtStart.x;
+        const ddy = ev.clientY - d.pivotAtStart.y;
+        const dist2 = Math.sqrt(ddx * ddx + ddy * ddy);
+        if (d.startDistFromPivot > 2) {
+          onScaleChange(Math.max(0.05, d.startScale * (dist2 / d.startDistFromPivot)), false);
+        }
+
+      } else if (d.type === 'pivot') {
+        const safeEl = safeZoneRef.current;
+        if (!safeEl) return;
+        const sr = safeEl.getBoundingClientRect();
+        const px = ((ev.clientX - sr.left) / sr.width) * 100;
+        const py = ((ev.clientY - sr.top) / sr.height) * 100;
+        onPivotChange(
+          Math.max(-50, Math.min(150, px)),
+          Math.max(-50, Math.min(150, py)),
+        );
       }
+    };
 
-    } else if (ds.type === 'pivot') {
-      const safeEl = safeZoneRef.current;
-      if (!safeEl) return;
-      const sr = safeEl.getBoundingClientRect();
-      const px = ((e.clientX - sr.left) / sr.width) * 100;
-      const py = ((e.clientY - sr.top) / sr.height) * 100;
-      // Allow pivot outside element bounds but clamp to reasonable range
-      onPivotChange(
-        Math.max(-50, Math.min(150, px)),
-        Math.max(-50, Math.min(150, py)),
-      );
-    }
-  }, [getSafeZoneSize, getPivotPx, onTranslateChange, onRotationChange, onScaleChange, onPivotChange, safeZoneRef]);
+    const handleUp = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
 
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
-    const ds = dragState.current;
-    if (!ds) return;
-    dragState.current = null;
+      const d = dragState.current;
+      if (!d) return;
+      dragState.current = null;
 
-    const sz = getSafeZoneSize();
+      const sz = getSafeZoneSize();
 
-    if (ds.type === 'translate') {
-      const dx = (e.clientX - ds.startClientX) / sz.width * 100;
-      const dy = (e.clientY - ds.startClientY) / sz.height * 100;
-      onTranslateChange(ds.startTx + dx, ds.startTy + dy, true);
-    } else if (ds.type === 'rotate') {
-      const pivot = getPivotPx();
-      const dx = e.clientX - pivot.x;
-      const dy = e.clientY - pivot.y;
-      const angle = Math.atan2(dy, dx) * 180 / Math.PI;
-      onRotationChange(angle - ds.startAngle, true);
-    } else if (ds.type === 'scale') {
-      const pivot = getPivotPx();
-      const dx = e.clientX - pivot.x;
-      const dy = e.clientY - pivot.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (ds.startDistFromPivot > 2) {
-        onScaleChange(Math.max(0.05, ds.startScale * (dist / ds.startDistFromPivot)), true);
+      if (d.type === 'translate') {
+        const ddx = (ev.clientX - d.startClientX) / sz.width * 100;
+        const ddy = (ev.clientY - d.startClientY) / sz.height * 100;
+        onTranslateChange(d.startTx + ddx, d.startTy + ddy, true);
+
+      } else if (d.type === 'rotate') {
+        const ddx = ev.clientX - d.pivotAtStart.x;
+        const ddy = ev.clientY - d.pivotAtStart.y;
+        const a = Math.atan2(ddy, ddx) * 180 / Math.PI;
+        onRotationChange(a - d.startAngle, true);
+
+      } else if (d.type === 'scale') {
+        const ddx = ev.clientX - d.pivotAtStart.x;
+        const ddy = ev.clientY - d.pivotAtStart.y;
+        const dist2 = Math.sqrt(ddx * ddx + ddy * ddy);
+        if (d.startDistFromPivot > 2) {
+          onScaleChange(Math.max(0.05, d.startScale * (dist2 / d.startDistFromPivot)), true);
+        }
       }
-    }
-  }, [getSafeZoneSize, getPivotPx, onTranslateChange, onRotationChange, onScaleChange]);
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+  }, [getPivotPx, translateX, translateY, scale, rotation, getSafeZoneSize,
+      onTranslateChange, onRotationChange, onScaleChange, onPivotChange, safeZoneRef]);
 
   if (!visible) return null;
 
@@ -253,8 +262,6 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
         pointerEvents: 'none',
         zIndex: 9999,
       }}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
     >
       <defs>
         <filter id="gizmo-dropshadow" x="-50%" y="-50%" width="200%" height="200%">
