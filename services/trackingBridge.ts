@@ -413,3 +413,218 @@ export async function fullScanAndCenter(
     return null;
   }
 }
+
+/**
+ * Convert head tracking positions to pivot keyframes (pivotX/pivotY in 0-100%).
+ * Unlike translateX-based centering, pivot keyframes set the transform-origin
+ * so that zoom/rotation happens around the tracked head position.
+ */
+function convertHeadPositionsToPivotKeyframes(
+  positions: PythonTrackingPosition[],
+  segmentStartTime: number,
+  videoWidth: number,
+  videoHeight: number,
+): { keyframes: ClipKeyframe[]; frameCount: number } {
+  if (positions.length === 0) return { keyframes: [], frameCount: 0 };
+
+  // Convert pixel positions to 0-100% for pivot
+  const rawPivots: { time: number; pivotX: number; pivotY: number }[] = [];
+  for (const pos of positions) {
+    const relativeTime = pos.time - segmentStartTime;
+    if (relativeTime < 0) continue;
+    rawPivots.push({
+      time: relativeTime,
+      pivotX: (pos.x / videoWidth) * 100,
+      pivotY: (pos.y / videoHeight) * 100,
+    });
+  }
+
+  // Smooth pivot values
+  const pxValues = rawPivots.map(p => p.pivotX);
+  const pyValues = rawPivots.map(p => p.pivotY);
+  const smoothedPx = smoothArray(pxValues, 11);
+  const smoothedPy = smoothArray(pyValues, 11);
+
+  // Generate keyframes — emit when pivot changes by at least 1%
+  const keyframes: ClipKeyframe[] = [];
+  let lastPx = 50, lastPy = 50;
+
+  for (let i = 0; i < rawPivots.length; i++) {
+    const { time } = rawPivots[i];
+    const px = Math.round(smoothedPx[i] * 10) / 10;
+    const py = Math.round(smoothedPy[i] * 10) / 10;
+
+    const significantChange = Math.abs(px - lastPx) > 1.0 || Math.abs(py - lastPy) > 1.0;
+    if (significantChange || keyframes.length === 0) {
+      keyframes.push({
+        time,
+        translateX: 0,
+        translateY: 0,
+        scale: 1,
+        rotation: 0,
+        pivotX: px,
+        pivotY: py,
+      });
+      lastPx = px;
+      lastPy = py;
+    }
+  }
+
+  // Ensure final keyframe
+  if (rawPivots.length > 0 && keyframes.length > 0) {
+    const lastTime = rawPivots[rawPivots.length - 1].time;
+    const lastKf = keyframes[keyframes.length - 1];
+    if (lastKf.time < lastTime - 0.05) {
+      keyframes.push({
+        time: lastTime,
+        translateX: 0,
+        translateY: 0,
+        scale: 1,
+        rotation: 0,
+        pivotX: lastKf.pivotX,
+        pivotY: lastKf.pivotY,
+      });
+    }
+  }
+
+  return { keyframes, frameCount: positions.length };
+}
+
+/**
+ * Head-track-for-pivot pipeline: detects head position and generates pivot keyframes.
+ *
+ * Similar to fullScanAndCenter but uses 'head_center' mode and outputs pivotX/pivotY
+ * keyframes instead of translateX panning keyframes. The pivot keyframes set the
+ * transform-origin so zoom/rotation stays centered on the person's head.
+ */
+export async function headTrackForPivot(
+  videoElement: HTMLVideoElement,
+  segment: TrackingSegment,
+  videoFile: File | null,
+  onProgress?: (progress: number, label: string) => void,
+): Promise<{ keyframes: ClipKeyframe[]; frameCount: number; method: string } | null> {
+  try {
+    // If no File object (e.g., lost after page reload), reconstruct from video element's blob URL
+    let file = videoFile;
+    console.log(`[TrackingBridge] headTrackForPivot: videoFile=${videoFile ? `File(${videoFile.name}, ${(videoFile.size/1024/1024).toFixed(1)}MB)` : 'null'}, videoEl.src=${videoElement.src?.substring(0, 60) || 'none'}`);
+    if (!file) {
+      console.log('[TrackingBridge] No File object, reconstructing from video element src...');
+      file = await reconstructFileFromVideoElement(videoElement, onProgress);
+      if (!file) {
+        console.log('[TrackingBridge] Could not obtain video file, skipping Python tracker');
+        return null;
+      }
+    }
+    console.log(`[TrackingBridge] File ready: name=${file.name}, size=${(file.size / 1024 / 1024).toFixed(1)}MB, type=${file.type}`);
+
+    onProgress?.(0.01, 'Checking Python tracker...');
+
+    // First check if the Python tracker is available
+    const available = await checkPythonTrackerAvailable();
+    if (!available) {
+      console.log('[TrackingBridge] Python tracker not available (server says unavailable)');
+      return null;
+    }
+    console.log('[TrackingBridge] Tracker available, uploading video...');
+
+    // Upload the video file to the server
+    onProgress?.(0.03, 'Uploading video for head tracking...');
+    const fileId = await uploadVideoForTracking(file, onProgress);
+    if (!fileId) {
+      console.log('[TrackingBridge] Video upload failed');
+      return null;
+    }
+    console.log(`[TrackingBridge] Uploaded, fileId=${fileId}. Running head tracking analyze...`);
+
+    onProgress?.(0.15, 'Python head tracker running (MediaPipe)...');
+
+    // Call Python tracker with head_center mode
+    let analyzeFileId = fileId;
+    let response = await fetch('/api/tracking/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileId: analyzeFileId,
+        startTime: segment.startTime,
+        endTime: segment.endTime,
+        sampleInterval: 0.1,
+        mode: 'head_center',
+        options: {},
+      }),
+    });
+
+    // Handle 400 = stale fileId (server restarted, clearing its file map).
+    // Invalidate our cache, re-upload, and retry once.
+    if (response.status === 400 && file) {
+      console.log('[TrackingBridge] Got 400 — stale fileId, re-uploading...');
+      invalidateUploadCache(file);
+      onProgress?.(0.08, 'Re-uploading video (server restarted)...');
+      const freshFileId = await uploadVideoForTracking(file, onProgress, true);
+      if (!freshFileId) {
+        console.log('[TrackingBridge] Re-upload failed');
+        return null;
+      }
+      analyzeFileId = freshFileId;
+      onProgress?.(0.15, 'Python head tracker running (MediaPipe)...');
+      response = await fetch('/api/tracking/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileId: analyzeFileId,
+          startTime: segment.startTime,
+          endTime: segment.endTime,
+          sampleInterval: 0.1,
+          mode: 'head_center',
+          options: {},
+        }),
+      });
+    }
+
+    console.log(`[TrackingBridge] Head tracking analyze response: HTTP ${response.status}`);
+
+    if (response.status === 501 || response.status === 404) {
+      console.log('[TrackingBridge] Tracker endpoint not available:', response.status);
+      return null;
+    }
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      console.error(`[TrackingBridge] Analyze failed: HTTP ${response.status}:`, errBody.substring(0, 500));
+      return null;
+    }
+
+    const result: PythonTrackingResult = await response.json();
+    console.log(`[TrackingBridge] Head tracking result: success=${result.success}, positions=${result.positions?.length ?? 0}, method=${result.method || 'n/a'}, error=${result.error || 'none'}`);
+    if (result.stderr) console.log(`[TrackingBridge] Tracker stderr: ${result.stderr.substring(0, 300)}`);
+
+    if (!result.success) {
+      console.error('[TrackingBridge] Python head tracker error:', result.error, result.stderr);
+      return null;
+    }
+
+    if (result.fallback || !result.positions || result.positions.length === 0) {
+      console.log('[TrackingBridge] Python head tracker returned no usable positions');
+      return null;
+    }
+
+    onProgress?.(0.9, 'Generating pivot keyframes from head tracking...');
+
+    const { keyframes, frameCount } = convertHeadPositionsToPivotKeyframes(
+      result.positions,
+      segment.startTime,
+      result.videoWidth || videoElement.videoWidth,
+      result.videoHeight || videoElement.videoHeight,
+    );
+
+    onProgress?.(1.0, `Done (head pivot) — ${keyframes.length} keyframes`);
+
+    return {
+      keyframes,
+      frameCount,
+      method: result.method || 'python-head-pivot',
+    };
+  } catch (e) {
+    console.error('[TrackingBridge] headTrackForPivot error:', e);
+    return null;
+  }
+}

@@ -19,13 +19,14 @@ import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
 import { YoutubeImportModal } from './components/YoutubeImportModal';
 import ContentLibraryPage from './pages/ContentLibraryPage';
 import { GeneratedShort, contentDB } from './services/contentDatabase';
-import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion } from './utils/interpolation';
+import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion, compensatePivotChange } from './utils/interpolation';
 import { resolveGradientStops, buildGradientCSS } from './utils/gradientUtils';
 import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
 import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes, detectPersonInFrame } from './services/templateTrackingService';
-import { fullScanAndCenter } from './services/trackingBridge';
+import { fullScanAndCenter, headTrackForPivot } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
+import GizmoOverlay from './components/GizmoOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
 import { getAudioBuffer, getAudioBufferLowRes, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache, findSilenceGaps } from './utils/audioAnalysis';
 import { crossfadeVolumes } from './utils/audioCrossfade';
@@ -1072,11 +1073,14 @@ function App() {
     const clipTransform = getInterpolatedTransform(clipKeyframes, clipTime);
 
     // Combine: first apply global, then clip (additive for translate, multiplicative for scale)
+    // Pivot is clip-level only (not combined with global)
     return {
       translateX: globalTransform.translateX + clipTransform.translateX,
       translateY: globalTransform.translateY + clipTransform.translateY,
       scale: globalTransform.scale * clipTransform.scale,
-      rotation: globalTransform.rotation + clipTransform.rotation
+      rotation: globalTransform.rotation + clipTransform.rotation,
+      pivotX: clipTransform.pivotX,
+      pivotY: clipTransform.pivotY
     };
   };
 
@@ -1087,6 +1091,9 @@ function App() {
         if (action.segmentId === 'global') {
           pushToStack({ type: 'keyframes', segmentId: 'global', keyframes: globalKeyframes });
           setGlobalKeyframes(action.keyframes);
+        } else if (action.segmentId === 'title_layer') {
+          pushToStack({ type: 'keyframes', segmentId: 'title_layer', keyframes: project.titleLayer?.keyframes || [] });
+          handleUpdateTitleLayer({ keyframes: action.keyframes });
         } else {
           const seg = project.segments.find(s => s.id === action.segmentId);
           if (seg) {
@@ -2596,8 +2603,11 @@ function App() {
       translateY: channels.has('translateY') ? kf.translateY : 0,
       scale: channels.has('scale') ? kf.scale : 1,
       rotation: channels.has('rotation') ? kf.rotation : 0,
+      pivotX: channels.has('pivotX') ? (kf.pivotX ?? 50) : 50,
+      pivotY: channels.has('pivotY') ? (kf.pivotY ?? 50) : 50,
     })).filter(kf =>
-      kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0
+      kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0 ||
+      (kf.pivotX !== undefined && kf.pivotX !== 50) || (kf.pivotY !== undefined && kf.pivotY !== 50)
     );
     console.log('[StripChannels] Output keyframes:', result.length, '| Sample:', result[0] ? { tX: result[0].translateX.toFixed(3), tY: result[0].translateY.toFixed(3), s: result[0].scale.toFixed(3), r: result[0].rotation.toFixed(3) } : 'none');
     return result;
@@ -2693,6 +2703,281 @@ function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [trackingMode]);
+
+  // ============ GIZMO HANDLERS ============
+
+  // Helper: find-or-create keyframe at current time for a given keyframes array
+  const upsertKeyframe = (
+    keyframes: ClipKeyframe[] | undefined,
+    t: number,
+    updates: Partial<ClipKeyframe>
+  ): ClipKeyframe[] => {
+    const kfs = keyframes || [];
+    const existingIdx = kfs.findIndex(kf => Math.abs(kf.time - t) < 0.01);
+    const baseKf: ClipKeyframe = existingIdx >= 0
+      ? kfs[existingIdx]
+      : { time: t, translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+    // If inserting new keyframe, interpolate current values as base
+    if (existingIdx < 0 && kfs.length > 0) {
+      const interp = getInterpolatedTransform(kfs, t);
+      baseKf.translateX = interp.translateX;
+      baseKf.translateY = interp.translateY;
+      baseKf.scale = interp.scale;
+      baseKf.rotation = interp.rotation;
+      baseKf.pivotX = interp.pivotX;
+      baseKf.pivotY = interp.pivotY;
+    }
+    const updatedKf = { ...baseKf, time: t, ...updates };
+    if (existingIdx >= 0) {
+      return kfs.map((kf, i) => i === existingIdx ? updatedKf : kf);
+    }
+    return [...kfs, updatedKf].sort((a, b) => a.time - b.time);
+  };
+
+  // Determine what the gizmo is targeting and get relevant state
+  const getGizmoTarget = (): {
+    type: 'clip' | 'subtitle' | 'title' | null;
+    segmentId?: string;
+    mediaId?: string;
+    eventIndex?: number;
+  } => {
+    // Title selected
+    if (transformTarget === 'title_layer' && project.titleLayer) {
+      return { type: 'title' };
+    }
+    // Subtitle selected
+    if (transformTarget?.startsWith('subtitle_') && activeSubtitleEvent) {
+      const parts = transformTarget.split('_');
+      const mediaId = parts[1];
+      const index = parseInt(parts[2]);
+      return { type: 'subtitle', mediaId, eventIndex: index };
+    }
+    // Clip selected
+    if (primarySelectedSegment && transformTarget !== 'global') {
+      return { type: 'clip', segmentId: primarySelectedSegment.id };
+    }
+    return { type: null };
+  };
+
+  // onTranslate receives ABSOLUTE translate values (startTranslate + pixelDelta)
+  const handleGizmoTranslate = (newTx: number, newTy: number) => {
+    const target = getGizmoTarget();
+    if (target.type === 'clip' && target.segmentId) {
+      const seg = project.segments.find(s => s.id === target.segmentId);
+      if (!seg) return;
+      const clipTime = project.currentTime - seg.timelineStart;
+      const newKfs = upsertKeyframe(seg.keyframes, clipTime, {
+        translateX: newTx,
+        translateY: newTy,
+      });
+      handleUpdateKeyframes(target.segmentId, newKfs, true);
+    } else if (target.type === 'title' && project.titleLayer) {
+      const t = project.currentTime - project.titleLayer.startTime;
+      const newKfs = upsertKeyframe(project.titleLayer.keyframes, t, {
+        translateX: newTx,
+        translateY: newTy,
+      });
+      handleUpdateTitleLayer({ keyframes: newKfs });
+    } else if (target.type === 'subtitle' && target.mediaId !== undefined && target.eventIndex !== undefined) {
+      const media = project.library.find(m => m.id === target.mediaId);
+      const evt = media?.analysis?.events[target.eventIndex!];
+      if (!evt) return;
+      const visualSegs = activeSegments.filter(s => s.type !== 'audio');
+      const topSeg = visualSegs.length > 0 ? visualSegs[visualSegs.length - 1] : activeSegments[activeSegments.length - 1];
+      const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
+      const subTime = sourceTime - evt.startTime;
+      const newKfs = upsertKeyframe(evt.keyframes, subTime, {
+        translateX: newTx,
+        translateY: newTy,
+      });
+      handleUpdateDialogue(target.mediaId!, target.eventIndex!, { ...evt, keyframes: newKfs });
+    }
+  };
+
+  const handleGizmoScale = (newScale: number) => {
+    const target = getGizmoTarget();
+    if (target.type === 'clip' && target.segmentId) {
+      const seg = project.segments.find(s => s.id === target.segmentId);
+      if (!seg) return;
+      const clipTime = project.currentTime - seg.timelineStart;
+      const newKfs = upsertKeyframe(seg.keyframes, clipTime, { scale: newScale });
+      handleUpdateKeyframes(target.segmentId, newKfs, true);
+    } else if (target.type === 'title' && project.titleLayer) {
+      const t = project.currentTime - project.titleLayer.startTime;
+      const newKfs = upsertKeyframe(project.titleLayer.keyframes, t, { scale: newScale });
+      handleUpdateTitleLayer({ keyframes: newKfs });
+    } else if (target.type === 'subtitle' && target.mediaId !== undefined && target.eventIndex !== undefined) {
+      const media = project.library.find(m => m.id === target.mediaId);
+      const evt = media?.analysis?.events[target.eventIndex!];
+      if (!evt) return;
+      const visualSegs = activeSegments.filter(s => s.type !== 'audio');
+      const topSeg = visualSegs.length > 0 ? visualSegs[visualSegs.length - 1] : activeSegments[activeSegments.length - 1];
+      const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
+      const subTime = sourceTime - evt.startTime;
+      const newKfs = upsertKeyframe(evt.keyframes, subTime, { scale: newScale });
+      handleUpdateDialogue(target.mediaId!, target.eventIndex!, { ...evt, keyframes: newKfs });
+    }
+  };
+
+  const handleGizmoRotate = (newRotation: number) => {
+    const target = getGizmoTarget();
+    if (target.type === 'clip' && target.segmentId) {
+      const seg = project.segments.find(s => s.id === target.segmentId);
+      if (!seg) return;
+      const clipTime = project.currentTime - seg.timelineStart;
+      const newKfs = upsertKeyframe(seg.keyframes, clipTime, { rotation: newRotation });
+      handleUpdateKeyframes(target.segmentId, newKfs, true);
+    } else if (target.type === 'title' && project.titleLayer) {
+      const t = project.currentTime - project.titleLayer.startTime;
+      const newKfs = upsertKeyframe(project.titleLayer.keyframes, t, { rotation: newRotation });
+      handleUpdateTitleLayer({ keyframes: newKfs });
+    } else if (target.type === 'subtitle' && target.mediaId !== undefined && target.eventIndex !== undefined) {
+      const media = project.library.find(m => m.id === target.mediaId);
+      const evt = media?.analysis?.events[target.eventIndex!];
+      if (!evt) return;
+      const visualSegs = activeSegments.filter(s => s.type !== 'audio');
+      const topSeg = visualSegs.length > 0 ? visualSegs[visualSegs.length - 1] : activeSegments[activeSegments.length - 1];
+      const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
+      const subTime = sourceTime - evt.startTime;
+      const newKfs = upsertKeyframe(evt.keyframes, subTime, { rotation: newRotation });
+      handleUpdateDialogue(target.mediaId!, target.eventIndex!, { ...evt, keyframes: newKfs });
+    }
+  };
+
+  const handleGizmoPivotMove = (newPivotX: number, newPivotY: number) => {
+    const target = getGizmoTarget();
+    if (target.type === 'clip' && target.segmentId) {
+      const seg = project.segments.find(s => s.id === target.segmentId);
+      if (!seg) return;
+      const clipTime = project.currentTime - seg.timelineStart;
+      const interp = getInterpolatedTransform(seg.keyframes, clipTime);
+      // Compensate translation so element doesn't visually jump
+      const comp = compensatePivotChange(
+        interp.translateX, interp.translateY, interp.scale, interp.rotation,
+        interp.pivotX, interp.pivotY, newPivotX, newPivotY
+      );
+      const newKfs = upsertKeyframe(seg.keyframes, clipTime, {
+        pivotX: newPivotX, pivotY: newPivotY,
+        translateX: comp.translateX, translateY: comp.translateY,
+      });
+      handleUpdateKeyframes(target.segmentId, newKfs, true);
+    } else if (target.type === 'title' && project.titleLayer) {
+      const t = project.currentTime - project.titleLayer.startTime;
+      const interp = getInterpolatedTransform(project.titleLayer.keyframes, t);
+      const comp = compensatePivotChange(
+        interp.translateX, interp.translateY, interp.scale, interp.rotation,
+        interp.pivotX, interp.pivotY, newPivotX, newPivotY
+      );
+      const newKfs = upsertKeyframe(project.titleLayer.keyframes, t, {
+        pivotX: newPivotX, pivotY: newPivotY,
+        translateX: comp.translateX, translateY: comp.translateY,
+      });
+      handleUpdateTitleLayer({ keyframes: newKfs });
+    } else if (target.type === 'subtitle' && target.mediaId !== undefined && target.eventIndex !== undefined) {
+      const media = project.library.find(m => m.id === target.mediaId);
+      const evt = media?.analysis?.events[target.eventIndex!];
+      if (!evt) return;
+      const visualSegs = activeSegments.filter(s => s.type !== 'audio');
+      const topSeg = visualSegs.length > 0 ? visualSegs[visualSegs.length - 1] : activeSegments[activeSegments.length - 1];
+      const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
+      const subTime = sourceTime - evt.startTime;
+      const interp = getInterpolatedTransform(evt.keyframes, subTime);
+      const comp = compensatePivotChange(
+        interp.translateX, interp.translateY, interp.scale, interp.rotation,
+        interp.pivotX, interp.pivotY, newPivotX, newPivotY
+      );
+      const newKfs = upsertKeyframe(evt.keyframes, subTime, {
+        pivotX: newPivotX, pivotY: newPivotY,
+        translateX: comp.translateX, translateY: comp.translateY,
+      });
+      handleUpdateDialogue(target.mediaId!, target.eventIndex!, { ...evt, keyframes: newKfs });
+    }
+  };
+
+  const handleGizmoDragStart = () => {
+    const target = getGizmoTarget();
+    if (target.type === 'clip' && target.segmentId) {
+      const seg = project.segments.find(s => s.id === target.segmentId);
+      if (seg) pushUndo({ type: 'keyframes', segmentId: target.segmentId, keyframes: seg.keyframes || [] });
+    } else if (target.type === 'title' && project.titleLayer) {
+      pushUndo({ type: 'keyframes', segmentId: 'title_layer', keyframes: project.titleLayer.keyframes || [] });
+    } else if (target.type === 'subtitle' && target.mediaId !== undefined && target.eventIndex !== undefined) {
+      const media = project.library.find(m => m.id === target.mediaId);
+      const evt = media?.analysis?.events[target.eventIndex!];
+      if (evt) pushUndo({ type: 'dialogueEvent', mediaId: target.mediaId!, index: target.eventIndex!, event: { ...evt } });
+    }
+  };
+
+  const handleGizmoDragEnd = () => {
+    // Drag end — undo snapshot was already taken on drag start
+  };
+
+  // ============ AUTO-PIVOT TO HEAD ============
+
+  const [autoPivotProgress, setAutoPivotProgress] = useState<{ progress: number; label: string } | null>(null);
+
+  const handleAutoPivotToHead = async (scope: 'selected' | 'all') => {
+    const segmentsToProcess = scope === 'all'
+      ? project.segments.filter(s => s.type !== 'audio' && s.type !== 'blank')
+      : primarySelectedSegment && primarySelectedSegment.type !== 'audio' && primarySelectedSegment.type !== 'blank'
+        ? [primarySelectedSegment]
+        : [];
+
+    if (segmentsToProcess.length === 0) return;
+
+    // Push a single undo entry that captures all segments (one Ctrl+Z to revert)
+    pushUndo({ type: 'segments', segments: [...project.segments] });
+
+    setAutoPivotProgress({ progress: 0, label: 'Starting head detection...' });
+
+    for (let i = 0; i < segmentsToProcess.length; i++) {
+      const seg = segmentsToProcess[i];
+      const videoEl = videoRefs.current.get(seg.id);
+      if (!videoEl) continue;
+
+      const mediaItem = project.library.find(m => m.id === seg.mediaId);
+      const videoFile = mediaItem?.file || null;
+
+      const segLabel = segmentsToProcess.length > 1 ? ` (${i + 1}/${segmentsToProcess.length})` : '';
+
+      const result = await headTrackForPivot(
+        videoEl,
+        { startTime: seg.startTime, endTime: seg.endTime },
+        videoFile,
+        (p, label) => setAutoPivotProgress({ progress: (i + p) / segmentsToProcess.length, label: label + segLabel }),
+      );
+
+      if (result && result.keyframes.length > 0) {
+        // Merge pivot keyframes with existing keyframes (preserve transform values)
+        const existingKfs = seg.keyframes || [];
+        let mergedKfs = [...existingKfs];
+        for (const pivotKf of result.keyframes) {
+          const existingIdx = mergedKfs.findIndex(kf => Math.abs(kf.time - pivotKf.time) < 0.01);
+          if (existingIdx >= 0) {
+            // Existing keyframe at this time — just update pivot
+            mergedKfs[existingIdx] = { ...mergedKfs[existingIdx], pivotX: pivotKf.pivotX, pivotY: pivotKf.pivotY };
+          } else {
+            // New time — interpolate existing transform values and add pivot
+            const interp = getInterpolatedTransform(existingKfs, pivotKf.time);
+            mergedKfs.push({
+              time: pivotKf.time,
+              translateX: interp.translateX,
+              translateY: interp.translateY,
+              scale: interp.scale,
+              rotation: interp.rotation,
+              pivotX: pivotKf.pivotX,
+              pivotY: pivotKf.pivotY,
+            });
+          }
+        }
+        mergedKfs.sort((a, b) => a.time - b.time);
+        handleUpdateKeyframes(seg.id, mergedKfs, true);
+      }
+    }
+
+    setAutoPivotProgress(null);
+    setActiveBottomTab('graph');
+  };
 
   // Clean segment text by removing words at removedWordIndices, and re-index keywords
   const cleanSegmentText = (text: string, removedIndices?: number[], keywords?: KeywordEmphasis[]): { text: string; keywords: KeywordEmphasis[] } => {
@@ -6123,7 +6408,7 @@ function App() {
                                 fontFamily: 'system-ui, -apple-system, sans-serif'
                               }}
                             >
-                              <div style={{ transform: cssTransform, transformOrigin: 'center center' }}>
+                              <div style={{ transform: cssTransform, transformOrigin: `${transform.pivotX}% ${transform.pivotY}%` }}>
                                 {seg.customText || ''}
                               </div>
                             </div>
@@ -6132,7 +6417,7 @@ function App() {
                               ref={el => { if (el) videoRefs.current.set(seg.id, el); }}
                               src={project.library.find(m => m.id === seg.mediaId)?.url}
                               className="w-full h-full object-contain pointer-events-none"
-                              style={{ transform: cssTransform, transformOrigin: 'center center' }}
+                              style={{ transform: cssTransform, transformOrigin: `${transform.pivotX}% ${transform.pivotY}%` }}
                               muted={false}
                             />
                           )}
@@ -6252,6 +6537,8 @@ function App() {
 
                         // Apply keyframe-based transforms on top of drag offset
                         let subKfTransform = '';
+                        let subPivotX = 50;
+                        let subPivotY = 50;
                         if (activeSubtitleEvent.keyframes && activeSubtitleEvent.keyframes.length > 0) {
                           const visualSegsKf = activeSegments.filter(s => s.type !== 'audio');
                           const topSeg = visualSegsKf.length > 0 ? visualSegsKf[visualSegsKf.length - 1] : activeSegments[activeSegments.length - 1];
@@ -6265,6 +6552,8 @@ function App() {
                           if (kfTransform.scale !== 1) kfParts.push(`scale(${kfTransform.scale})`);
                           if (kfTransform.rotation !== 0) kfParts.push(`rotate(${kfTransform.rotation}deg)`);
                           subKfTransform = kfParts.join(' ');
+                          subPivotX = kfTransform.pivotX;
+                          subPivotY = kfTransform.pivotY;
                         }
 
                         const fullSubTransform = [subTransform, subKfTransform].filter(Boolean).join(' ') || undefined;
@@ -6272,6 +6561,7 @@ function App() {
                         const containerStyle = {
                           ...styles.container,
                           transform: fullSubTransform,
+                          transformOrigin: `${subPivotX}% ${subPivotY}%`,
                           pointerEvents: 'auto' as const,
                           cursor: subtitleDragState ? 'grabbing' : 'grab',
                         };
@@ -6408,7 +6698,7 @@ function App() {
                         const computedStyles = getTitleStyles(titleStyle, fadeOpacity);
 
                         // Apply transforms if keyframes exist — use pixel values for crop-region-relative positioning
-                        let transform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+                        let transform = { translateX: 0, translateY: 0, scale: 1, rotation: 0, pivotX: 50, pivotY: 50 };
                         if (project.titleLayer.keyframes && project.titleLayer.keyframes.length > 0) {
                           transform = getCombinedTransform(project.titleLayer.keyframes, t, project.currentTime);
                         }
@@ -6432,7 +6722,7 @@ function App() {
                         const titleContainerStyle = {
                           ...computedStyles.container,
                           transform: cssTransform,
-                          transformOrigin: 'center center',
+                          transformOrigin: `${transform.pivotX}% ${transform.pivotY}%`,
                           pointerEvents: 'auto' as const,
                           cursor: titleDragState ? 'grabbing' : 'grab',
                         };
@@ -6501,6 +6791,95 @@ function App() {
                           backdropFilter: 'blur(4px)',
                         }}>
                           FX: {project.activeSubtitleTemplate.name}
+                        </div>
+                      )}
+
+                      {/* Viewport Gizmo Overlay */}
+                      {(() => {
+                        const gizmoTarget = getGizmoTarget();
+                        if (!gizmoTarget.type || activeRightTab === 'tracking') return null;
+
+                        let gizmoTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0, pivotX: 50, pivotY: 50 };
+                        let elemBounds = { width: sz.w, height: sz.h };
+                        let elemCenter = { x: sz.w / 2, y: sz.h / 2 };
+
+                        if (gizmoTarget.type === 'clip' && primarySelectedSegment) {
+                          const clipTime = project.currentTime - primarySelectedSegment.timelineStart;
+                          const t = getCombinedTransform(primarySelectedSegment.keyframes, clipTime, project.currentTime);
+                          gizmoTransform = { ...t, pivotX: t.pivotX ?? 50, pivotY: t.pivotY ?? 50 };
+                          elemBounds = { width: sz.w, height: sz.h };
+                          elemCenter = {
+                            x: sz.w / 2 + t.translateX * sz.w / 100,
+                            y: sz.h / 2 + t.translateY * sz.h / 100,
+                          };
+                        } else if (gizmoTarget.type === 'title' && project.titleLayer) {
+                          const t2 = project.currentTime - project.titleLayer.startTime;
+                          const tTransform = project.titleLayer.keyframes?.length
+                            ? getCombinedTransform(project.titleLayer.keyframes, t2, project.currentTime)
+                            : { translateX: 0, translateY: 0, scale: 1, rotation: 0, pivotX: 50, pivotY: 50 };
+                          gizmoTransform = { ...tTransform, pivotX: tTransform.pivotX ?? 50, pivotY: tTransform.pivotY ?? 50 };
+                          elemBounds = { width: sz.w * 0.8, height: 60 };
+                          elemCenter = {
+                            x: sz.w / 2 + tTransform.translateX * sz.w / 100,
+                            y: sz.h / 2 + tTransform.translateY * sz.h / 100,
+                          };
+                        } else if (gizmoTarget.type === 'subtitle' && activeSubtitleEvent) {
+                          const subTxG = activeSubtitleEvent.translateX || 0;
+                          const subTyG = activeSubtitleEvent.translateY || 0;
+                          let subInterp = { translateX: 0, translateY: 0, scale: 1, rotation: 0, pivotX: 50, pivotY: 50 };
+                          if (activeSubtitleEvent.keyframes?.length) {
+                            const visualSegsG = activeSegments.filter(s => s.type !== 'audio');
+                            const topSegG = visualSegsG.length > 0 ? visualSegsG[visualSegsG.length - 1] : activeSegments[activeSegments.length - 1];
+                            const srcTime = topSegG ? topSegG.startTime + (project.currentTime - topSegG.timelineStart) : 0;
+                            const sTime = srcTime - activeSubtitleEvent.startTime;
+                            subInterp = getInterpolatedTransform(activeSubtitleEvent.keyframes, sTime);
+                          }
+                          gizmoTransform = { ...subInterp, pivotX: subInterp.pivotX ?? 50, pivotY: subInterp.pivotY ?? 50 };
+                          elemBounds = { width: sz.w * 0.6, height: 40 };
+                          elemCenter = {
+                            x: sz.w / 2 + (subTxG + subInterp.translateX) * sz.w / 100,
+                            y: sz.h * 0.85 + (subTyG + subInterp.translateY) * sz.h / 100,
+                          };
+                        }
+
+                        return (
+                          <GizmoOverlay
+                            targetType={gizmoTarget.type}
+                            transform={gizmoTransform}
+                            viewportSize={{ width: sz.w, height: sz.h }}
+                            cropDims={cropDims}
+                            elementBounds={elemBounds}
+                            elementCenter={elemCenter}
+                            zoom={activeRightTab === 'tracking' ? trackingZoom : 1}
+                            isPlaying={project.isPlaying}
+                            onTranslate={handleGizmoTranslate}
+                            onScale={handleGizmoScale}
+                            onRotate={handleGizmoRotate}
+                            onPivotMove={handleGizmoPivotMove}
+                            onDragStart={handleGizmoDragStart}
+                            onDragEnd={handleGizmoDragEnd}
+                          />
+                        );
+                      })()}
+
+                      {/* Auto-pivot progress overlay */}
+                      {autoPivotProgress && (
+                        <div style={{
+                          position: 'absolute', inset: 0, zIndex: 10002,
+                          background: 'rgba(0,0,0,0.7)', display: 'flex',
+                          flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                          pointerEvents: 'auto',
+                        }}>
+                          <div style={{ color: '#fff', fontSize: 14, marginBottom: 12 }}>
+                            {autoPivotProgress.label}
+                          </div>
+                          <div style={{ width: 200, height: 4, background: '#333', borderRadius: 2 }}>
+                            <div style={{
+                              width: `${Math.round(autoPivotProgress.progress * 100)}%`,
+                              height: '100%', background: '#06b6d4', borderRadius: 2,
+                              transition: 'width 0.3s ease',
+                            }} />
+                          </div>
                         </div>
                       )}
 
@@ -6731,6 +7110,8 @@ function App() {
                     onClearTracking={handleClearTracking}
                     onClearTrackingData={handleClearTrackingData}
                     trackingProgress={trackingProgress}
+                    onAutoPivotToHead={handleAutoPivotToHead}
+                    autoPivotProgress={autoPivotProgress}
                   />
                 )}
               </div>

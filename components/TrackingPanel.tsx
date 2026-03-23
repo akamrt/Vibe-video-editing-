@@ -19,6 +19,8 @@ interface TrackingPanelProps {
   onClearTracking: (segmentId: string) => void;
   onClearTrackingData: (segmentId: string) => void;
   trackingProgress: { progress: number; label: string } | null;
+  onAutoPivotToHead?: (scope: 'selected' | 'all') => void;
+  autoPivotProgress?: { progress: number; label: string } | null;
 }
 
 export const TrackingPanel: React.FC<TrackingPanelProps> = ({
@@ -37,6 +39,8 @@ export const TrackingPanel: React.FC<TrackingPanelProps> = ({
   onClearTracking,
   onClearTrackingData,
   trackingProgress,
+  onAutoPivotToHead,
+  autoPivotProgress,
 }) => {
   const trackers = selectedSegment?.trackers || [];
   const hasTrackingData = (selectedSegment?.trackingData?.length || 0) > 0;
@@ -306,6 +310,41 @@ export const TrackingPanel: React.FC<TrackingPanelProps> = ({
           >
             Clear All Trackers
           </button>
+        </div>
+      )}
+      {/* Auto-Pivot to Head Section */}
+      {onAutoPivotToHead && selectedSegment && selectedSegment.type !== 'audio' && selectedSegment.type !== 'blank' && (
+        <div className="mt-4 pt-4 border-t border-[#333]">
+          <div className="text-xs font-semibold text-cyan-400 mb-2">AUTO-PIVOT TO HEAD</div>
+          <p className="text-[10px] text-gray-500 mb-2">
+            Detect head position and bake as pivot keyframes. Rotation/scale will center on the person's face.
+          </p>
+          {autoPivotProgress ? (
+            <div className="space-y-1">
+              <div className="text-[10px] text-gray-400">{autoPivotProgress.label}</div>
+              <div className="w-full h-1.5 bg-[#333] rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-cyan-500 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.round(autoPivotProgress.progress * 100)}%` }}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <button
+                onClick={() => onAutoPivotToHead('selected')}
+                className="w-full py-1.5 bg-cyan-600/20 text-cyan-400 border border-cyan-600/50 rounded hover:bg-cyan-600/30 text-xs font-medium"
+              >
+                Apply to Selected Clip
+              </button>
+              <button
+                onClick={() => onAutoPivotToHead('all')}
+                className="w-full py-1.5 bg-cyan-600/10 text-cyan-300 border border-cyan-600/30 rounded hover:bg-cyan-600/20 text-xs font-medium"
+              >
+                Apply to All Clips
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

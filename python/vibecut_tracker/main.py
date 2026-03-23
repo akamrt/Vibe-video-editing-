@@ -10,7 +10,7 @@ import sys
 import json
 import os
 
-from vibecut_tracker.person_detect import detect_person_mediapipe, track_person_through_segment
+from vibecut_tracker.person_detect import detect_person_mediapipe, track_person_through_segment, track_head_through_segment
 from vibecut_tracker.optical_flow import track_optical_flow
 from vibecut_tracker.template_match import track_template_opencv
 from vibecut_tracker.utils import report_progress
@@ -44,6 +44,13 @@ def handle_track(request: dict) -> dict:
             search_window=options.get('searchWindow', 60),
             sample_interval=sample_interval,
         )
+    elif mode == 'head_center':
+        return track_head_through_segment(
+            video_path, start_time, end_time,
+            sample_interval=sample_interval,
+            initial_x=options.get('initialPersonX'),
+            initial_y=options.get('initialPersonY'),
+        )
     elif mode == 'optical_flow':
         initial_points = options.get('initialPoints', [])
         return track_optical_flow(
@@ -70,7 +77,7 @@ def handle_capabilities(_request: dict) -> dict:
     """Report available tracking capabilities."""
     caps = {
         'success': True,
-        'modes': ['person_center', 'template', 'optical_flow'],
+        'modes': ['person_center', 'head_center', 'template', 'optical_flow'],
         'features': ['mediapipe_pose', 'opencv_optical_flow', 'opencv_template_match'],
     }
 

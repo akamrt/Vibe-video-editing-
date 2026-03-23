@@ -117,6 +117,42 @@ def _extract_torso_center(result) -> tuple[float, float, float] | None:
     return (cx, cy, avg_vis)
 
 
+def _extract_head_center(result) -> tuple[float, float, float] | None:
+    """Extract head center from PoseLandmarker result.
+
+    Returns (centerX_normalized, centerY_normalized, avg_visibility) or None.
+    Head landmarks: 0=nose (weight 2x), 1=left eye inner, 4=right eye inner,
+                    7=left ear, 8=right ear (fallbacks for profile views)
+    """
+    if not result.pose_landmarks or len(result.pose_landmarks) == 0:
+        return None
+
+    landmarks = result.pose_landmarks[0]  # First detected person
+    # (index, weight)
+    head_landmarks = [(0, 2.0), (1, 1.0), (4, 1.0), (7, 1.0), (8, 1.0)]
+
+    visible = []
+    for idx, weight in head_landmarks:
+        if idx < len(landmarks):
+            lm = landmarks[idx]
+            vis = lm.visibility if hasattr(lm, 'visibility') and lm.visibility is not None else 0.5
+            if vis > 0.3:
+                visible.append((lm.x, lm.y, vis, weight))
+
+    if len(visible) == 0:
+        return None
+    # Allow single landmark only if it has high visibility (e.g., just the nose)
+    if len(visible) == 1 and visible[0][2] < 0.6:
+        return None
+
+    total_weight = sum(v[3] for v in visible)
+    cx = sum(v[0] * v[3] for v in visible) / total_weight
+    cy = sum(v[1] * v[3] for v in visible) / total_weight
+    avg_vis = sum(v[2] for v in visible) / len(visible)
+
+    return (cx, cy, avg_vis)
+
+
 def _detect_person_opencv(frame: np.ndarray, vw: int, vh: int) -> tuple[float, float] | None:
     """Detect person region using OpenCV-only methods (no MediaPipe needed).
 
@@ -603,6 +639,275 @@ def track_person_through_segment(
     report_progress(1.0, 'Tracking complete')
 
     method = 'mediapipe' if mediapipe_detections > 0 else 'optical_flow'
+    sys.stderr.write(
+        f'[vibecut-tracker] Done: {len(positions)} positions, '
+        f'{mediapipe_detections} mediapipe, {optical_flow_detections} optical_flow, '
+        f'{coast_count} coasted, {failed_frames} failed frames\n'
+    )
+    sys.stderr.flush()
+
+    return {
+        'success': True,
+        'positions': positions,
+        'videoWidth': vw,
+        'videoHeight': vh,
+        'frameCount': frame_count,
+        'method': method,
+    }
+
+
+def track_head_through_segment(
+    video_path: str,
+    start_time: float,
+    end_time: float | None,
+    sample_interval: float = 0.1,
+    initial_x: float | None = None,
+    initial_y: float | None = None,
+) -> dict:
+    """Track a person's head through a video segment using MediaPipe every frame.
+
+    Identical to track_person_through_segment but targets head landmarks
+    (nose, eyes, ears) instead of torso landmarks.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return {'success': False, 'error': f'Cannot open video: {video_path}'}
+
+    info = get_video_info(cap)
+    vw, vh = info['width'], info['height']
+    sys.stderr.write(f'[vibecut-tracker] Video info: {vw}x{vh}, {info["fps"]}fps, {info["totalFrames"]} frames, duration={info["duration"]:.1f}s\n')
+    sys.stderr.flush()
+
+    if end_time is None:
+        end_time = info['duration']
+
+    sys.stderr.write(f'[vibecut-tracker] Head tracking from {start_time:.1f}s to {end_time:.1f}s (sample_interval={sample_interval})\n')
+    sys.stderr.flush()
+
+    # --- Configuration ---
+    COAST_MAX_FRAMES = 10
+
+    positions = []
+    frame_count = 0
+
+    total_frames = int((end_time - start_time) / sample_interval)
+    if total_frames <= 0:
+        cap.release()
+        return {'success': False, 'error': f'Invalid time range: {start_time}-{end_time}'}
+
+    fps = info['fps']
+    frames_per_sample = max(1, round(sample_interval * fps))
+
+    cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
+
+    actual_pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+    sys.stderr.write(f'[vibecut-tracker] Seeked to {start_time:.1f}s, landed at {actual_pos_ms/1000:.2f}s '
+                     f'(reading every {frames_per_sample} frames for {sample_interval}s intervals)\n')
+    sys.stderr.flush()
+
+    ret, test_frame = cap.read()
+    if not ret or test_frame is None:
+        sys.stderr.write(f'[vibecut-tracker] WARNING: Cannot read frame after seek to {start_time}s. Trying from 0...\n')
+        sys.stderr.flush()
+        cap.set(cv2.CAP_PROP_POS_MSEC, 0)
+        ret, test_frame = cap.read()
+        if not ret or test_frame is None:
+            cap.release()
+            return {'success': False, 'error': 'Cannot read any frames from video'}
+        skip_frames = int(start_time * fps)
+        for _ in range(skip_frames):
+            cap.read()
+
+    sys.stderr.write(f'[vibecut-tracker] First frame OK: {test_frame.shape}, dtype={test_frame.dtype}\n')
+    sys.stderr.flush()
+
+    landmarker = None
+    if HAS_MEDIAPIPE:
+        landmarker = _create_landmarker('VIDEO')
+        if landmarker is None:
+            sys.stderr.write('[vibecut-tracker] WARNING: MediaPipe landmarker creation failed\n')
+            sys.stderr.flush()
+
+    if landmarker is None and initial_x is None:
+        sys.stderr.write('[vibecut-tracker] Using OpenCV fallback for initial person detection\n')
+        sys.stderr.flush()
+        detection = _detect_person_opencv(test_frame, vw, vh)
+        if detection is not None:
+            initial_x, initial_y = detection
+            sys.stderr.write(f'[vibecut-tracker] OpenCV detected person at ({initial_x:.0f}, {initial_y:.0f})\n')
+            sys.stderr.flush()
+        else:
+            initial_x = vw / 2
+            initial_y = vh * 0.4
+            sys.stderr.write(f'[vibecut-tracker] No detection, using center of frame ({initial_x:.0f}, {initial_y:.0f})\n')
+            sys.stderr.flush()
+
+    # Optical flow setup — only used as fallback when MediaPipe fails
+    prev_gray = None
+    prev_points = None
+    lk_params = dict(
+        winSize=(31, 31),
+        maxLevel=4,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+    )
+
+    mediapipe_detections = 0
+    optical_flow_detections = 0
+    coast_count = 0
+    failed_frames = 0
+
+    last_x = initial_x
+    last_y = initial_y
+    lost_streak = 0
+
+    current_time = start_time
+    sequential_frame_idx = 0
+    frame = test_frame
+
+    while current_time <= end_time:
+        if frame is None:
+            failed_frames += 1
+            if last_x is not None and lost_streak < COAST_MAX_FRAMES:
+                lost_streak += 1
+                positions.append({
+                    'time': round(current_time, 3),
+                    'x': round(clamp(last_x, 0, vw), 1),
+                    'y': round(clamp(last_y, 0, vh), 1),
+                    'confidence': round(max(0, 40 - lost_streak * 5), 1),
+                })
+            if failed_frames <= 3:
+                sys.stderr.write(f'[vibecut-tracker] Cannot read frame at t={current_time:.2f}s\n')
+                sys.stderr.flush()
+        else:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            detected_x, detected_y, confidence = None, None, 0.0
+
+            # --- Step 1: Try MediaPipe head detection ---
+            if landmarker is not None:
+                try:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp_image_mod.Image(image_format=mp_image_mod.ImageFormat.SRGB, data=rgb)
+                    timestamp_ms = int(current_time * 1000)
+                    result = landmarker.detect_for_video(mp_image, timestamp_ms)
+
+                    center = _extract_head_center(result)
+                    if center is not None:
+                        cx_norm, cy_norm, avg_vis = center
+                        detected_x = cx_norm * vw
+                        detected_y = cy_norm * vh
+                        confidence = avg_vis
+                        mediapipe_detections += 1
+                        lost_streak = 0
+
+                        # Use head landmarks for optical flow anchors
+                        torso_pts = _get_torso_landmarks(result, vw, vh)
+                        if torso_pts and len(torso_pts) >= 2:
+                            prev_points = np.array(torso_pts, dtype=np.float32).reshape(-1, 1, 2)
+                        else:
+                            prev_points = np.array([[detected_x, detected_y]], dtype=np.float32).reshape(-1, 1, 2)
+                except Exception as e:
+                    if frame_count < 3:
+                        sys.stderr.write(f'[vibecut-tracker] MediaPipe detect_for_video failed: {e}\n')
+                        sys.stderr.write(traceback.format_exc())
+                        sys.stderr.flush()
+
+            # --- Step 2: Optical flow fallback ---
+            if detected_x is None and prev_gray is not None and prev_points is not None and prev_points.shape[0] > 0:
+                try:
+                    new_points, status, _ = cv2.calcOpticalFlowPyrLK(
+                        prev_gray, gray, prev_points, None, **lk_params
+                    )
+                    if status is not None:
+                        good_mask = status.flatten() == 1
+                        if np.any(good_mask):
+                            good_pts = new_points[good_mask].reshape(-1, 2)
+
+                            back_points, back_status, _ = cv2.calcOpticalFlowPyrLK(
+                                gray, prev_gray, new_points[good_mask].reshape(-1, 1, 2),
+                                None, **lk_params
+                            )
+                            if back_status is not None:
+                                orig_pts = prev_points[good_mask].reshape(-1, 2)
+                                back_pts = back_points.reshape(-1, 2)
+                                fb_error = np.sqrt(np.sum((orig_pts - back_pts) ** 2, axis=1))
+                                fb_good = fb_error < 5.0
+                                combined_mask = back_status.flatten() == 1
+                                combined_mask = combined_mask & fb_good
+
+                                if np.any(combined_mask):
+                                    validated_pts = good_pts[combined_mask]
+                                    detected_x = float(np.mean(validated_pts[:, 0]))
+                                    detected_y = float(np.mean(validated_pts[:, 1]))
+                                    confidence = 0.6
+                                    prev_points = new_points[good_mask][combined_mask].reshape(-1, 1, 2)
+                                    optical_flow_detections += 1
+                                    lost_streak = 0
+                            if detected_x is None:
+                                detected_x = float(np.mean(good_pts[:, 0]))
+                                detected_y = float(np.mean(good_pts[:, 1]))
+                                confidence = 0.3
+                                prev_points = new_points[good_mask].reshape(-1, 1, 2)
+                                optical_flow_detections += 1
+                except Exception as e:
+                    if frame_count < 5:
+                        sys.stderr.write(f'[vibecut-tracker] Optical flow failed at frame {frame_count}: {e}\n')
+                        sys.stderr.flush()
+
+            # --- Step 3: Initial position fallback (first frame only) ---
+            if detected_x is None and frame_count == 0:
+                if initial_x is not None and initial_y is not None:
+                    detected_x = initial_x
+                    detected_y = initial_y
+                    confidence = 0.5
+                    prev_points = np.array([[detected_x, detected_y]], dtype=np.float32).reshape(-1, 1, 2)
+
+            # --- Step 4: Coast on last known position ---
+            if detected_x is None and last_x is not None:
+                lost_streak += 1
+                if lost_streak <= COAST_MAX_FRAMES:
+                    detected_x = last_x
+                    detected_y = last_y
+                    confidence = max(0.1, 0.5 - lost_streak * 0.05)
+                    coast_count += 1
+
+            if detected_x is not None:
+                last_x = detected_x
+                last_y = detected_y
+
+                positions.append({
+                    'time': round(current_time, 3),
+                    'x': round(clamp(detected_x, 0, vw), 1),
+                    'y': round(clamp(detected_y, 0, vh), 1),
+                    'confidence': round(clamp(confidence, 0, 1) * 100, 1),
+                })
+
+            prev_gray = gray
+
+        frame_count += 1
+        current_time += sample_interval
+
+        if frame_count % 10 == 0:
+            progress = frame_count / total_frames
+            report_progress(min(0.95, 0.1 + progress * 0.85), f'Tracking frame {frame_count}/{total_frames}')
+
+        frame = None
+        for skip_i in range(frames_per_sample):
+            ret, f = cap.read()
+            if not ret:
+                frame = None
+                break
+            if skip_i == frames_per_sample - 1:
+                frame = f
+
+    if landmarker is not None:
+        landmarker.close()
+    cap.release()
+
+    positions = _smooth_positions(positions, window=7)
+
+    report_progress(1.0, 'Tracking complete')
+
+    method = 'mediapipe_head' if mediapipe_detections > 0 else 'optical_flow'
     sys.stderr.write(
         f'[vibecut-tracker] Done: {len(positions)} positions, '
         f'{mediapipe_detections} mediapipe, {optical_flow_detections} optical_flow, '
