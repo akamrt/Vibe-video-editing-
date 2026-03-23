@@ -342,7 +342,8 @@ function App() {
     | { type: 'segments'; segments: Segment[] }
     | { type: 'fillerClean'; segments: Segment[]; library: MediaItem[] }
     | { type: 'transcriptEdit'; segments: Segment[]; removedWords: RemovedWord[]; library?: MediaItem[] }
-    | { type: 'transcriptRestore'; segments: Segment[]; removedWords: RemovedWord[]; library?: MediaItem[] };
+    | { type: 'transcriptRestore'; segments: Segment[]; removedWords: RemovedWord[]; library?: MediaItem[] }
+    | { type: 'titleLayer'; titleLayer: TitleLayer };
 
   const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
   const [redoStack, setRedoStack] = useState<UndoAction[]>([]);
@@ -1189,6 +1190,13 @@ function App() {
           library: project.library.map(m => ({ ...m, analysis: m.analysis ? { ...m.analysis, events: [...m.analysis.events] } : null }))
         });
         setProject(prev => ({ ...prev, segments: action.segments, library: action.library }));
+        break;
+      }
+      case 'titleLayer': {
+        if (project.titleLayer) {
+          pushToStack({ type: 'titleLayer', titleLayer: { ...project.titleLayer } });
+          setProject(prev => ({ ...prev, titleLayer: action.titleLayer }));
+        }
         break;
       }
       case 'transcriptEdit':
@@ -2300,6 +2308,9 @@ function App() {
   };
 
   const handleAddToTimeline = (item: MediaItem, importMode: 'both' | 'video' | 'audio' = 'both') => {
+    // Snapshot before inserting so the add can be undone
+    pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
+
     const insertionTime = project.currentTime;
     const isAudio = importMode === 'audio' || !!item.isAudioOnly;
     const videoOnly = importMode === 'video';
@@ -2347,6 +2358,7 @@ function App() {
 
   const handleSwapMedia = (newItem: MediaItem) => {
     if (selectedSegmentIds.length !== 1) return;
+    pushUndo({ type: 'segments', segments: project.segments.map(s => ({ ...s })) });
     const segId = selectedSegmentIds[0];
     setProject(prev => ({
       ...prev,
@@ -6788,6 +6800,10 @@ function App() {
                           <TransformGizmo
                             safeZoneRef={safeZoneRef as React.RefObject<HTMLDivElement>}
                             elementRef={subtitleGizmoRef as React.RefObject<HTMLDivElement>}
+                            onDragStart={() => {
+                              if (!currentTopMedia || subEvtIdxG < 0) return;
+                              pushUndo({ type: 'dialogueEvent', mediaId: currentTopMedia.id, index: subEvtIdxG, event: { ...activeSubtitleEvent } });
+                            }}
                             translateX={activeSubtitleEvent.translateX || 0}
                             translateY={activeSubtitleEvent.translateY || 0}
                             scale={kfG?.scale ?? 1}
@@ -6850,6 +6866,9 @@ function App() {
                           <TransformGizmo
                             safeZoneRef={safeZoneRef as React.RefObject<HTMLDivElement>}
                             elementRef={titleGizmoRef as React.RefObject<HTMLDivElement>}
+                            onDragStart={() => {
+                              if (project.titleLayer) pushUndo({ type: 'titleLayer', titleLayer: { ...project.titleLayer } });
+                            }}
                             translateX={titleKfG?.translateX ?? 0}
                             translateY={titleKfG?.translateY ?? 0}
                             scale={titleKfG?.scale ?? 1}
@@ -6926,6 +6945,9 @@ function App() {
                     <TransformGizmo
                       safeZoneRef={viewportContainerRef as React.RefObject<HTMLDivElement>}
                       elementRef={clipGizmoRef as React.RefObject<HTMLDivElement>}
+                      onDragStart={() => {
+                        pushUndo({ type: 'keyframes', segmentId: seg.id, keyframes: seg.keyframes || [] });
+                      }}
                       translateX={kfC.translateX}
                       translateY={kfC.translateY}
                       scale={kfC.scale}

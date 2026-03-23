@@ -16,6 +16,7 @@ export interface TransformGizmoProps {
   rotation: number;     // degrees
   pivotX: number | null;  // safe-zone % or null = element center
   pivotY: number | null;
+  onDragStart?: () => void;
   onTranslateChange: (tx: number, ty: number, commit: boolean) => void;
   onScaleChange: (scale: number, commit: boolean) => void;
   onRotationChange: (rotation: number, commit: boolean) => void;
@@ -50,6 +51,7 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
   rotation,
   pivotX,
   pivotY,
+  onDragStart,
   onTranslateChange,
   onScaleChange,
   onRotationChange,
@@ -96,6 +98,8 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
     e.preventDefault();
     // Capture so pointermove/up always reach this element
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    // Notify parent before any state changes so it can snapshot undo
+    onDragStart?.();
 
     const pc = getPivotClient();
     const dx = e.clientX - pc.x;
