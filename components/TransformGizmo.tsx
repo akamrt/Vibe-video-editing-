@@ -1,32 +1,21 @@
 /**
  * TransformGizmo — SVG overlay for subtitle/title transform editing.
  *
- * Shows:
- *  - Dashed selection bounding box (rotated with element)
- *  - 4 corner scale handles
- *  - Rotation handle (circle above top-center, connected by line)
- *  - Pivot indicator (orange diamond, draggable anywhere in safe zone)
- *
- * All screen coordinates are in safe-zone pixel space (0,0 = top-left of safeZoneRef).
- * Pivot is stored/emitted in safe-zone % (0–100 for both axes).
- *
- * Drag tracking uses window-level pointermove/pointerup listeners so that
- * pointer-events: none on the SVG container does not interfere.
+ * Each interactive handle uses setPointerCapture so that pointermove/pointerup
+ * are always delivered to the capturing element, even when the pointer moves
+ * over video elements (which would otherwise steal or cancel the drag).
  */
 import React, { useCallback, useRef } from 'react';
 
 export interface TransformGizmoProps {
   safeZoneRef: React.RefObject<HTMLDivElement | null>;
   elementRef: React.RefObject<HTMLDivElement | null>;
-  // Current transform values
-  translateX: number;   // safe-zone % (informational, not used for positioning here)
-  translateY: number;   // safe-zone %
+  translateX: number;
+  translateY: number;
   scale: number;
   rotation: number;     // degrees
-  // Pivot in safe-zone % — null means "element center" (default CSS behavior)
-  pivotX: number | null;
+  pivotX: number | null;  // safe-zone % or null = element center
   pivotY: number | null;
-  // Callbacks — emit new values. commit=false during drag, commit=true on release.
   onTranslateChange: (tx: number, ty: number, commit: boolean) => void;
   onScaleChange: (scale: number, commit: boolean) => void;
   onRotationChange: (rotation: number, commit: boolean) => void;
@@ -34,8 +23,8 @@ export interface TransformGizmoProps {
   visible: boolean;
 }
 
-const HANDLE_SIZE = 8;    // corner handle square half-size px
-const ROTATE_OFFSET = 30; // px above element top-center for rotation handle
+const HANDLE_SIZE = 10;
+const ROTATE_OFFSET = 32;
 
 type DragType = 'translate' | 'scale' | 'rotate' | 'pivot';
 
@@ -46,10 +35,10 @@ interface DragState {
   startTx: number;
   startTy: number;
   startScale: number;
-  startRotation: number;
   startDistFromPivot: number;
-  startAngle: number;  // atan2 angle at drag start (raw, not offset by rotation)
-  pivotAtStart: { x: number; y: number };  // pivot px snapshot at drag start
+  startAngle: number;
+  // pivot in CLIENT (viewport) coords for correct distance/angle math
+  pivotClient: { x: number; y: number };
 }
 
 export const TransformGizmo: React.FC<TransformGizmoProps> = ({
@@ -67,344 +56,266 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
   onPivotChange,
   visible,
 }) => {
-  const dragState = useRef<DragState | null>(null);
+  const drag = useRef<DragState | null>(null);
 
-  // ---- Coordinate helpers ----
+  // ── Coordinate helpers ──────────────────────────────────────────────────────
 
-  const getSafeZoneSize = useCallback((): { width: number; height: number } => {
-    const el = safeZoneRef.current;
-    if (!el) return { width: 1, height: 1 };
-    return { width: el.clientWidth || 1, height: el.clientHeight || 1 };
-  }, [safeZoneRef]);
+  const getSafeZoneRect = useCallback(() =>
+    safeZoneRef.current?.getBoundingClientRect() ?? null
+  , [safeZoneRef]);
 
-  /** Element bounding rect in safe-zone pixel coordinates */
-  const getElemRect = useCallback(() => {
-    const safeEl = safeZoneRef.current;
-    const elemEl = elementRef.current;
-    if (!safeEl || !elemEl) return null;
-    const sr = safeEl.getBoundingClientRect();
-    const er = elemEl.getBoundingClientRect();
-    return {
-      left: er.left - sr.left,
-      top: er.top - sr.top,
-      width: er.width,
-      height: er.height,
-    };
-  }, [safeZoneRef, elementRef]);
-
-  /** Current pivot in safe-zone pixels */
-  const getPivotPx = useCallback((): { x: number; y: number } => {
-    const sz = getSafeZoneSize();
+  /** Pivot in SAFE-ZONE-RELATIVE px — used for SVG rendering */
+  const getPivotSZ = useCallback((): { x: number; y: number } => {
+    const sz = safeZoneRef.current;
+    if (!sz) return { x: 0, y: 0 };
+    const w = sz.clientWidth;
+    const h = sz.clientHeight;
     if (pivotX !== null && pivotY !== null) {
-      return { x: (pivotX / 100) * sz.width, y: (pivotY / 100) * sz.height };
+      return { x: (pivotX / 100) * w, y: (pivotY / 100) * h };
     }
-    // Default: element center
-    const rect = getElemRect();
-    if (rect) return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    return { x: sz.width / 2, y: sz.height * 0.85 };
-  }, [pivotX, pivotY, getSafeZoneSize, getElemRect]);
+    const el = elementRef.current;
+    if (el) {
+      const sr = sz.getBoundingClientRect();
+      const er = el.getBoundingClientRect();
+      return { x: er.left - sr.left + er.width / 2, y: er.top - sr.top + er.height / 2 };
+    }
+    return { x: w / 2, y: h * 0.85 };
+  }, [pivotX, pivotY, safeZoneRef, elementRef]);
 
-  // ---- Drag handlers ----
+  /** Pivot in CLIENT (viewport) px — used for drag math against e.clientX/Y */
+  const getPivotClient = useCallback((): { x: number; y: number } => {
+    const sr = safeZoneRef.current?.getBoundingClientRect();
+    const pSZ = getPivotSZ();
+    return sr ? { x: sr.left + pSZ.x, y: sr.top + pSZ.y } : pSZ;
+  }, [safeZoneRef, getPivotSZ]);
 
-  /** Pivot in CLIENT (viewport) coordinates — for use in drag math against e.clientX/Y */
-  const getPivotClientPx = useCallback((): { x: number; y: number } => {
-    const safeEl = safeZoneRef.current;
-    const sr = safeEl?.getBoundingClientRect() ?? { left: 0, top: 0 };
-    const pivotSZ = getPivotPx(); // safe-zone-relative
-    return { x: sr.left + pivotSZ.x, y: sr.top + pivotSZ.y };
-  }, [safeZoneRef, getPivotPx]);
+  // ── Shared drag helpers ─────────────────────────────────────────────────────
 
-  const startDrag = useCallback((
-    e: React.PointerEvent,
-    type: DragType,
-  ) => {
+  const beginDrag = useCallback((e: React.PointerEvent, type: DragType) => {
     e.stopPropagation();
     e.preventDefault();
+    // Capture so pointermove/up always reach this element
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
 
-    // Use CLIENT coordinates for pivot so distances/angles against e.clientX/Y are correct
-    const pivot = getPivotClientPx();
-    const dx = e.clientX - pivot.x;
-    const dy = e.clientY - pivot.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+    const pc = getPivotClient();
+    const dx = e.clientX - pc.x;
+    const dy = e.clientY - pc.y;
 
-    const ds: DragState = {
+    drag.current = {
       type,
       startClientX: e.clientX,
       startClientY: e.clientY,
       startTx: translateX,
       startTy: translateY,
       startScale: scale,
-      startRotation: rotation,
-      startDistFromPivot: dist,
-      startAngle: angle - rotation,
-      pivotAtStart: pivot,
+      startDistFromPivot: Math.sqrt(dx * dx + dy * dy),
+      startAngle: Math.atan2(dy, dx) * 180 / Math.PI - rotation,
+      pivotClient: pc,
     };
-    dragState.current = ds;
+  }, [getPivotClient, translateX, translateY, scale, rotation]);
 
-    // ── Window-level listeners so pointer-events:none on SVG doesn't matter ──
+  const moveDrag = useCallback((e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    e.preventDefault();
 
-    const handleMove = (ev: PointerEvent) => {
-      const d = dragState.current;
-      if (!d) return;
-      const sz = getSafeZoneSize();
+    const sr = safeZoneRef.current;
+    if (!sr) return;
+    const szW = sr.clientWidth || 1;
+    const szH = sr.clientHeight || 1;
 
-      if (d.type === 'translate') {
-        const ddx = (ev.clientX - d.startClientX) / sz.width * 100;
-        const ddy = (ev.clientY - d.startClientY) / sz.height * 100;
-        onTranslateChange(d.startTx + ddx, d.startTy + ddy, false);
+    if (d.type === 'translate') {
+      const ddx = (e.clientX - d.startClientX) / szW * 100;
+      const ddy = (e.clientY - d.startClientY) / szH * 100;
+      onTranslateChange(d.startTx + ddx, d.startTy + ddy, false);
 
-      } else if (d.type === 'rotate') {
-        const ddx = ev.clientX - d.pivotAtStart.x;
-        const ddy = ev.clientY - d.pivotAtStart.y;
-        const a = Math.atan2(ddy, ddx) * 180 / Math.PI;
-        onRotationChange(a - d.startAngle, false);
+    } else if (d.type === 'rotate') {
+      const dx = e.clientX - d.pivotClient.x;
+      const dy = e.clientY - d.pivotClient.y;
+      onRotationChange(Math.atan2(dy, dx) * 180 / Math.PI - d.startAngle, false);
 
-      } else if (d.type === 'scale') {
-        const ddx = ev.clientX - d.pivotAtStart.x;
-        const ddy = ev.clientY - d.pivotAtStart.y;
-        const dist2 = Math.sqrt(ddx * ddx + ddy * ddy);
-        if (d.startDistFromPivot > 2) {
-          onScaleChange(Math.max(0.05, d.startScale * (dist2 / d.startDistFromPivot)), false);
-        }
-
-      } else if (d.type === 'pivot') {
-        const safeEl = safeZoneRef.current;
-        if (!safeEl) return;
-        const sr = safeEl.getBoundingClientRect();
-        const px = ((ev.clientX - sr.left) / sr.width) * 100;
-        const py = ((ev.clientY - sr.top) / sr.height) * 100;
-        onPivotChange(
-          Math.max(-50, Math.min(150, px)),
-          Math.max(-50, Math.min(150, py)),
-        );
+    } else if (d.type === 'scale') {
+      const dx = e.clientX - d.pivotClient.x;
+      const dy = e.clientY - d.pivotClient.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (d.startDistFromPivot > 2) {
+        onScaleChange(Math.max(0.05, d.startScale * dist / d.startDistFromPivot), false);
       }
-    };
 
-    const handleUp = (ev: PointerEvent) => {
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
+    } else if (d.type === 'pivot') {
+      const srBcr = sr.getBoundingClientRect();
+      onPivotChange(
+        Math.max(-50, Math.min(150, (e.clientX - srBcr.left) / srBcr.width * 100)),
+        Math.max(-50, Math.min(150, (e.clientY - srBcr.top) / srBcr.height * 100)),
+      );
+    }
+  }, [safeZoneRef, onTranslateChange, onRotationChange, onScaleChange, onPivotChange]);
 
-      const d = dragState.current;
-      if (!d) return;
-      dragState.current = null;
+  const endDrag = useCallback((e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    (e.currentTarget as Element).releasePointerCapture(e.pointerId);
+    drag.current = null;
 
-      const sz = getSafeZoneSize();
+    const sr = safeZoneRef.current;
+    if (!sr) return;
+    const szW = sr.clientWidth || 1;
+    const szH = sr.clientHeight || 1;
 
-      if (d.type === 'translate') {
-        const ddx = (ev.clientX - d.startClientX) / sz.width * 100;
-        const ddy = (ev.clientY - d.startClientY) / sz.height * 100;
-        onTranslateChange(d.startTx + ddx, d.startTy + ddy, true);
+    if (d.type === 'translate') {
+      const ddx = (e.clientX - d.startClientX) / szW * 100;
+      const ddy = (e.clientY - d.startClientY) / szH * 100;
+      onTranslateChange(d.startTx + ddx, d.startTy + ddy, true);
 
-      } else if (d.type === 'rotate') {
-        const ddx = ev.clientX - d.pivotAtStart.x;
-        const ddy = ev.clientY - d.pivotAtStart.y;
-        const a = Math.atan2(ddy, ddx) * 180 / Math.PI;
-        onRotationChange(a - d.startAngle, true);
+    } else if (d.type === 'rotate') {
+      const dx = e.clientX - d.pivotClient.x;
+      const dy = e.clientY - d.pivotClient.y;
+      onRotationChange(Math.atan2(dy, dx) * 180 / Math.PI - d.startAngle, true);
 
-      } else if (d.type === 'scale') {
-        const ddx = ev.clientX - d.pivotAtStart.x;
-        const ddy = ev.clientY - d.pivotAtStart.y;
-        const dist2 = Math.sqrt(ddx * ddx + ddy * ddy);
-        if (d.startDistFromPivot > 2) {
-          onScaleChange(Math.max(0.05, d.startScale * (dist2 / d.startDistFromPivot)), true);
-        }
+    } else if (d.type === 'scale') {
+      const dx = e.clientX - d.pivotClient.x;
+      const dy = e.clientY - d.pivotClient.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (d.startDistFromPivot > 2) {
+        onScaleChange(Math.max(0.05, d.startScale * dist / d.startDistFromPivot), true);
       }
-    };
+    }
+  }, [safeZoneRef, onTranslateChange, onRotationChange, onScaleChange]);
 
-    window.addEventListener('pointermove', handleMove);
-    window.addEventListener('pointerup', handleUp);
-  }, [getPivotClientPx, translateX, translateY, scale, rotation, getSafeZoneSize,
-      onTranslateChange, onRotationChange, onScaleChange, onPivotChange, safeZoneRef]);
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   if (!visible) return null;
 
-  const rect = getElemRect();
-  if (!rect) return null;
+  const safeEl = safeZoneRef.current;
+  const elemEl = elementRef.current;
+  if (!safeEl || !elemEl) return null;
 
-  const sz = getSafeZoneSize();
-  const pivotPx = getPivotPx();
-  const rotRad = (rotation * Math.PI) / 180;
+  const szW = safeEl.clientWidth;
+  const szH = safeEl.clientHeight;
+  const sr = safeEl.getBoundingClientRect();
+  const er = elemEl.getBoundingClientRect();
 
-  // Rotate a point around the pivot
-  const rotateAround = (x: number, y: number) => {
-    const dx = x - pivotPx.x;
-    const dy = y - pivotPx.y;
+  // Element rect in safe-zone-relative coords
+  const rect = {
+    left: er.left - sr.left,
+    top: er.top - sr.top,
+    width: er.width,
+    height: er.height,
+  };
+
+  const { x: px, y: py } = getPivotSZ();
+  const rotRad = rotation * Math.PI / 180;
+
+  const rot = (x: number, y: number) => {
+    const dx = x - px, dy = y - py;
     return {
-      x: pivotPx.x + dx * Math.cos(rotRad) - dy * Math.sin(rotRad),
-      y: pivotPx.y + dx * Math.sin(rotRad) + dy * Math.cos(rotRad),
+      x: px + dx * Math.cos(rotRad) - dy * Math.sin(rotRad),
+      y: py + dx * Math.sin(rotRad) + dy * Math.cos(rotRad),
     };
   };
 
-  // Element center (unrotated)
   const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-
-  // Rotation handle: above top-center of element, then rotated
-  const topCenter = rotateAround(cx, rect.top - ROTATE_OFFSET);
-  const topCenterOnBox = rotateAround(cx, rect.top);
-
-  // Corners rotated around pivot
   const corners = [
-    rotateAround(rect.left, rect.top),
-    rotateAround(rect.left + rect.width, rect.top),
-    rotateAround(rect.left + rect.width, rect.top + rect.height),
-    rotateAround(rect.left, rect.top + rect.height),
+    rot(rect.left,              rect.top),
+    rot(rect.left + rect.width, rect.top),
+    rot(rect.left + rect.width, rect.top + rect.height),
+    rot(rect.left,              rect.top + rect.height),
   ];
+  const boxPath = corners.map((c, i) => `${i === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ') + ' Z';
 
-  const cornerPath = corners.map((c, i) => `${i === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ') + ' Z';
+  const rotHandle = rot(cx, rect.top - ROTATE_OFFSET);
+  const rotHandleBase = rot(cx, rect.top);
 
-  // Pivot diamond
-  const { x: px, y: py } = pivotPx;
   const D = 7;
-  const diamondPath = `M${px},${(py - D).toFixed(1)} L${(px + D).toFixed(1)},${py} L${px},${(py + D).toFixed(1)} L${(px - D).toFixed(1)},${py} Z`;
+  const pivotPath = `M${px},${(py-D).toFixed(1)} L${(px+D).toFixed(1)},${py} L${px},${(py+D).toFixed(1)} L${(px-D).toFixed(1)},${py} Z`;
+
+  const dragProps = (type: DragType, cursor: string) => ({
+    style: { pointerEvents: 'auto' as const, cursor },
+    onPointerDown: (e: React.PointerEvent) => beginDrag(e, type),
+    onPointerMove: moveDrag,
+    onPointerUp: endDrag,
+    onPointerCancel: (e: React.PointerEvent) => {
+      drag.current = null;
+      try { (e.currentTarget as Element).releasePointerCapture(e.pointerId); } catch {}
+    },
+  });
 
   return (
     <svg
       style={{
-        position: 'absolute',
-        left: 0,
-        top: 0,
-        width: sz.width,
-        height: sz.height,
-        overflow: 'visible',
-        pointerEvents: 'none',
-        zIndex: 9999,
+        position: 'absolute', left: 0, top: 0,
+        width: szW, height: szH,
+        overflow: 'visible', pointerEvents: 'none', zIndex: 9999,
       }}
     >
       <defs>
-        <filter id="gizmo-dropshadow" x="-50%" y="-50%" width="200%" height="200%">
-          <feDropShadow dx="0" dy="0" stdDeviation="1.5" floodColor="#000" floodOpacity="0.8" />
+        <filter id="gz-shadow" x="-50%" y="-50%" width="200%" height="200%">
+          <feDropShadow dx="0" dy="0" stdDeviation="2" floodColor="#000" floodOpacity="0.9" />
         </filter>
       </defs>
 
-      {/* ── Bounding box (dashed, rotated) ── */}
-      <path
-        d={cornerPath}
-        fill="none"
-        stroke="#00d4ff"
-        strokeWidth={1.5}
-        strokeDasharray="5 3"
-        opacity={0.9}
-      />
+      {/* Bounding box */}
+      <path d={boxPath} fill="none" stroke="#00d4ff" strokeWidth={1.5} strokeDasharray="5 3" opacity={0.9} />
 
-      {/* Invisible fill for move dragging */}
-      <path
-        d={cornerPath}
-        fill="transparent"
-        style={{ pointerEvents: 'auto', cursor: 'move' }}
-        onPointerDown={(e) => startDrag(e, 'translate')}
-      />
+      {/* Move zone (filled box) */}
+      <path d={boxPath} fill="rgba(0,212,255,0.04)" {...dragProps('translate', 'move')} />
 
-      {/* ── Rotation line: from box top-center to rotation handle ── */}
-      <line
-        x1={topCenterOnBox.x.toFixed(1)}
-        y1={topCenterOnBox.y.toFixed(1)}
-        x2={topCenter.x.toFixed(1)}
-        y2={topCenter.y.toFixed(1)}
-        stroke="#00d4ff"
-        strokeWidth={1}
-        opacity={0.5}
-      />
+      {/* Rotation stem */}
+      <line x1={rotHandleBase.x.toFixed(1)} y1={rotHandleBase.y.toFixed(1)}
+            x2={rotHandle.x.toFixed(1)} y2={rotHandle.y.toFixed(1)}
+            stroke="#00d4ff" strokeWidth={1} opacity={0.5} style={{ pointerEvents: 'none' }} />
 
-      {/* ── Rotation handle ── */}
-      <circle
-        cx={topCenter.x}
-        cy={topCenter.y}
-        r={9}
-        fill="#111827"
-        stroke="#00d4ff"
-        strokeWidth={1.5}
-        filter="url(#gizmo-dropshadow)"
-        style={{ pointerEvents: 'auto', cursor: 'crosshair' }}
-        onPointerDown={(e) => startDrag(e, 'rotate')}
-      />
-      {/* Rotation arc icon */}
-      <path
-        d={`M${(topCenter.x - 4).toFixed(1)},${(topCenter.y + 2).toFixed(1)} A5,5 0 1,1 ${(topCenter.x + 4).toFixed(1)},${(topCenter.y + 2).toFixed(1)}`}
-        fill="none"
-        stroke="#00d4ff"
-        strokeWidth={1.5}
-        strokeLinecap="round"
-        style={{ pointerEvents: 'none' }}
-      />
+      {/* Rotation handle — large hit area (r=14 transparent, r=9 visible) */}
+      <circle cx={rotHandle.x} cy={rotHandle.y} r={14}
+        fill="transparent" {...dragProps('rotate', 'crosshair')} />
+      <circle cx={rotHandle.x} cy={rotHandle.y} r={9}
+        fill="#111827" stroke="#00d4ff" strokeWidth={2} filter="url(#gz-shadow)"
+        style={{ pointerEvents: 'none' }} />
+      {/* Arc icon */}
+      <path d={`M${(rotHandle.x-4).toFixed(1)},${(rotHandle.y+2).toFixed(1)} A5,5 0 1,1 ${(rotHandle.x+4).toFixed(1)},${(rotHandle.y+2).toFixed(1)}`}
+        fill="none" stroke="#00d4ff" strokeWidth={1.5} strokeLinecap="round" style={{ pointerEvents: 'none' }} />
       <polygon
-        points={`${(topCenter.x + 4).toFixed(1)},${(topCenter.y - 1).toFixed(1)} ${(topCenter.x + 4).toFixed(1)},${(topCenter.y + 4).toFixed(1)} ${(topCenter.x + 8).toFixed(1)},${(topCenter.y + 2).toFixed(1)}`}
-        fill="#00d4ff"
-        style={{ pointerEvents: 'none' }}
-      />
+        points={`${(rotHandle.x+4).toFixed(1)},${(rotHandle.y-1).toFixed(1)} ${(rotHandle.x+4).toFixed(1)},${(rotHandle.y+4).toFixed(1)} ${(rotHandle.x+8).toFixed(1)},${(rotHandle.y+2).toFixed(1)}`}
+        fill="#00d4ff" style={{ pointerEvents: 'none' }} />
 
-      {/* ── Corner scale handles ── */}
+      {/* Corner scale handles — large transparent hit area + small visible square */}
       {corners.map((c, i) => (
-        <rect
-          key={i}
-          x={c.x - HANDLE_SIZE / 2}
-          y={c.y - HANDLE_SIZE / 2}
-          width={HANDLE_SIZE}
-          height={HANDLE_SIZE}
-          rx={1}
-          fill="#111827"
-          stroke="#00d4ff"
-          strokeWidth={1.5}
-          filter="url(#gizmo-dropshadow)"
-          style={{ pointerEvents: 'auto', cursor: 'nwse-resize' }}
-          onPointerDown={(e) => startDrag(e, 'scale')}
-        />
+        <g key={i}>
+          <rect x={c.x - 14} y={c.y - 14} width={28} height={28}
+            fill="transparent" {...dragProps('scale', 'nwse-resize')} />
+          <rect x={c.x - HANDLE_SIZE/2} y={c.y - HANDLE_SIZE/2}
+            width={HANDLE_SIZE} height={HANDLE_SIZE} rx={1}
+            fill="#111827" stroke="#00d4ff" strokeWidth={2} filter="url(#gz-shadow)"
+            style={{ pointerEvents: 'none' }} />
+        </g>
       ))}
 
-      {/* ── Pivot indicator (orange diamond) ── */}
-      {/* Cross-hair lines */}
-      <line x1={px - 14} y1={py} x2={px + 14} y2={py} stroke="#ff9500" strokeWidth={1} opacity={0.6} />
-      <line x1={px} y1={py - 14} x2={px} y2={py + 14} stroke="#ff9500" strokeWidth={1} opacity={0.6} />
-      {/* Diamond */}
-      <path
-        d={diamondPath}
-        fill="#111827"
-        stroke="#ff9500"
-        strokeWidth={1.5}
-        filter="url(#gizmo-dropshadow)"
-        style={{ pointerEvents: 'auto', cursor: 'grab' }}
-        onPointerDown={(e) => startDrag(e, 'pivot')}
-      />
-      {/* Dot at center */}
-      <circle cx={px} cy={py} r={2} fill="#ff9500" style={{ pointerEvents: 'none' }} />
+      {/* Pivot crosshair */}
+      <line x1={px-16} y1={py} x2={px+16} y2={py} stroke="#ff9500" strokeWidth={1} opacity={0.7} style={{ pointerEvents: 'none' }} />
+      <line x1={px} y1={py-16} x2={px} y2={py+16} stroke="#ff9500" strokeWidth={1} opacity={0.7} style={{ pointerEvents: 'none' }} />
 
-      {/* ── Info labels ── */}
+      {/* Pivot diamond (large hit area + small visual) */}
+      <circle cx={px} cy={py} r={16} fill="transparent" {...dragProps('pivot', 'grab')} />
+      <path d={pivotPath} fill="#111827" stroke="#ff9500" strokeWidth={2} filter="url(#gz-shadow)"
+        style={{ pointerEvents: 'none' }} />
+      <circle cx={px} cy={py} r={2.5} fill="#ff9500" style={{ pointerEvents: 'none' }} />
+
+      {/* Info labels */}
       {scale !== 1 && (
-        <text
-          x={corners[1].x + 8}
-          y={corners[1].y - 2}
-          fontSize={9}
-          fill="#00d4ff"
-          filter="url(#gizmo-dropshadow)"
-          style={{ pointerEvents: 'none', userSelect: 'none' }}
-        >
+        <text x={corners[1].x + 10} y={corners[1].y - 4} fontSize={10} fill="#00d4ff"
+          filter="url(#gz-shadow)" style={{ pointerEvents: 'none', userSelect: 'none' }}>
           {(scale * 100).toFixed(0)}%
         </text>
       )}
       {Math.abs(rotation) > 0.3 && (
-        <text
-          x={topCenter.x + 13}
-          y={topCenter.y + 4}
-          fontSize={9}
-          fill="#00d4ff"
-          filter="url(#gizmo-dropshadow)"
-          style={{ pointerEvents: 'none', userSelect: 'none' }}
-        >
+        <text x={rotHandle.x + 14} y={rotHandle.y + 4} fontSize={10} fill="#00d4ff"
+          filter="url(#gz-shadow)" style={{ pointerEvents: 'none', userSelect: 'none' }}>
           {rotation.toFixed(1)}°
         </text>
       )}
-      {/* Pivot % coords label */}
-      {(pivotX !== null && pivotY !== null) && (
-        <text
-          x={px + 10}
-          y={py - 10}
-          fontSize={8}
-          fill="#ff9500"
-          opacity={0.8}
-          filter="url(#gizmo-dropshadow)"
-          style={{ pointerEvents: 'none', userSelect: 'none' }}
-        >
+      {pivotX !== null && pivotY !== null && (
+        <text x={px + 12} y={py - 12} fontSize={8} fill="#ff9500" opacity={0.8}
+          filter="url(#gz-shadow)" style={{ pointerEvents: 'none', userSelect: 'none' }}>
           {pivotX.toFixed(0)},{pivotY.toFixed(0)}
         </text>
       )}
