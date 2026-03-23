@@ -372,6 +372,7 @@ function App() {
   const audioSourcesRef = useRef<WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>>(new WeakMap());
 
   const viewportContainerRef = useRef<HTMLDivElement>(null);
+  const viewportOuterRef = useRef<HTMLDivElement>(null);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
 
   // Effective crop region dimensions (accounts for aspect ratio letterboxing)
@@ -1044,25 +1045,20 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedSegmentIds, undoStack, redoStack]);
 
-  // Viewport resize observer - reinitialize when switching pages
+  // Viewport size — measure outer wrapper once on mount, then lock so panel resizing doesn't change resolution
+  const viewportSizeLockedRef = useRef(false);
   useEffect(() => {
-    const container = viewportContainerRef.current;
-    if (!container) {
-      // Reset size when container not available (e.g., on library page)
+    const outer = viewportOuterRef.current;
+    if (!outer) {
       setViewportSize({ width: 0, height: 0 });
+      viewportSizeLockedRef.current = false;
       return;
     }
 
-    // Set initial size immediately
-    setViewportSize({ width: container.clientWidth, height: container.clientHeight });
-
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setViewportSize({ width: entry.contentRect.width, height: entry.contentRect.height });
-      }
-    });
-    resizeObserver.observe(container);
-    return () => resizeObserver.disconnect();
+    if (!viewportSizeLockedRef.current) {
+      setViewportSize({ width: outer.clientWidth, height: outer.clientHeight });
+      viewportSizeLockedRef.current = true;
+    }
   }, [activePage]); // Re-run when page changes
 
   // Push an undo action onto the stack
@@ -6126,10 +6122,17 @@ function App() {
               </div>
             )}
             {viewportMode === 'standard' ? (
+              <div ref={viewportOuterRef} className="flex-1 relative overflow-hidden flex items-center justify-center bg-black">
               <div
                 ref={viewportContainerRef}
-                className="flex-1 relative overflow-hidden group flex items-center justify-center"
-                style={{ cursor: (trackingMode === 'placing-stabilizer' || trackingMode === 'placing-parent') ? 'crosshair' : (transformTarget === 'global' || primarySelectedSegment) ? (isViewportDragging ? 'grabbing' : 'grab') : 'default' }}
+                className="relative overflow-hidden group"
+                style={{
+                  width: viewportSize.width || '100%',
+                  height: viewportSize.height || '100%',
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  cursor: (trackingMode === 'placing-stabilizer' || trackingMode === 'placing-parent') ? 'crosshair' : (transformTarget === 'global' || primarySelectedSegment) ? (isViewportDragging ? 'grabbing' : 'grab') : 'default',
+                }}
                 onMouseDown={(e: React.MouseEvent) => { handleTrackingPanStart(e); handleViewportMouseDown(e); }}
                 onMouseMove={handleViewportMouseMove}
                 onMouseUp={handleViewportMouseUp}
@@ -6582,6 +6585,7 @@ function App() {
                     </div>
                   );
                 })()}
+              </div>
               </div>
             ) : (
               <div ref={viewportContainerRef} className="flex-1 relative overflow-hidden flex items-center justify-center">
