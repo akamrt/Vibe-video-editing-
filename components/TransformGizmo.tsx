@@ -106,6 +106,14 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
 
   // ---- Drag handlers ----
 
+  /** Pivot in CLIENT (viewport) coordinates — for use in drag math against e.clientX/Y */
+  const getPivotClientPx = useCallback((): { x: number; y: number } => {
+    const safeEl = safeZoneRef.current;
+    const sr = safeEl?.getBoundingClientRect() ?? { left: 0, top: 0 };
+    const pivotSZ = getPivotPx(); // safe-zone-relative
+    return { x: sr.left + pivotSZ.x, y: sr.top + pivotSZ.y };
+  }, [safeZoneRef, getPivotPx]);
+
   const startDrag = useCallback((
     e: React.PointerEvent,
     type: DragType,
@@ -113,7 +121,8 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
     e.stopPropagation();
     e.preventDefault();
 
-    const pivot = getPivotPx();
+    // Use CLIENT coordinates for pivot so distances/angles against e.clientX/Y are correct
+    const pivot = getPivotClientPx();
     const dx = e.clientX - pivot.x;
     const dy = e.clientY - pivot.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
@@ -205,7 +214,7 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
 
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
-  }, [getPivotPx, translateX, translateY, scale, rotation, getSafeZoneSize,
+  }, [getPivotClientPx, translateX, translateY, scale, rotation, getSafeZoneSize,
       onTranslateChange, onRotationChange, onScaleChange, onPivotChange, safeZoneRef]);
 
   if (!visible) return null;

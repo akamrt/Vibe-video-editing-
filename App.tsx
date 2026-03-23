@@ -6937,6 +6937,13 @@ function App() {
                 </button>
                 <div className="w-px h-6 bg-[#444] mx-1"></div>
                 <button
+                  onClick={() => setShowGizmos(prev => !prev)}
+                  className={`px-2 py-1 text-xs rounded font-medium ${showGizmos ? 'bg-blue-600/40 text-blue-300 border border-blue-500/50' : 'bg-[#333] text-gray-400 border border-[#444] hover:text-white'}`}
+                  title="Toggle Transform Gizmos (move/rotate/scale handles)"
+                >
+                  Gizmos
+                </button>
+                <button
                   onClick={() => setViewportSettings(prev => ({ ...prev, showOverlay: !prev.showOverlay }))}
                   className={`px-2 py-1 text-xs rounded ${viewportSettings.showOverlay ? 'bg-blue-600 text-white' : 'bg-[#333] text-gray-400 hover:text-white'}`}
                   title="Toggle aspect ratio overlay"
@@ -6980,13 +6987,6 @@ function App() {
 
               {/* Right: Export, Graph Editor & Remotion Toggle */}
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setShowGizmos(prev => !prev)}
-                  className={`px-2 py-1 text-xs rounded ${showGizmos ? 'bg-blue-600/40 text-blue-300' : 'bg-[#333] text-gray-400 hover:text-white'}`}
-                  title="Toggle Transform Gizmos"
-                >
-                  ✥ Gizmos
-                </button>
                 <button
                   onClick={() => setViewportMode(prev => prev === 'standard' ? 'remotion' : 'standard')}
                   className={`px-2 py-1 text-xs rounded ${viewportMode === 'remotion' ? 'bg-purple-600 text-white' : 'bg-[#333] text-gray-400 hover:text-white'}`}
