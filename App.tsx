@@ -169,6 +169,7 @@ function App() {
   // Gizmo element refs — assigned to the subtitle/title container divs for bounding rect measurement
   const subtitleGizmoRef = useRef<HTMLDivElement | null>(null);
   const titleGizmoRef = useRef<HTMLDivElement | null>(null);
+  const clipGizmoRef = useRef<HTMLDivElement | null>(null);
   const [showGizmos, setShowGizmos] = useState(true);
   const [pivotTrackingProgress, setPivotTrackingProgress] = useState<{ progress: number; label: string } | null>(null);
 
@@ -6335,8 +6336,9 @@ function App() {
                         );
                       }
 
+                      const isSelectedClip = selectedSegmentIds[0] === seg.id && !selectedTransition;
                       return (
-                        <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: segmentZIndices.get(seg.id) ?? (seg.track || 0) * 10 }}>
+                        <div key={seg.id} ref={isSelectedClip ? (el => { clipGizmoRef.current = el; }) : undefined} className="absolute inset-0 w-full h-full" style={{ zIndex: segmentZIndices.get(seg.id) ?? (seg.track || 0) * 10 }}>
                           {seg.type === 'blank' ? (
                             <div
                               className="w-full h-full flex items-center justify-center p-8 text-center"
@@ -6732,7 +6734,7 @@ function App() {
                           color: 'transparent',
                         } as React.CSSProperties : {};
                         return (
-                          <div style={titleContainerStyle} onMouseDown={handleTitleMouseDown}>
+                          <div ref={titleGizmoRef} style={titleContainerStyle} onMouseDown={handleTitleMouseDown}>
                             <div style={{ display: 'grid' }}>
                               {computedStyles.blendLayers?.map((layerStyle, i) => (
                                 <div key={`blend-title-${i}`} style={layerStyle}>
@@ -6891,6 +6893,57 @@ function App() {
                       )}
 
                     </div>
+                  );
+                })()}
+
+                {/* ── Transform Gizmo: Clip ── */}
+                {showGizmos && primarySelectedSegment && !selectedTransition && !isTitleSelected && !selectedDialogue && primarySelectedSegment.type !== 'audio' && clipGizmoRef.current && (() => {
+                  const seg = primarySelectedSegment;
+                  const clipTime = project.currentTime - seg.timelineStart;
+                  const kfC = getCombinedTransform(seg.keyframes, clipTime, project.currentTime);
+                  return (
+                    <TransformGizmo
+                      safeZoneRef={viewportContainerRef as React.RefObject<HTMLDivElement>}
+                      elementRef={clipGizmoRef as React.RefObject<HTMLDivElement>}
+                      translateX={kfC.translateX}
+                      translateY={kfC.translateY}
+                      scale={kfC.scale}
+                      rotation={kfC.rotation}
+                      pivotX={null}
+                      pivotY={null}
+                      onTranslateChange={(tx, ty, _commit) => {
+                        const kfs = seg.keyframes || [];
+                        const existing = kfs.find(k => Math.abs(k.time - clipTime) < 0.05);
+                        const base = kfC;
+                        if (existing) {
+                          handleUpdateKeyframes(seg.id, kfs.map(k => k === existing ? { ...k, translateX: tx, translateY: ty } : k), true);
+                        } else {
+                          handleUpdateKeyframes(seg.id, [...kfs, { time: clipTime, translateX: tx, translateY: ty, scale: base.scale, rotation: base.rotation }].sort((a, b) => a.time - b.time), true);
+                        }
+                      }}
+                      onRotationChange={(rot, _commit) => {
+                        const kfs = seg.keyframes || [];
+                        const existing = kfs.find(k => Math.abs(k.time - clipTime) < 0.05);
+                        const base = kfC;
+                        if (existing) {
+                          handleUpdateKeyframes(seg.id, kfs.map(k => k === existing ? { ...k, rotation: rot } : k), true);
+                        } else {
+                          handleUpdateKeyframes(seg.id, [...kfs, { time: clipTime, translateX: base.translateX, translateY: base.translateY, scale: base.scale, rotation: rot }].sort((a, b) => a.time - b.time), true);
+                        }
+                      }}
+                      onScaleChange={(s, _commit) => {
+                        const kfs = seg.keyframes || [];
+                        const existing = kfs.find(k => Math.abs(k.time - clipTime) < 0.05);
+                        const base = kfC;
+                        if (existing) {
+                          handleUpdateKeyframes(seg.id, kfs.map(k => k === existing ? { ...k, scale: s } : k), true);
+                        } else {
+                          handleUpdateKeyframes(seg.id, [...kfs, { time: clipTime, translateX: base.translateX, translateY: base.translateY, scale: s, rotation: base.rotation }].sort((a, b) => a.time - b.time), true);
+                        }
+                      }}
+                      onPivotChange={() => {}}
+                      visible={true}
+                    />
                   );
                 })()}
               </div>
