@@ -3,7 +3,7 @@
  * Adapted from tracker_v2 for video clip transform animation
  */
 
-import { ClipKeyframe, KeyframeConfig } from '../types';
+import { ClipKeyframe, KeyframeConfig, PivotKeyframe } from '../types';
 
 // ============ BEZIER MATH ============
 
@@ -225,4 +225,49 @@ export const transformToCss = (transform: ClipTransform): string => {
     }
 
     return parts.length > 0 ? parts.join(' ') : 'none';
+};
+
+// ============ PIVOT INTERPOLATION ============
+
+export interface PivotPoint {
+    x: number;  // 0-100, safe-zone %
+    y: number;  // 0-100, safe-zone %
+}
+
+/**
+ * Linear interpolation for pivot keyframes.
+ * Returns null when no keyframes exist (caller should use element-center default).
+ */
+export const getInterpolatedPivot = (
+    keyframes: PivotKeyframe[] | undefined,
+    clipTime: number,
+): PivotPoint | null => {
+    if (!keyframes || keyframes.length === 0) return null;
+
+    const sorted = [...keyframes].sort((a, b) => a.time - b.time);
+
+    if (clipTime <= sorted[0].time) return { x: sorted[0].x, y: sorted[0].y };
+    if (clipTime >= sorted[sorted.length - 1].time) {
+        const last = sorted[sorted.length - 1];
+        return { x: last.x, y: last.y };
+    }
+
+    let prev = sorted[0];
+    let next = sorted[1];
+    for (let i = 0; i < sorted.length - 1; i++) {
+        if (clipTime >= sorted[i].time && clipTime < sorted[i + 1].time) {
+            prev = sorted[i];
+            next = sorted[i + 1];
+            break;
+        }
+    }
+
+    const dt = next.time - prev.time;
+    if (dt <= 0) return { x: next.x, y: next.y };
+    const t = (clipTime - prev.time) / dt;
+
+    return {
+        x: prev.x + (next.x - prev.x) * t,
+        y: prev.y + (next.y - prev.y) * t,
+    };
 };

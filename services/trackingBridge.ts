@@ -7,6 +7,7 @@
  */
 
 import { ClipKeyframe } from '../types';
+import type { PivotKeyframe } from '../types';
 import type { TrackingSegment } from './templateTrackingService';
 
 interface PythonTrackingPosition {
@@ -410,6 +411,152 @@ export async function fullScanAndCenter(
     };
   } catch (e) {
     console.error('[TrackingBridge] fullScanAndCenter error:', e);
+    return null;
+  }
+}
+
+// ============ HEAD PIVOT TRACKING ============
+
+/**
+ * Track the person's head and return PivotKeyframes in safe-zone % coordinates.
+ *
+ * @param videoFile  - Source video File object (null = reconstruct from videoElement.src)
+ * @param videoElement - The video element (used for fallback reconstruction + native size)
+ * @param segment    - The clip segment time range to track
+ * @param cropAspectRatio - Output crop AR (e.g. 9/16). Used to compute safe-zone bounds.
+ * @param onProgress - Optional progress callback
+ */
+export async function trackHeadForPivot(
+  videoFile: File | null,
+  videoElement: HTMLVideoElement,
+  segment: TrackingSegment,
+  cropAspectRatio: number,
+  onProgress?: (progress: number, label: string) => void,
+): Promise<PivotKeyframe[] | null> {
+  try {
+    let file = videoFile;
+    if (!file) {
+      file = await reconstructFileFromVideoElement(videoElement, onProgress);
+      if (!file) {
+        console.log('[TrackingBridge] trackHeadForPivot: could not obtain video file');
+        return null;
+      }
+    }
+
+    const available = await checkPythonTrackerAvailable();
+    if (!available) {
+      console.log('[TrackingBridge] trackHeadForPivot: Python tracker not available');
+      return null;
+    }
+
+    onProgress?.(0.05, 'Uploading for head tracking...');
+    let fileId = await uploadVideoForTracking(file, onProgress);
+    if (!fileId) return null;
+
+    onProgress?.(0.15, 'Running head tracker (MediaPipe)...');
+
+    const makeRequest = (fid: string) => fetch('/api/tracking/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileId: fid,
+        startTime: segment.startTime,
+        endTime: segment.endTime,
+        sampleInterval: 0.1,
+        mode: 'head_center',
+        options: {},
+      }),
+    });
+
+    let response = await makeRequest(fileId);
+
+    // Retry on stale fileId (server restarted)
+    if (response.status === 400 && file) {
+      console.log('[TrackingBridge] trackHeadForPivot: stale fileId, re-uploading...');
+      invalidateUploadCache(file);
+      const freshId = await uploadVideoForTracking(file, onProgress, true);
+      if (!freshId) return null;
+      fileId = freshId;
+      response = await makeRequest(fileId);
+    }
+
+    if (!response.ok) {
+      console.error('[TrackingBridge] trackHeadForPivot: analyze failed', response.status);
+      return null;
+    }
+
+    const result: PythonTrackingResult = await response.json();
+    if (!result.success || !result.positions || result.positions.length === 0) {
+      console.log('[TrackingBridge] trackHeadForPivot: no positions returned', result.error);
+      return null;
+    }
+
+    const vw = result.videoWidth || videoElement.videoWidth;
+    const vh = result.videoHeight || videoElement.videoHeight;
+    const videoAR = vw / vh;
+
+    // Compute safe-zone rectangle in video pixels
+    let szLeft: number, szTop: number, szWidth: number, szHeight: number;
+    if (cropAspectRatio < videoAR) {
+      // Pillarbox (e.g. 9:16 crop in 16:9 video): safe zone is vertically full, horizontally centered
+      szHeight = vh;
+      szWidth = vh * cropAspectRatio;
+      szLeft = (vw - szWidth) / 2;
+      szTop = 0;
+    } else {
+      // Letterbox: safe zone is horizontally full, vertically centered
+      szWidth = vw;
+      szHeight = vw / cropAspectRatio;
+      szLeft = 0;
+      szTop = (vh - szHeight) / 2;
+    }
+
+    onProgress?.(0.9, 'Generating pivot keyframes...');
+
+    // Convert video-pixel positions to safe-zone % pivot keyframes
+    const keyframes: PivotKeyframe[] = [];
+    let lastX = -999;
+    let lastY = -999;
+
+    for (const pos of result.positions) {
+      const relTime = pos.time - segment.startTime;
+      if (relTime < -0.001) continue;
+
+      const pivX = ((pos.x - szLeft) / szWidth) * 100;
+      const pivY = ((pos.y - szTop) / szHeight) * 100;
+
+      // Only emit keyframe when pivot has moved meaningfully (>0.5% of safe zone)
+      if (Math.abs(pivX - lastX) > 0.5 || Math.abs(pivY - lastY) > 0.5 || keyframes.length === 0) {
+        keyframes.push({
+          time: Math.round(Math.max(0, relTime) * 1000) / 1000,
+          x: Math.round(pivX * 10) / 10,
+          y: Math.round(pivY * 10) / 10,
+        });
+        lastX = pivX;
+        lastY = pivY;
+      }
+    }
+
+    // Ensure there is a keyframe at the end of the segment
+    const lastPos = result.positions[result.positions.length - 1];
+    if (lastPos) {
+      const lastRelTime = lastPos.time - segment.startTime;
+      const lastKf = keyframes[keyframes.length - 1];
+      if (!lastKf || lastKf.time < lastRelTime - 0.05) {
+        keyframes.push({
+          time: Math.round(Math.max(0, lastRelTime) * 1000) / 1000,
+          x: lastKf?.x ?? 50,
+          y: lastKf?.y ?? 20,
+        });
+      }
+    }
+
+    onProgress?.(1.0, `Head pivot: ${keyframes.length} keyframes generated`);
+    console.log(`[TrackingBridge] trackHeadForPivot: ${keyframes.length} pivot keyframes, method=${result.method}`);
+    return keyframes;
+
+  } catch (e) {
+    console.error('[TrackingBridge] trackHeadForPivot error:', e);
     return null;
   }
 }

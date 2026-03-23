@@ -117,6 +117,39 @@ def _extract_torso_center(result) -> tuple[float, float, float] | None:
     return (cx, cy, avg_vis)
 
 
+def _extract_head_center(result) -> tuple[float, float, float] | None:
+    """Extract head center from PoseLandmarker result.
+
+    Uses nose (0), left eye inner (1), right eye inner (4), left ear (7), right ear (8).
+    Returns (centerX_normalized, centerY_normalized, avg_visibility) or None.
+    """
+    if not result.pose_landmarks or len(result.pose_landmarks) == 0:
+        return None
+
+    landmarks = result.pose_landmarks[0]
+    head_indices = [0, 1, 2, 3, 4, 7, 8]  # nose, eyes, ears
+
+    visible = []
+    for i in head_indices:
+        if i < len(landmarks):
+            lm = landmarks[i]
+            vis = lm.visibility if hasattr(lm, 'visibility') and lm.visibility is not None else 0.5
+            if vis > 0.2:
+                visible.append((lm.x, lm.y, vis))
+
+    if not visible:
+        # Fall back to nose only
+        if len(landmarks) > 0:
+            lm = landmarks[0]
+            return (lm.x, lm.y, 0.3)
+        return None
+
+    cx = sum(v[0] for v in visible) / len(visible)
+    cy = sum(v[1] for v in visible) / len(visible)
+    avg_vis = sum(v[2] for v in visible) / len(visible)
+    return (cx, cy, avg_vis)
+
+
 def _detect_person_opencv(frame: np.ndarray, vw: int, vh: int) -> tuple[float, float] | None:
     """Detect person region using OpenCV-only methods (no MediaPipe needed).
 
@@ -607,6 +640,148 @@ def track_person_through_segment(
         f'[vibecut-tracker] Done: {len(positions)} positions, '
         f'{mediapipe_detections} mediapipe, {optical_flow_detections} optical_flow, '
         f'{coast_count} coasted, {failed_frames} failed frames\n'
+    )
+    sys.stderr.flush()
+
+    return {
+        'success': True,
+        'positions': positions,
+        'videoWidth': vw,
+        'videoHeight': vh,
+        'frameCount': frame_count,
+        'method': method,
+    }
+
+
+def track_head_through_segment(
+    video_path: str,
+    start_time: float,
+    end_time: float | None,
+    sample_interval: float = 0.1,
+) -> dict:
+    """Track the person's head position through a video segment for pivot use.
+
+    Uses MediaPipe head landmarks (nose, eyes, ears) instead of torso center.
+    Returns positions in video-pixel coordinates suitable for pivot keyframe generation.
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return {'success': False, 'error': f'Cannot open video: {video_path}'}
+
+    info = get_video_info(cap)
+    vw, vh = info['width'], info['height']
+    sys.stderr.write(f'[vibecut-tracker] Head tracking: {vw}x{vh}, {info["fps"]}fps\n')
+    sys.stderr.flush()
+
+    if end_time is None:
+        end_time = info['duration']
+
+    fps = info['fps']
+    frames_per_sample = max(1, round(sample_interval * fps))
+    total_frames = max(1, int((end_time - start_time) / sample_interval))
+
+    cap.set(cv2.CAP_PROP_POS_MSEC, start_time * 1000)
+    ret, test_frame = cap.read()
+    if not ret or test_frame is None:
+        cap.release()
+        return {'success': False, 'error': 'Cannot read frames from video'}
+
+    COAST_MAX_FRAMES = 15
+    positions = []
+    frame_count = 0
+    last_x, last_y = vw * 0.5, vh * 0.15  # default: upper-center
+    lost_streak = 0
+    mediapipe_detections = 0
+
+    landmarker = None
+    if HAS_MEDIAPIPE:
+        landmarker = _create_landmarker('VIDEO')
+        if landmarker is None:
+            sys.stderr.write('[vibecut-tracker] WARNING: Could not create landmarker for head tracking\n')
+            sys.stderr.flush()
+
+    current_time = start_time
+    frame = test_frame
+
+    while current_time <= end_time:
+        if frame is None:
+            if lost_streak < COAST_MAX_FRAMES:
+                lost_streak += 1
+                positions.append({
+                    'time': round(current_time, 3),
+                    'x': round(clamp(last_x, 0, vw), 1),
+                    'y': round(clamp(last_y, 0, vh), 1),
+                    'confidence': round(max(0, 30 - lost_streak * 3), 1),
+                })
+        else:
+            detected_x, detected_y, confidence = None, None, 0.0
+
+            if landmarker is not None:
+                try:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp_image_mod.Image(image_format=mp_image_mod.ImageFormat.SRGB, data=rgb)
+                    timestamp_ms = int(current_time * 1000)
+                    result = landmarker.detect_for_video(mp_image, timestamp_ms)
+
+                    head = _extract_head_center(result)
+                    if head is not None:
+                        cx_norm, cy_norm, avg_vis = head
+                        detected_x = cx_norm * vw
+                        detected_y = cy_norm * vh
+                        confidence = avg_vis
+                        mediapipe_detections += 1
+                        lost_streak = 0
+                except Exception as e:
+                    if frame_count < 3:
+                        sys.stderr.write(f'[vibecut-tracker] Head detect_for_video failed: {e}\n')
+                        sys.stderr.flush()
+
+            # Coast on last known position when MediaPipe fails
+            if detected_x is None and lost_streak < COAST_MAX_FRAMES:
+                lost_streak += 1
+                detected_x = last_x
+                detected_y = last_y
+                confidence = max(0.05, 0.4 - lost_streak * 0.03)
+
+            if detected_x is not None:
+                last_x = detected_x
+                last_y = detected_y
+                positions.append({
+                    'time': round(current_time, 3),
+                    'x': round(clamp(detected_x, 0, vw), 1),
+                    'y': round(clamp(detected_y, 0, vh), 1),
+                    'confidence': round(clamp(confidence, 0, 1) * 100, 1),
+                })
+
+        frame_count += 1
+        current_time += sample_interval
+
+        if frame_count % 10 == 0:
+            progress = frame_count / total_frames
+            report_progress(min(0.95, 0.1 + progress * 0.85), f'Head tracking frame {frame_count}/{total_frames}')
+
+        # Read forward to next sample frame
+        frame = None
+        for skip_i in range(frames_per_sample):
+            ret, f = cap.read()
+            if not ret:
+                break
+            if skip_i == frames_per_sample - 1:
+                frame = f
+
+    if landmarker is not None:
+        landmarker.close()
+    cap.release()
+
+    # Apply temporal smoothing
+    positions = _smooth_positions(positions, window=5)
+
+    report_progress(1.0, 'Head tracking complete')
+
+    method = 'mediapipe_head' if mediapipe_detections > 0 else 'coasted'
+    sys.stderr.write(
+        f'[vibecut-tracker] Head tracking done: {len(positions)} positions, '
+        f'{mediapipe_detections} mediapipe detections\n'
     )
     sys.stderr.flush()
 

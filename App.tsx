@@ -2724,7 +2724,7 @@ function App() {
       const pivotKfs = await trackHeadForPivot(
         media?.file ?? null,
         videoEl,
-        { startTime: seg.startTime, endTime: seg.endTime, id: seg.id },
+        { startTime: seg.startTime, endTime: seg.endTime },
         cropAR,
         (progress, label) => setPivotTrackingProgress({ progress, label }),
       );
@@ -6745,7 +6745,7 @@ function App() {
                       })()}
 
                       {/* ── Transform Gizmo: Subtitle ── */}
-                      {showGizmos && activeSubtitleEvent && subtitleGizmoRef.current && (() => {
+                      {showGizmos && selectedDialogueEvent && activeSubtitleEvent && selectedDialogueEvent === activeSubtitleEvent && subtitleGizmoRef.current && (() => {
                         const visualSegsG = activeSegments.filter(s => s.type !== 'audio');
                         const topSegG = visualSegsG.length > 0 ? visualSegsG[visualSegsG.length - 1] : activeSegments[activeSegments.length - 1];
                         const sourceTimeG = topSegG ? topSegG.startTime + (project.currentTime - topSegG.timelineStart) : 0;
@@ -6811,7 +6811,7 @@ function App() {
                       })()}
 
                       {/* ── Transform Gizmo: Title ── */}
-                      {showGizmos && project.titleLayer && project.currentTime >= project.titleLayer.startTime && project.currentTime <= project.titleLayer.endTime && titleGizmoRef.current && (() => {
+                      {showGizmos && isTitleSelected && project.titleLayer && project.currentTime >= project.titleLayer.startTime && project.currentTime <= project.titleLayer.endTime && titleGizmoRef.current && (() => {
                         const titleT = project.currentTime - project.titleLayer.startTime;
                         const titleKfG = project.titleLayer.keyframes?.length
                           ? getCombinedTransform(project.titleLayer.keyframes, titleT, project.currentTime)

@@ -49,6 +49,13 @@ export interface ClipKeyframe {
   keyframeConfig?: Record<string, KeyframeConfig>; // Per-property tangents
 }
 
+// ============ PIVOT KEYFRAMES ============
+export interface PivotKeyframe {
+  time: number;  // Clip-relative time (seconds)
+  x: number;     // Pivot X in safe-zone % (0=left, 100=right)
+  y: number;     // Pivot Y in safe-zone % (0=top, 100=bottom)
+}
+
 // ============ TRACKING SYSTEM ============
 export interface VibeCutTracker {
   id: string;
@@ -406,6 +413,7 @@ export interface TitleLayer {
   style?: TitleStyle; // Optional style override
   animation?: TextAnimation; // Custom animation for this title instance
   keyframes?: ClipKeyframe[]; // Animation keyframes for the title
+  pivotKeyframes?: PivotKeyframe[];  // Head-tracking pivot animation
 }
 
 export interface AnalysisEvent {
@@ -421,6 +429,7 @@ export interface AnalysisEvent {
   translateY?: number; // percentage offset from default position
   keyframes?: ClipKeyframe[]; // Animation keyframes for subtitle event transforms
   keywordAnimation?: TextAnimation; // separate animation for keyword words
+  pivotKeyframes?: PivotKeyframe[];  // Head-tracking pivot animation
   confidence?: number; // Word-level confidence from AssemblyAI (0-1)
   wordTimings?: Array<{ // Per-word timings for karaoke accuracy (AssemblyAI)
     text: string;

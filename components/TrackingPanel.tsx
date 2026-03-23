@@ -19,6 +19,9 @@ interface TrackingPanelProps {
   onClearTracking: (segmentId: string) => void;
   onClearTrackingData: (segmentId: string) => void;
   trackingProgress: { progress: number; label: string } | null;
+  // Head pivot tracking
+  onTrackHeadPivot: (segmentId: string, applyToAll: boolean) => void;
+  pivotTrackingProgress: { progress: number; label: string } | null;
 }
 
 export const TrackingPanel: React.FC<TrackingPanelProps> = ({
@@ -37,6 +40,8 @@ export const TrackingPanel: React.FC<TrackingPanelProps> = ({
   onClearTracking,
   onClearTrackingData,
   trackingProgress,
+  onTrackHeadPivot,
+  pivotTrackingProgress,
 }) => {
   const trackers = selectedSegment?.trackers || [];
   const hasTrackingData = (selectedSegment?.trackingData?.length || 0) > 0;
@@ -236,6 +241,44 @@ export const TrackingPanel: React.FC<TrackingPanelProps> = ({
           )}
         </div>
       )}
+
+      {/* Head Pivot Tracking */}
+      <div className="p-3 border-b border-[#333] space-y-2">
+        <label className="text-[10px] text-gray-500 uppercase tracking-wider block">Head Pivot</label>
+        <p className="text-[10px] text-gray-400 leading-tight">
+          Tracks the person's head using MediaPipe and bakes pivot keyframes so that rotations &amp; scales happen around their face.
+        </p>
+        <div className="flex gap-2">
+          <button
+            onClick={() => selectedSegment && onTrackHeadPivot(selectedSegment.id, false)}
+            disabled={pivotTrackingProgress !== null || !selectedSegment}
+            className="flex-1 py-1.5 bg-orange-600/20 text-orange-400 border border-orange-600/50 rounded hover:bg-orange-600/30 text-xs font-medium disabled:opacity-50"
+          >
+            This Clip
+          </button>
+          <button
+            onClick={() => selectedSegment && onTrackHeadPivot(selectedSegment.id, true)}
+            disabled={pivotTrackingProgress !== null || !selectedSegment}
+            className="flex-1 py-1.5 bg-orange-600/10 text-orange-300 border border-orange-600/30 rounded hover:bg-orange-600/20 text-xs font-medium disabled:opacity-50"
+          >
+            All Selected
+          </button>
+        </div>
+        {pivotTrackingProgress && (
+          <div className="space-y-1">
+            <div className="flex justify-between text-[10px] text-gray-400">
+              <span>{pivotTrackingProgress.label}</span>
+              <span>{Math.round(pivotTrackingProgress.progress * 100)}%</span>
+            </div>
+            <div className="h-1 bg-[#333] rounded-full overflow-hidden">
+              <div
+                style={{ width: `${pivotTrackingProgress.progress * 100}%` }}
+                className="h-full bg-orange-500 transition-all duration-300"
+              />
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Results / Apply Actions */}
       {hasTrackingData && (

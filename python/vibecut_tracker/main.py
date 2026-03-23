@@ -10,7 +10,7 @@ import sys
 import json
 import os
 
-from vibecut_tracker.person_detect import detect_person_mediapipe, track_person_through_segment
+from vibecut_tracker.person_detect import detect_person_mediapipe, track_person_through_segment, track_head_through_segment
 from vibecut_tracker.optical_flow import track_optical_flow
 from vibecut_tracker.template_match import track_template_opencv
 from vibecut_tracker.utils import report_progress
@@ -28,7 +28,12 @@ def handle_track(request: dict) -> dict:
     if not os.path.exists(video_path):
         return {'success': False, 'error': f'Video file not found: {video_path}'}
 
-    if mode == 'person_center':
+    if mode == 'head_center':
+        return track_head_through_segment(
+            video_path, start_time, end_time,
+            sample_interval=sample_interval,
+        )
+    elif mode == 'person_center':
         return track_person_through_segment(
             video_path, start_time, end_time,
             sample_interval=sample_interval,
