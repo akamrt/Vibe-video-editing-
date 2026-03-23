@@ -27,6 +27,7 @@ import { fullScanAndCenter } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
 import StockBrowser from './components/StockBrowser';
+import ResizeHandle from './components/ResizeHandle';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
 import { getAudioBuffer, getAudioBufferLowRes, findNearestSilence, snapFillerRange, snapClipBoundaries, clearAudioBufferCache, findSilenceGaps } from './utils/audioAnalysis';
 import { crossfadeVolumes } from './utils/audioCrossfade';
@@ -238,6 +239,34 @@ function App() {
 
   // Right Panel State
   const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions'>('transitions');
+
+  // Resizable Panel Sizes (persisted to localStorage)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(() =>
+    parseInt(localStorage.getItem('vibecut-leftPanelWidth') || '256'));
+  const [rightPanelWidth, setRightPanelWidth] = useState(() =>
+    parseInt(localStorage.getItem('vibecut-rightPanelWidth') || '320'));
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(() =>
+    parseInt(localStorage.getItem('vibecut-bottomPanelHeight') || '500'));
+
+  // Persist resizable panel sizes to localStorage (debounced)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      localStorage.setItem('vibecut-leftPanelWidth', String(leftPanelWidth));
+      localStorage.setItem('vibecut-rightPanelWidth', String(rightPanelWidth));
+      localStorage.setItem('vibecut-bottomPanelHeight', String(bottomPanelHeight));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [leftPanelWidth, rightPanelWidth, bottomPanelHeight]);
+
+  const handleLeftResize = useCallback((delta: number) => {
+    setLeftPanelWidth(prev => Math.max(200, Math.min(500, prev + delta)));
+  }, []);
+  const handleRightResize = useCallback((delta: number) => {
+    setRightPanelWidth(prev => Math.max(200, Math.min(600, prev - delta)));
+  }, []);
+  const handleBottomResize = useCallback((delta: number) => {
+    setBottomPanelHeight(prev => Math.max(150, Math.min(800, prev - delta)));
+  }, []);
 
   // Reset zoom/pan when leaving tracking tab
   useEffect(() => {
@@ -5434,7 +5463,7 @@ function App() {
 
 
       {/* LEFT: Media Bin / Properties Panel */}
-      <div className={`${activeLeftTab === 'properties' ? 'w-80' : 'w-64'} flex-shrink-0 flex flex-col border-r border-[#333] bg-[#1e1e1e]`}>
+      <div className="flex-shrink-0 flex flex-col bg-[#1e1e1e]" style={{ width: leftPanelWidth }}>
         {/* Tab bar */}
         <div className="flex border-b border-[#333] bg-[#252525]">
           <button onClick={() => setActiveLeftTab('media')} className={`flex-1 py-2 text-xs font-bold ${activeLeftTab === 'media' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-white'}`}>MEDIA</button>
@@ -5523,6 +5552,9 @@ function App() {
           )}
         </div>
       </div>
+
+      {/* Left Panel Resize Handle */}
+      <ResizeHandle direction="horizontal" onResize={handleLeftResize} onDoubleClick={() => setLeftPanelWidth(256)} />
 
       {/* VERTICAL TOOLBAR */}
       <div className="w-12 flex-shrink-0 bg-[#1e1e1e] border-r border-[#333] flex flex-col items-center py-4 gap-3 z-50 overflow-y-auto">
@@ -6664,8 +6696,11 @@ function App() {
             </div>
           </div>
 
+          {/* Right Panel Resize Handle */}
+          <ResizeHandle direction="horizontal" onResize={handleRightResize} onDoubleClick={() => setRightPanelWidth(320)} />
+
           {/* Right Panels (Tabs) */}
-          <div className="w-80 border-l border-[#333] flex flex-col bg-[#1e1e1e]">
+          <div className="flex-shrink-0 flex flex-col bg-[#1e1e1e]" style={{ width: rightPanelWidth }}>
             <div className="flex-1 flex flex-col min-h-0">
               <div className="flex border-b border-[#333] bg-[#252525]">
                 <button onClick={() => setActiveRightTab('transcript')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'transcript' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>TRANSCRIPT</button>
@@ -6781,8 +6816,11 @@ function App() {
           </div>
         </div>
 
+        {/* Bottom Panel Resize Handle */}
+        <ResizeHandle direction="vertical" onResize={handleBottomResize} onDoubleClick={() => setBottomPanelHeight(500)} className="z-20" />
+
         {/* Timeline/Graph Section */}
-        <div className="h-[500px] flex flex-col shadow-[0_-4px_10px_rgba(0,0,0,0.3)] z-10 border-t border-[#333]">
+        <div className="flex-shrink-0 flex flex-col shadow-[0_-4px_10px_rgba(0,0,0,0.3)] z-10" style={{ height: bottomPanelHeight }}>
           {/* Tab Header */}
           <div className="h-10 bg-[#252525] border-y border-[#333] flex items-center px-4 gap-4">
             <div className="flex gap-1">
