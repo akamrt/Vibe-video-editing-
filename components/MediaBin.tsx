@@ -1,10 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { MediaItem } from '../types';
+
+type ImportMode = 'both' | 'video' | 'audio';
 
 interface MediaBinProps {
   items: MediaItem[];
   onUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onAddToTimeline: (item: MediaItem) => void;
+  onAddToTimeline: (item: MediaItem, mode: ImportMode) => void;
   onSelect: (item: MediaItem) => void;
   onYoutubeClick: () => void;
   swapActive?: boolean;
@@ -12,22 +14,52 @@ interface MediaBinProps {
 }
 
 const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, onSelect, onYoutubeClick, swapActive, onSwapMedia }) => {
+  const [importMode, setImportMode] = useState<ImportMode>('both');
+
   return (
     <div className="h-full flex flex-col bg-[#1e1e1e] border-r border-[#333]">
-      <div className="p-4 border-b border-[#333] flex justify-between items-center bg-[#252525]">
-        <h2 className="font-bold text-gray-200">Media Bin</h2>
-        <div className="flex gap-2">
-          <button
-            onClick={onYoutubeClick}
-            className="p-1.5 hover:bg-[#333] rounded text-gray-400 hover:text-white"
-            title="Import from YouTube"
-          >
-            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z" /></svg>
-          </button>
-          <label className="cursor-pointer p-1.5 hover:bg-[#333] rounded text-gray-400 hover:text-white">
-            <input type="file" multiple accept="video/*,audio/*" className="hidden" onChange={onUpload} />
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
-          </label>
+      <div className="p-3 border-b border-[#333] bg-[#252525] space-y-2">
+        <div className="flex justify-between items-center">
+          <h2 className="font-bold text-gray-200">Media Bin</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={onYoutubeClick}
+              className="p-1.5 hover:bg-[#333] rounded text-gray-400 hover:text-white"
+              title="Import from YouTube"
+            >
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z" /></svg>
+            </button>
+            <label className="cursor-pointer p-1.5 hover:bg-[#333] rounded text-gray-400 hover:text-white">
+              <input type="file" multiple accept="video/*,audio/*" className="hidden" onChange={onUpload} />
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
+            </label>
+          </div>
+        </div>
+        {/* Import mode toggle */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[9px] text-gray-500 uppercase tracking-wide">Import:</span>
+          {(['both', 'video', 'audio'] as ImportMode[]).map(mode => {
+            const labels: Record<ImportMode, string> = { both: 'V+A', video: 'Video', audio: 'Audio' };
+            const active = importMode === mode;
+            return (
+              <button
+                key={mode}
+                onClick={() => setImportMode(mode)}
+                className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                  active
+                    ? mode === 'audio'
+                      ? 'bg-purple-600/50 border-purple-400 text-purple-200'
+                      : mode === 'video'
+                      ? 'bg-blue-600/50 border-blue-400 text-blue-200'
+                      : 'bg-green-600/50 border-green-400 text-green-200'
+                    : 'bg-transparent border-[#444] text-gray-500 hover:border-gray-400 hover:text-gray-300'
+                }`}
+                title={mode === 'both' ? 'Import video + audio' : mode === 'video' ? 'Import video only (no audio)' : 'Import audio only'}
+              >
+                {labels[mode]}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -72,9 +104,13 @@ const MediaBin: React.FC<MediaBinProps> = ({ items, onUpload, onAddToTimeline, o
                 </button>
               )}
               <button
-                onClick={(e) => { e.stopPropagation(); onAddToTimeline(item); }}
-                className="opacity-0 group-hover:opacity-100 p-1 bg-blue-600 rounded hover:bg-blue-500 transition-all"
-                title="Add to sequence"
+                onClick={(e) => { e.stopPropagation(); onAddToTimeline(item, importMode); }}
+                className={`opacity-0 group-hover:opacity-100 p-1 rounded transition-all ${
+                  importMode === 'audio' ? 'bg-purple-600 hover:bg-purple-500' :
+                  importMode === 'video' ? 'bg-blue-700 hover:bg-blue-600' :
+                  'bg-blue-600 hover:bg-blue-500'
+                }`}
+                title={importMode === 'audio' ? 'Add audio only' : importMode === 'video' ? 'Add video only' : 'Add video + audio'}
               >
                 <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>
               </button>

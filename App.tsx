@@ -2299,10 +2299,10 @@ function App() {
     }
   };
 
-  const handleAddToTimeline = (item: MediaItem) => {
+  const handleAddToTimeline = (item: MediaItem, importMode: 'both' | 'video' | 'audio' = 'both') => {
     const insertionTime = project.currentTime;
-    const duration = item.duration;
-    const isAudio = !!item.isAudioOnly;
+    const isAudio = importMode === 'audio' || !!item.isAudioOnly;
+    const videoOnly = importMode === 'video';
 
     let targetTrack = 0;
 
@@ -2332,7 +2332,9 @@ function App() {
       timelineStart: insertionTime,
       track: targetTrack,
       description: item.name,
-      color: `hsl(${Math.random() * 360}, 60%, 40%)`
+      color: `hsl(${Math.random() * 360}, 60%, 40%)`,
+      // Video-only: unlink audio track so it stays silent
+      ...(videoOnly ? { audioLinked: false } : {}),
     };
     setProject(prev => ({ ...prev, segments: [...prev.segments, newSeg] }));
     safeSetTimelineZoom(1);
