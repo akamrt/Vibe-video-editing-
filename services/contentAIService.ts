@@ -443,22 +443,137 @@ export async function importManualShort(
             cleanJsonString = cleanJsonString.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
         }
 
-        // Remove trailing commas before closing braces/brackets (common LLM mistake)
+        // ── Multi-pass JSON cleanup ──
+
+        // 1. Replace smart/curly quotes with straight quotes (very common from AI chat UIs & rich-text paste)
+        cleanJsonString = cleanJsonString
+            .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')   // " " „ ‟ ″ ‶ → "
+            .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")   // ' ' ‚ ‛ ′ ‵ → '
+            .replace(/[\u00AB\u00BB]/g, '"');                           // « » → "
+
+        // 2. Remove BOM and zero-width characters
+        cleanJsonString = cleanJsonString.replace(/[\uFEFF\u200B\u200C\u200D\u2060]/g, '');
+
+        // 3. Remove JS-style single-line comments (// ...) that aren't inside strings
+        //    Simple heuristic: remove lines that start with // (after optional whitespace)
+        cleanJsonString = cleanJsonString.replace(/^\s*\/\/.*$/gm, '');
+
+        // 4. Remove trailing commas before closing braces/brackets (common LLM mistake)
         cleanJsonString = cleanJsonString.replace(/,\s*([\]}])/g, '$1');
 
-        // Remove unescaped control characters (newlines) inside strings (another common LLM mistake)
-        cleanJsonString = cleanJsonString.replace(/[\u0000-\u0019]+/g, "");
+        // 5. Remove unescaped control characters (newlines, tabs, etc.) inside strings
+        cleanJsonString = cleanJsonString.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]+/g, "");
+
+        // 6. If the string starts with a JSON structure but has trailing non-JSON text
+        //    (e.g. "Here is the JSON: {...} Let me know if..."), try to extract just the JSON
+        if (!/^\s*[\[{]/.test(cleanJsonString)) {
+            // Try to find the first { or [ and extract from there
+            const firstBrace = cleanJsonString.search(/[\[{]/);
+            if (firstBrace > 0) {
+                cleanJsonString = cleanJsonString.substring(firstBrace).trim();
+            }
+        }
 
         let json;
         try {
             json = JSON.parse(cleanJsonString);
             console.log('[ImportJSON] Parsed JSON type:', Array.isArray(json) ? 'array' : typeof json, 'keys:', typeof json === 'object' && json ? Object.keys(json).join(', ') : 'n/a');
         } catch (parseErr) {
-            // If the parse fails, see if we can do a more aggressive cleanup or just fail gracefully with the original error
-            console.warn("First JSON parse attempt failed, trying aggressive cleanup...", parseErr);
-            // sometimes quotes inside strings are unescaped. It's very hard to fix safely with regex.
-            // We just throw the original error if we can't parse it.
-            throw parseErr;
+            console.warn("[ImportJSON] First parse attempt failed, trying repairs...", parseErr);
+
+            let repaired = cleanJsonString;
+
+            // Repair pass 1: Convert single-quoted JSON to double-quoted
+            // Only if the string appears to use single quotes for keys/values
+            if (repaired.includes("'") && !repaired.includes('"')) {
+                repaired = repaired.replace(/'/g, '"');
+            }
+
+            // Repair pass 2: Fix unescaped newlines inside string values
+            repaired = repaired.replace(/("(?:[^"\\]|\\.)*")|[\r\n]+/g, (match, quoted) => {
+                if (quoted) return quoted; // leave proper strings alone
+                return ' '; // replace bare newlines with spaces
+            });
+
+            // Repair pass 3: Remove trailing text after the top-level JSON structure closes
+            // Find the matching closing bracket/brace for the first opening one
+            const openChar = repaired.trim()[0];
+            if (openChar === '{' || openChar === '[') {
+                const closeChar = openChar === '{' ? '}' : ']';
+                let depth = 0;
+                let inString = false;
+                let escaped = false;
+                let endPos = -1;
+                for (let i = 0; i < repaired.length; i++) {
+                    const ch = repaired[i];
+                    if (escaped) { escaped = false; continue; }
+                    if (ch === '\\') { escaped = true; continue; }
+                    if (ch === '"') { inString = !inString; continue; }
+                    if (inString) continue;
+                    if (ch === openChar) depth++;
+                    if (ch === closeChar) {
+                        depth--;
+                        if (depth === 0) { endPos = i; break; }
+                    }
+                }
+                if (endPos > 0 && endPos < repaired.length - 1) {
+                    repaired = repaired.substring(0, endPos + 1);
+                }
+            }
+
+            try {
+                json = JSON.parse(repaired);
+                console.log('[ImportJSON] Repaired JSON parsed successfully');
+            } catch (repairErr) {
+                // Final attempt: try to fix unescaped double quotes inside string values
+                // by replacing internal " with \"
+                try {
+                    // Strategy: walk character by character, track if we're in a string,
+                    // and escape any unescaped quotes that appear to be inside a value
+                    let fixed = '';
+                    let inStr = false;
+                    let esc = false;
+                    for (let i = 0; i < repaired.length; i++) {
+                        const c = repaired[i];
+                        if (esc) { fixed += c; esc = false; continue; }
+                        if (c === '\\') { fixed += c; esc = true; continue; }
+                        if (c === '"') {
+                            if (!inStr) {
+                                inStr = true;
+                                fixed += c;
+                            } else {
+                                // Is this the real end of the string?
+                                // Look ahead: after optional whitespace, should be , or } or ] or :
+                                const rest = repaired.substring(i + 1).trimStart();
+                                if (rest.length === 0 || /^[,}\]:]/.test(rest)) {
+                                    inStr = false;
+                                    fixed += c;
+                                } else {
+                                    // Likely an unescaped quote inside the string
+                                    fixed += '\\"';
+                                }
+                            }
+                        } else {
+                            fixed += c;
+                        }
+                    }
+                    json = JSON.parse(fixed);
+                    console.log('[ImportJSON] Fixed unescaped quotes, parsed successfully');
+                } catch {
+                    // All repair attempts failed — throw the original error with context
+                    const errMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+                    // Add a snippet around the error position to help debugging
+                    const posMatch = errMsg.match(/position\s+(\d+)/i);
+                    let hint = '';
+                    if (posMatch) {
+                        const pos = parseInt(posMatch[1]);
+                        const start = Math.max(0, pos - 30);
+                        const end = Math.min(cleanJsonString.length, pos + 30);
+                        hint = `\n\nNear position ${pos}: ...${cleanJsonString.substring(start, pos)}👉${cleanJsonString.substring(pos, end)}...`;
+                    }
+                    throw new Error(errMsg + hint);
+                }
+            }
         }
 
         const parseTime = (val: any): number => {
