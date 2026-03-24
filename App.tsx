@@ -6802,23 +6802,30 @@ function App() {
                         let gizmoTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0, pivotX: 50, pivotY: 50 };
                         let elemBounds = { width: sz.w, height: sz.h };
                         let elemCenter = { x: sz.w / 2, y: sz.h / 2 };
+                        // cropDims for drag delta conversion — overridden for clips
+                        let gizmoCropDims = cropDims;
 
                         if (gizmoTarget.type === 'clip' && primarySelectedSegment) {
                           const clipTime = project.currentTime - primarySelectedSegment.timelineStart;
                           const t = getCombinedTransform(primarySelectedSegment.keyframes, clipTime, project.currentTime);
                           gizmoTransform = { ...t, pivotX: t.pivotX ?? 50, pivotY: t.pivotY ?? 50 };
-                          // Compute actual displayed video size within object-contain
+                          // Compute displayed video size using same math as the CSS transform (object-contain within full viewport)
                           const vidEl = videoRefs.current.get(primarySelectedSegment.id);
-                          if (vidEl && vidEl.videoWidth && vidEl.videoHeight) {
-                            const fitScale = Math.min(sz.w / vidEl.videoWidth, sz.h / vidEl.videoHeight);
-                            elemBounds = { width: vidEl.videoWidth * fitScale, height: vidEl.videoHeight * fitScale };
-                          } else {
-                            elemBounds = { width: sz.w, height: sz.h };
-                          }
+                          const vw = vidEl?.videoWidth || 1920;
+                          const vh = vidEl?.videoHeight || 1080;
+                          const videoAR = vw / vh;
+                          const containerAR = viewportSize.width / (viewportSize.height || 1);
+                          const displayW = containerAR > videoAR ? viewportSize.height * videoAR : viewportSize.width;
+                          const displayH = containerAR > videoAR ? viewportSize.height : viewportSize.width / videoAR;
+                          elemBounds = { width: displayW, height: displayH };
+                          // Video center in safe-zone-relative coordinates
+                          // (video is in viewport space, safe zone is offset by sz.x/sz.y)
                           elemCenter = {
-                            x: sz.w / 2 + t.translateX * sz.w / 100,
-                            y: sz.h / 2 + t.translateY * sz.h / 100,
+                            x: (viewportSize.width / 2 - sz.x) + t.translateX * displayW / 100,
+                            y: (viewportSize.height / 2 - sz.y) + t.translateY * displayH / 100,
                           };
+                          // Drag delta must use video display dims, not safe zone dims
+                          gizmoCropDims = { width: displayW, height: displayH };
                         } else if (gizmoTarget.type === 'title' && project.titleLayer) {
                           const t2 = project.currentTime - project.titleLayer.startTime;
                           const tTransform = project.titleLayer.keyframes?.length
@@ -6854,7 +6861,7 @@ function App() {
                             targetType={gizmoTarget.type}
                             transform={gizmoTransform}
                             viewportSize={{ width: sz.w, height: sz.h }}
-                            cropDims={cropDims}
+                            cropDims={gizmoCropDims}
                             elementBounds={elemBounds}
                             elementCenter={elemCenter}
                             zoom={activeRightTab === 'tracking' ? trackingZoom : 1}
