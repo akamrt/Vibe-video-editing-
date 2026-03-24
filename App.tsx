@@ -583,22 +583,24 @@ function App() {
   // Subtitles (always from track 0 / dialogue track, not the topmost visual)
   // When B-roll (track 1+) overlaps dialogue (track 0), we must still show the
   // dialogue captions — they come from the track 0 media, not the B-roll media.
-  const activeSubtitleEvent = useMemo(() => {
+  const activeDialogueSeg = useMemo(() => {
     const visualSegments = activeSegments.filter(s => s.type !== 'audio');
-    // Prefer track 0 (dialogue); fall back to lowest available track
-    const dialogueSeg = visualSegments.find(s => (s.track || 0) === 0) ?? visualSegments[0];
-    if (!dialogueSeg) return null;
+    return visualSegments.find(s => (s.track || 0) === 0) ?? visualSegments[0] ?? null;
+  }, [activeSegments]);
 
-    const media = project.library.find(m => m.id === dialogueSeg.mediaId);
+  const activeSubtitleEvent = useMemo(() => {
+    if (!activeDialogueSeg) return null;
+
+    const media = project.library.find(m => m.id === activeDialogueSeg.mediaId);
     if (!media?.analysis) return null;
 
-    const sourceTime = dialogueSeg.startTime + (project.currentTime - dialogueSeg.timelineStart);
+    const sourceTime = activeDialogueSeg.startTime + (project.currentTime - activeDialogueSeg.timelineStart);
     const match = media.analysis.events.find((e: any) =>
       e.type === 'dialogue' && sourceTime >= e.startTime && sourceTime <= e.endTime
     );
     if (match) console.log('[App] Overlay match:', match.details, 'Time:', sourceTime.toFixed(2));
     return match;
-  }, [activeSegments, project.currentTime, project.library]);
+  }, [activeDialogueSeg, project.currentTime, project.library]);
 
   // Get the specific selected dialogue event object for Properties
   const selectedDialogueEvent = useMemo(() => {
@@ -6855,9 +6857,7 @@ function App() {
                         let subPivotX = 50;
                         let subPivotY = 50;
                         if (activeSubtitleEvent.keyframes && activeSubtitleEvent.keyframes.length > 0) {
-                          const visualSegsKf = activeSegments.filter(s => s.type !== 'audio');
-                          const topSeg = visualSegsKf.length > 0 ? visualSegsKf[visualSegsKf.length - 1] : activeSegments[activeSegments.length - 1];
-                          const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
+                          const sourceTime = activeDialogueSeg ? activeDialogueSeg.startTime + (project.currentTime - activeDialogueSeg.timelineStart) : 0;
                           const subTime = sourceTime - activeSubtitleEvent.startTime;
                           const kfTransform = getInterpolatedTransform(activeSubtitleEvent.keyframes, subTime);
                           const kfParts: string[] = [];
@@ -6876,9 +6876,7 @@ function App() {
                         // Compute pivot-aware transform-origin for rotation/scale
                         let subPivotOrigin: string | undefined;
                         if (activeSubtitleEvent.pivotKeyframes && activeSubtitleEvent.pivotKeyframes.length > 0) {
-                          const visualSegsPivot = activeSegments.filter(s => s.type !== 'audio');
-                          const topSegPivot = visualSegsPivot.length > 0 ? visualSegsPivot[visualSegsPivot.length - 1] : activeSegments[activeSegments.length - 1];
-                          const sourceTimePivot = topSegPivot ? topSegPivot.startTime + (project.currentTime - topSegPivot.timelineStart) : 0;
+                          const sourceTimePivot = activeDialogueSeg ? activeDialogueSeg.startTime + (project.currentTime - activeDialogueSeg.timelineStart) : 0;
                           const subTimePivot = sourceTimePivot - activeSubtitleEvent.startTime;
                           const pivot = getInterpolatedPivot(activeSubtitleEvent.pivotKeyframes, subTimePivot);
                           if (pivot && safeZoneRef.current && subtitleGizmoRef.current) {
@@ -6902,9 +6900,7 @@ function App() {
                         const kwAnim = activeSubtitleEvent.keywordAnimation || subTemplate?.keywordAnimation || project.activeKeywordAnimation || null;
 
                         if (subAnim && subAnim.effects.length > 0) {
-                          const visualSegsAnim = activeSegments.filter(s => s.type !== 'audio');
-                          const topSeg = visualSegsAnim.length > 0 ? visualSegsAnim[visualSegsAnim.length - 1] : activeSegments[activeSegments.length - 1];
-                          const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : 0;
+                          const sourceTime = activeDialogueSeg ? activeDialogueSeg.startTime + (project.currentTime - activeDialogueSeg.timelineStart) : 0;
                           const localFrame = Math.round((sourceTime - activeSubtitleEvent.startTime) * REMOTION_FPS);
                           const { fontSize: _tfs, ...tplStyleNoSize } = subTemplate?.style || {};
                           const mergedStyle = subTemplate ? { ...tplStyleNoSize, ...styles.text } : styles.text;
@@ -6945,9 +6941,7 @@ function App() {
                         // Fallback: plain text (no template applied)
                         // If word highlight is enabled, use AnimatedText with a no-op animation so it
                         // can measure word positions and render the highlight box.
-                        const visualSegsFb = activeSegments.filter(s => s.type !== 'audio');
-                        const topSegFb = visualSegsFb.length > 0 ? visualSegsFb[visualSegsFb.length - 1] : activeSegments[activeSegments.length - 1];
-                        const sourceTimeFb = topSegFb ? topSegFb.startTime + (project.currentTime - topSegFb.timelineStart) : 0;
+                        const sourceTimeFb = activeDialogueSeg ? activeDialogueSeg.startTime + (project.currentTime - activeDialogueSeg.timelineStart) : 0;
                         if (displayStyle.wordHighlightEnabled) {
                           const noOpAnim = { scope: 'word' as const, effects: [], duration: 0, stagger: 0 };
                           return (
