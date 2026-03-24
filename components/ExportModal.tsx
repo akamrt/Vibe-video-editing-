@@ -48,10 +48,12 @@ const ExportModal: React.FC<ExportModalProps> = ({
 
         try {
             await onExport(settings);
+        } catch (err) {
+            console.error('[Export] Export failed:', err);
+            alert(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
         } finally {
             setIsExporting(false);
             setProgress(100);
-            setTimeout(() => onClose(), 500);
         }
     };
 
