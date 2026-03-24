@@ -504,9 +504,8 @@ function App() {
   // Compute z-indices for overlapping segments — outgoing (left) clip must be on top
   // This ensures z-index survives React re-renders (vs dynamic DOM manipulation)
   const segmentZIndices = useMemo(() => {
-    // Track 0 (dialogue/main) renders on top; higher tracks (B-roll) render below.
-    // Use inverted z-index: track 0 → 100, track 1 → 90, track 2 → 80, etc.
-    const trackZ = (track: number) => Math.max(1, 100 - track * 10);
+    // Higher track number = higher z-index, matching timeline layer order.
+    const trackZ = (track: number) => (track || 0) * 10;
     const zMap = new Map<string, number>();
     renderedSegments.forEach(seg => {
       zMap.set(seg.id, trackZ(seg.track || 0));
@@ -6711,7 +6710,7 @@ function App() {
                       }
 
                       return (
-                        <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: segmentZIndices.get(seg.id) ?? Math.max(1, 100 - (seg.track || 0) * 10) }}>
+                        <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: segmentZIndices.get(seg.id) ?? (seg.track || 0) * 10 }}>
                           {seg.type === 'blank' ? (
                             <div
                               className="w-full h-full flex items-center justify-center p-8 text-center"
