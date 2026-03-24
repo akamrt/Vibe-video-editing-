@@ -60,7 +60,7 @@ const ViewportOverlay: React.FC<ViewportOverlayProps> = ({
                 position: 'absolute',
                 inset: 0,
                 pointerEvents: 'none',
-                zIndex: 10
+                zIndex: 200
             }}
         >
             {/* SVG Mask - black overlay with transparent cutout */}
