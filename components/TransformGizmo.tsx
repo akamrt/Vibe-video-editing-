@@ -9,7 +9,7 @@ import React, { useCallback, useRef } from 'react';
 
 export interface TransformGizmoProps {
   safeZoneRef: React.RefObject<HTMLDivElement | null>;
-  elementRef: React.RefObject<HTMLDivElement | null>;
+  elementRef: React.RefObject<HTMLElement | null>;
   translateX: number;
   translateY: number;
   scale: number;
@@ -249,7 +249,7 @@ export const TransformGizmo: React.FC<TransformGizmoProps> = ({
       style={{
         position: 'absolute', left: 0, top: 0,
         width: szW, height: szH,
-        overflow: 'visible', pointerEvents: 'none', zIndex: 9999,
+        overflow: 'visible', pointerEvents: 'none', zIndex: 10001,
       }}
     >
       <defs>

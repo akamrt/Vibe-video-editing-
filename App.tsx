@@ -6937,14 +6937,18 @@ function App() {
                 })()}
 
                 {/* ── Transform Gizmo: Clip ── */}
-                {showGizmos && primarySelectedSegment && !selectedTransition && !isTitleSelected && !selectedDialogue && primarySelectedSegment.type !== 'audio' && clipGizmoRef.current && (() => {
+                {showGizmos && primarySelectedSegment && !selectedTransition && !isTitleSelected && !selectedDialogue && primarySelectedSegment.type !== 'audio' && videoRefs.current.has(primarySelectedSegment.id) && (() => {
                   const seg = primarySelectedSegment;
                   const clipTime = project.currentTime - seg.timelineStart;
                   const kfC = getCombinedTransform(seg.keyframes, clipTime, project.currentTime);
+                  // Use the actual video element — it has the CSS transform applied so
+                  // getBoundingClientRect() returns correct transformed bounds per layer.
+                  const clipVideoEl = videoRefs.current.get(seg.id) ?? null;
+                  const clipVideoRef = { current: clipVideoEl } as React.RefObject<HTMLElement>;
                   return (
                     <TransformGizmo
                       safeZoneRef={viewportContainerRef as React.RefObject<HTMLDivElement>}
-                      elementRef={clipGizmoRef as React.RefObject<HTMLDivElement>}
+                      elementRef={clipVideoRef}
                       onDragStart={() => {
                         pushUndo({ type: 'keyframes', segmentId: seg.id, keyframes: seg.keyframes || [] });
                       }}
