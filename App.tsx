@@ -185,6 +185,7 @@ function App() {
       audioSourcesRef: audioSourcesRef.current,
       safeZoneHeight: safeZoneRef.current?.getBoundingClientRect().height || viewportSize.height,
       getCombinedTransform,
+      setIsExporting: (v: boolean) => { isExportingRef.current = v; setIsExporting(v); },
     }));
   });
 
