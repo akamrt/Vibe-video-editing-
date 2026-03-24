@@ -1518,6 +1518,7 @@ function App() {
     setProject(p => ({ ...p, isPlaying: true }));
 
     const totalDuration = contentDuration;
+    const exportStartTime = performance.now();
 
     // Pre-allocate reusable tmpCanvas for transition rendering (avoid creating per-frame)
     const tmpCanvas = document.createElement('canvas');
@@ -1539,12 +1540,10 @@ function App() {
     const lastGoodCtx = lastGoodFrame.getContext('2d')!;
 
     const renderLoop = () => {
-      // Check current time from fresh project ref
-      const currentTime = projectRef.current.currentTime;
+      // Use monotonic clock for smooth, jitter-free timing
+      const currentTime = (performance.now() - exportStartTime) / 1000;
 
-      // Add 0.5s buffer for audio tail, or stop if main playback ended
-      if (currentTime >= totalDuration || (!projectRef.current.isPlaying && currentTime > 0)) {
-        // Wait a tiny bit to ensure last frame is captured
+      if (currentTime >= totalDuration) {
         setTimeout(() => {
           if (mediaRecorder.state === 'recording') mediaRecorder.stop();
         }, 500);
