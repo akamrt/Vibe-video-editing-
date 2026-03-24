@@ -7234,7 +7234,14 @@ function App() {
                           const clipTime = project.currentTime - primarySelectedSegment.timelineStart;
                           const t = getCombinedTransform(primarySelectedSegment.keyframes, clipTime, project.currentTime);
                           gizmoTransform = { ...t, pivotX: t.pivotX ?? 50, pivotY: t.pivotY ?? 50 };
-                          elemBounds = { width: sz.w, height: sz.h };
+                          // Compute actual displayed video size within object-contain
+                          const vidEl = videoRefs.current.get(primarySelectedSegment.id);
+                          if (vidEl && vidEl.videoWidth && vidEl.videoHeight) {
+                            const fitScale = Math.min(sz.w / vidEl.videoWidth, sz.h / vidEl.videoHeight);
+                            elemBounds = { width: vidEl.videoWidth * fitScale, height: vidEl.videoHeight * fitScale };
+                          } else {
+                            elemBounds = { width: sz.w, height: sz.h };
+                          }
                           elemCenter = {
                             x: sz.w / 2 + t.translateX * sz.w / 100,
                             y: sz.h / 2 + t.translateY * sz.h / 100,
