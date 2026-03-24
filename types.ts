@@ -584,3 +584,21 @@ export interface TrendFilters {
   region: string;
   timeRange: 'today' | 'week' | 'month';
 }
+
+// ============ RENDER QUEUE ============
+
+export type RenderJobStatus = 'queued' | 'rendering' | 'done' | 'error' | 'aborted';
+
+export interface RenderJob {
+  id: string;
+  name: string;
+  settings: ExportSettings;
+  status: RenderJobStatus;
+  progress: number;
+  currentFrame: number;
+  totalFrames: number;
+  startedAt: number | null;
+  eta: number | null;
+  error: string | null;
+  outputUrl: string | null;
+}
