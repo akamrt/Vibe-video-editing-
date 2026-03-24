@@ -295,6 +295,7 @@ export class OfflineRenderer {
     });
 
     mediaRecorder.start(1000); // Flush data every 1s to avoid losing everything on crash
+    const recordStartMs = performance.now();
 
     // ── Frame loop ─────────────────────────────────────────────────────────
     try {
@@ -601,8 +602,26 @@ export class OfflineRenderer {
         // ── Report progress ─────────────────────────────────────────────
         callbacks.onProgress(frameIndex + 1, totalFrames);
 
-        // ── Yield to browser ────────────────────────────────────────────
-        await yieldToBrowser();
+        // ── Play active videos for audio capture, then pace to correct FPS ──
+        // Playing videos during the frame window lets Web Audio route audio to
+        // the MediaRecorder destination. Pacing ensures requestFrame() is called
+        // at 1/fps intervals so playback speed is correct (not slow motion).
+        activeSegments.forEach((seg) => {
+          const vid = deps.videoRefs.get(seg.id);
+          if (vid && vid.readyState >= 2) vid.play().catch(() => {});
+        });
+
+        // Wait until it's time for the NEXT frame (maintains correct timestamps)
+        const nextFrameMs = (frameIndex + 1) * (1000 / fps);
+        const elapsed = performance.now() - recordStartMs;
+        const waitMs = Math.max(1, nextFrameMs - elapsed);
+        await new Promise(r => setTimeout(r, waitMs));
+
+        // Pause before the next seek
+        activeSegments.forEach((seg) => {
+          const vid = deps.videoRefs.get(seg.id);
+          if (vid) vid.pause();
+        });
       }
     } catch (err: any) {
       console.error('[OfflineRenderer] Frame loop error:', err);

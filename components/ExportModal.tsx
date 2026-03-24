@@ -27,7 +27,7 @@ const ExportModal: React.FC<ExportModalProps> = ({
 }) => {
     const [aspectRatio, setAspectRatio] = useState<AspectRatioPreset>('9:16');
     const [resolution, setResolution] = useState<'720p' | '1080p' | '4K'>('1080p');
-    const [bitrateMbps, setBitrateMbps] = useState(25);
+    const [bitrateMbps, setBitrateMbps] = useState(8);
     const [fps, setFps] = useState(30);
     if (!isOpen) return null;
 
