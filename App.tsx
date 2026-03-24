@@ -6526,7 +6526,7 @@ function App() {
                     }
                   }
                   return (
-                    <div ref={safeZoneRef} style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none' }}>
+                    <div ref={safeZoneRef} style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none', zIndex: 500 }}>
 
                       {/* Animated Subtitle Overlay */}
                       {activeSubtitleEvent && (() => {
