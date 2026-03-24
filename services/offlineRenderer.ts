@@ -54,6 +54,8 @@ export interface RendererDeps {
     clipTime: number,
     timelineTime: number,
   ) => any;
+  /** Must set true before render so React mounts ALL video elements, false after */
+  setIsExporting: (v: boolean) => void;
 }
 
 export interface RenderCallbacks {
@@ -144,6 +146,37 @@ export class OfflineRenderer {
 
   async render(): Promise<void> {
     const { settings, deps, callbacks } = this;
+
+    // ── Mount ALL video elements by signalling export mode ──────────────────
+    // React only mounts video elements for active segments; we need all of them.
+    deps.setIsExporting(true);
+
+    // Wait for React to re-render and mount all video elements
+    await new Promise(r => setTimeout(r, 500));
+
+    // Wait for all video elements to be loaded enough to seek
+    const waitForAllVideos = async () => {
+      const maxWait = 10_000; // 10s max
+      const start = Date.now();
+      while (Date.now() - start < maxWait) {
+        // Re-read videoRefs since React may have updated them
+        const allLoaded = deps.segments.every((seg) => {
+          if (seg.type === 'blank') return true;
+          const vid = deps.videoRefs.get(seg.id);
+          return vid && vid.readyState >= 1; // HAVE_METADATA
+        });
+        if (allLoaded) {
+          console.log('[OfflineRenderer] All video elements loaded');
+          return;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      console.warn('[OfflineRenderer] Timed out waiting for all videos, proceeding with available ones');
+    };
+    await waitForAllVideos();
+
+    // Pause all videos (we seek manually)
+    deps.videoRefs.forEach(vid => { vid.pause(); });
 
     // ── Compute output dimensions ──────────────────────────────────────────
     const preset = ASPECT_RATIO_PRESETS[settings.aspectRatio];
@@ -261,7 +294,7 @@ export class OfflineRenderer {
       mediaRecorder.onerror = (e) => reject((e as any).error ?? e);
     });
 
-    mediaRecorder.start();
+    mediaRecorder.start(1000); // Flush data every 1s to avoid losing everything on crash
 
     // ── Frame loop ─────────────────────────────────────────────────────────
     try {
@@ -573,12 +606,14 @@ export class OfflineRenderer {
       }
     } catch (err: any) {
       console.error('[OfflineRenderer] Frame loop error:', err);
+      deps.setIsExporting(false);
       try { mediaRecorder.stop(); } catch (_) { /* ignore */ }
       callbacks.onError(err instanceof Error ? err : new Error(String(err)));
       return;
     }
 
     // ── Stop recorder and await blob ───────────────────────────────────────
+    deps.setIsExporting(false);
     try {
       if (mediaRecorder.state === 'recording') {
         mediaRecorder.stop();
