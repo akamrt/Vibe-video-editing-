@@ -197,6 +197,28 @@ function App() {
     }));
   });
 
+  // Register render queue deps provider (always supplies fresh state)
+  useEffect(() => {
+    renderQueue.setDepsProvider(() => ({
+      segments: projectRef.current.segments,
+      globalKeyframes: globalKeyframesRef.current,
+      titleLayer: projectRef.current.titleLayers?.[0] || null,
+      subtitleStyle: projectRef.current.subtitleStyle || {} as any,
+      titleStyle: (projectRef.current as any).titleStyle || projectRef.current.subtitleStyle || {},
+      activeSubtitleTemplate: (projectRef.current as any).activeSubtitleTemplate || null,
+      activeTitleTemplate: (projectRef.current as any).activeTitleTemplate || null,
+      activeKeywordAnimation: (projectRef.current as any).activeKeywordAnimation || null,
+      removedWords: (projectRef.current as any).removedWords || [],
+      library: projectRef.current.library,
+      videoRefs: videoRefs.current,
+      audioContext: audioContextRef.current || new AudioContext(),
+      audioSourcesRef: audioSourcesRef.current,
+      safeZoneHeight: safeZoneRef.current?.getBoundingClientRect().height || viewportSize.height,
+      getCombinedTransform,
+      setIsExporting: (v: boolean) => { isExportingRef.current = v; setIsExporting(v); },
+    }));
+  });
+
   // Server health polling — shows banner when backend is unreachable
   useEffect(() => {
     startHealthPolling();
