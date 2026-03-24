@@ -515,24 +515,25 @@ function App() {
     return media?.analysis || null;
   }, [primarySelectedSegment, project.library]);
 
-  // Subtitles (from top-most VISUAL media, not audio-only)
+  // Subtitles (always from track 0 / dialogue track, not the topmost visual)
+  // When B-roll (track 1+) overlaps dialogue (track 0), we must still show the
+  // dialogue captions — they come from the track 0 media, not the B-roll media.
   const activeSubtitleEvent = useMemo(() => {
-    if (!currentTopMedia || !currentTopMedia.analysis) return null;
     const visualSegments = activeSegments.filter(s => s.type !== 'audio');
-    const topSeg = visualSegments.length > 0
-      ? visualSegments[visualSegments.length - 1]
-      : activeSegments[activeSegments.length - 1];
-    if (!topSeg) return null;
+    // Prefer track 0 (dialogue); fall back to lowest available track
+    const dialogueSeg = visualSegments.find(s => (s.track || 0) === 0) ?? visualSegments[0];
+    if (!dialogueSeg) return null;
 
-    // Calculate source time for the top visual segment
-    const sourceTime = topSeg.startTime + (project.currentTime - topSeg.timelineStart);
+    const media = project.library.find(m => m.id === dialogueSeg.mediaId);
+    if (!media?.analysis) return null;
 
-    const match = currentTopMedia.analysis.events.find(e =>
+    const sourceTime = dialogueSeg.startTime + (project.currentTime - dialogueSeg.timelineStart);
+    const match = media.analysis.events.find((e: any) =>
       e.type === 'dialogue' && sourceTime >= e.startTime && sourceTime <= e.endTime
     );
     if (match) console.log('[App] Overlay match:', match.details, 'Time:', sourceTime.toFixed(2));
     return match;
-  }, [currentTopMedia, project.currentTime, activeSegments]);
+  }, [activeSegments, project.currentTime, project.library]);
 
   // Get the specific selected dialogue event object for Properties
   const selectedDialogueEvent = useMemo(() => {
