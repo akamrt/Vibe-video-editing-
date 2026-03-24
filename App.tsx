@@ -27,7 +27,6 @@ import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo,
 import { fullScanAndCenter, trackHeadForPivot, headTrackForPivot } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
 import TrackerOverlay from './components/TrackerOverlay';
-import { TransformGizmo } from './components/TransformGizmo';
 import GizmoOverlay from './components/GizmoOverlay';
 import StockBrowser from './components/StockBrowser';
 import ResizeHandle from './components/ResizeHandle';
@@ -171,7 +170,6 @@ function App() {
   // Gizmo element refs — assigned to the subtitle/title container divs for bounding rect measurement
   const subtitleGizmoRef = useRef<HTMLDivElement | null>(null);
   const titleGizmoRef = useRef<HTMLDivElement | null>(null);
-  const clipGizmoRef = useRef<HTMLDivElement | null>(null);
   const [showGizmos, setShowGizmos] = useState(true);
   const [pivotTrackingProgress, setPivotTrackingProgress] = useState<{ progress: number; label: string } | null>(null);
 
@@ -6654,9 +6652,8 @@ function App() {
                         );
                       }
 
-                      const isSelectedClip = selectedSegmentIds[0] === seg.id && !selectedTransition;
                       return (
-                        <div key={seg.id} ref={isSelectedClip ? (el => { clipGizmoRef.current = el; }) : undefined} className="absolute inset-0 w-full h-full" style={{ zIndex: segmentZIndices.get(seg.id) ?? (seg.track || 0) * 10 }}>
+                        <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: segmentZIndices.get(seg.id) ?? (seg.track || 0) * 10 }}>
                           {seg.type === 'blank' ? (
                             <div
                               className="w-full h-full flex items-center justify-center p-8 text-center"
@@ -7071,142 +7068,6 @@ function App() {
                         );
                       })()}
 
-                      {/* ── Transform Gizmo: Subtitle ── */}
-                      {showGizmos && selectedDialogueEvent && activeSubtitleEvent && selectedDialogueEvent === activeSubtitleEvent && subtitleGizmoRef.current && (() => {
-                        const visualSegsG = activeSegments.filter(s => s.type !== 'audio');
-                        const topSegG = visualSegsG.length > 0 ? visualSegsG[visualSegsG.length - 1] : activeSegments[activeSegments.length - 1];
-                        const sourceTimeG = topSegG ? topSegG.startTime + (project.currentTime - topSegG.timelineStart) : 0;
-                        const subTimeG = sourceTimeG - activeSubtitleEvent.startTime;
-                        const kfG = activeSubtitleEvent.keyframes?.length
-                          ? getInterpolatedTransform(activeSubtitleEvent.keyframes, subTimeG)
-                          : null;
-                        const pivotG = activeSubtitleEvent.pivotKeyframes?.length
-                          ? getInterpolatedPivot(activeSubtitleEvent.pivotKeyframes, subTimeG)
-                          : null;
-                        const subEvtIdxG = currentTopMedia?.analysis?.events.indexOf(activeSubtitleEvent) ?? -1;
-
-                        return (
-                          <TransformGizmo
-                            safeZoneRef={safeZoneRef as React.RefObject<HTMLDivElement>}
-                            elementRef={subtitleGizmoRef as React.RefObject<HTMLDivElement>}
-                            onDragStart={() => {
-                              if (!currentTopMedia || subEvtIdxG < 0) return;
-                              pushUndo({ type: 'dialogueEvent', mediaId: currentTopMedia.id, index: subEvtIdxG, event: { ...activeSubtitleEvent } });
-                            }}
-                            translateX={activeSubtitleEvent.translateX || 0}
-                            translateY={activeSubtitleEvent.translateY || 0}
-                            scale={kfG?.scale ?? 1}
-                            rotation={kfG?.rotation ?? 0}
-                            pivotX={pivotG?.x ?? null}
-                            pivotY={pivotG?.y ?? null}
-                            onTranslateChange={(tx, ty, _commit) => {
-                              if (!currentTopMedia || subEvtIdxG < 0) return;
-                              updateSelectedEvent(evt => ({ ...evt, translateX: tx, translateY: ty }));
-                            }}
-                            onRotationChange={(rot, _commit) => {
-                              if (!currentTopMedia || subEvtIdxG < 0) return;
-                              const t2 = subTimeG;
-                              const baseKf = kfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
-                              const existing = activeSubtitleEvent.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
-                              if (existing) {
-                                updateSelectedEvent(evt => ({ ...evt, keyframes: evt.keyframes?.map(k => k === existing ? { ...k, rotation: rot } : k) }));
-                              } else {
-                                updateSelectedEvent(evt => ({ ...evt, keyframes: [...(evt.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: baseKf.scale, rotation: rot }] }));
-                              }
-                            }}
-                            onScaleChange={(s, _commit) => {
-                              if (!currentTopMedia || subEvtIdxG < 0) return;
-                              const t2 = subTimeG;
-                              const baseKf = kfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
-                              const existing = activeSubtitleEvent.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
-                              if (existing) {
-                                updateSelectedEvent(evt => ({ ...evt, keyframes: evt.keyframes?.map(k => k === existing ? { ...k, scale: s } : k) }));
-                              } else {
-                                updateSelectedEvent(evt => ({ ...evt, keyframes: [...(evt.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: s, rotation: baseKf.rotation }] }));
-                              }
-                            }}
-                            onPivotChange={(px, py) => {
-                              if (!currentTopMedia || subEvtIdxG < 0) return;
-                              const newPivotKf: PivotKeyframe = { time: subTimeG, x: px, y: py };
-                              updateSelectedEvent(evt => ({
-                                ...evt,
-                                pivotKeyframes: [
-                                  ...(evt.pivotKeyframes?.filter(k => Math.abs(k.time - subTimeG) > 0.05) || []),
-                                  newPivotKf,
-                                ].sort((a, b) => a.time - b.time),
-                              }));
-                            }}
-                            visible={true}
-                          />
-                        );
-                      })()}
-
-                      {/* ── Transform Gizmo: Title ── */}
-                      {showGizmos && isTitleSelected && project.titleLayer && project.currentTime >= project.titleLayer.startTime && project.currentTime <= project.titleLayer.endTime && titleGizmoRef.current && (() => {
-                        const titleT = project.currentTime - project.titleLayer.startTime;
-                        const titleKfG = project.titleLayer.keyframes?.length
-                          ? getCombinedTransform(project.titleLayer.keyframes, titleT, project.currentTime)
-                          : null;
-                        const titlePivotG = project.titleLayer.pivotKeyframes?.length
-                          ? getInterpolatedPivot(project.titleLayer.pivotKeyframes, titleT)
-                          : null;
-
-                        return (
-                          <TransformGizmo
-                            safeZoneRef={safeZoneRef as React.RefObject<HTMLDivElement>}
-                            elementRef={titleGizmoRef as React.RefObject<HTMLDivElement>}
-                            onDragStart={() => {
-                              if (project.titleLayer) pushUndo({ type: 'titleLayer', titleLayer: { ...project.titleLayer } });
-                            }}
-                            translateX={titleKfG?.translateX ?? 0}
-                            translateY={titleKfG?.translateY ?? 0}
-                            scale={titleKfG?.scale ?? 1}
-                            rotation={titleKfG?.rotation ?? 0}
-                            pivotX={titlePivotG?.x ?? null}
-                            pivotY={titlePivotG?.y ?? null}
-                            onTranslateChange={(tx, ty, _commit) => {
-                              const t2 = titleT;
-                              const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
-                              const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
-                              if (existing) {
-                                handleUpdateTitleLayer({ keyframes: project.titleLayer!.keyframes!.map(k => k === existing ? { ...k, translateX: tx, translateY: ty } : k) });
-                              } else {
-                                handleUpdateTitleLayer({ keyframes: [...(project.titleLayer?.keyframes || []), { time: t2, translateX: tx, translateY: ty, scale: baseKf.scale, rotation: baseKf.rotation }] });
-                              }
-                            }}
-                            onRotationChange={(rot, _commit) => {
-                              const t2 = titleT;
-                              const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
-                              const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
-                              if (existing) {
-                                handleUpdateTitleLayer({ keyframes: project.titleLayer!.keyframes!.map(k => k === existing ? { ...k, rotation: rot } : k) });
-                              } else {
-                                handleUpdateTitleLayer({ keyframes: [...(project.titleLayer?.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: baseKf.scale, rotation: rot }] });
-                              }
-                            }}
-                            onScaleChange={(s, _commit) => {
-                              const t2 = titleT;
-                              const existing = project.titleLayer?.keyframes?.find(k => Math.abs(k.time - t2) < 0.05);
-                              const baseKf = titleKfG ?? { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
-                              if (existing) {
-                                handleUpdateTitleLayer({ keyframes: project.titleLayer!.keyframes!.map(k => k === existing ? { ...k, scale: s } : k) });
-                              } else {
-                                handleUpdateTitleLayer({ keyframes: [...(project.titleLayer?.keyframes || []), { time: t2, translateX: baseKf.translateX, translateY: baseKf.translateY, scale: s, rotation: baseKf.rotation }] });
-                              }
-                            }}
-                            onPivotChange={(px, py) => {
-                              const newPivotKf: PivotKeyframe = { time: titleT, x: px, y: py };
-                              handleUpdateTitleLayer({
-                                pivotKeyframes: [
-                                  ...(project.titleLayer?.pivotKeyframes?.filter(k => Math.abs(k.time - titleT) > 0.05) || []),
-                                  newPivotKf,
-                                ].sort((a, b) => a.time - b.time),
-                              });
-                            }}
-                            visible={true}
-                          />
-                        );
-                      })()}
 
                       {/* Active template indicator */}
                       {project.activeSubtitleTemplate && (
@@ -7321,63 +7182,6 @@ function App() {
                   );
                 })()}
 
-                {/* ── Transform Gizmo: Clip ── */}
-                {showGizmos && primarySelectedSegment && !selectedTransition && !isTitleSelected && !selectedDialogue && primarySelectedSegment.type !== 'audio' && videoRefs.current.has(primarySelectedSegment.id) && (() => {
-                  const seg = primarySelectedSegment;
-                  const clipTime = project.currentTime - seg.timelineStart;
-                  const kfC = getCombinedTransform(seg.keyframes, clipTime, project.currentTime);
-                  // Use the actual video element — it has the CSS transform applied so
-                  // getBoundingClientRect() returns correct transformed bounds per layer.
-                  const clipVideoEl = videoRefs.current.get(seg.id) ?? null;
-                  const clipVideoRef = { current: clipVideoEl } as React.RefObject<HTMLElement>;
-                  return (
-                    <TransformGizmo
-                      safeZoneRef={viewportContainerRef as React.RefObject<HTMLDivElement>}
-                      elementRef={clipVideoRef}
-                      onDragStart={() => {
-                        pushUndo({ type: 'keyframes', segmentId: seg.id, keyframes: seg.keyframes || [] });
-                      }}
-                      translateX={kfC.translateX}
-                      translateY={kfC.translateY}
-                      scale={kfC.scale}
-                      rotation={kfC.rotation}
-                      pivotX={null}
-                      pivotY={null}
-                      onTranslateChange={(tx, ty, _commit) => {
-                        const kfs = seg.keyframes || [];
-                        const existing = kfs.find(k => Math.abs(k.time - clipTime) < 0.05);
-                        const base = kfC;
-                        if (existing) {
-                          handleUpdateKeyframes(seg.id, kfs.map(k => k === existing ? { ...k, translateX: tx, translateY: ty } : k), true);
-                        } else {
-                          handleUpdateKeyframes(seg.id, [...kfs, { time: clipTime, translateX: tx, translateY: ty, scale: base.scale, rotation: base.rotation }].sort((a, b) => a.time - b.time), true);
-                        }
-                      }}
-                      onRotationChange={(rot, _commit) => {
-                        const kfs = seg.keyframes || [];
-                        const existing = kfs.find(k => Math.abs(k.time - clipTime) < 0.05);
-                        const base = kfC;
-                        if (existing) {
-                          handleUpdateKeyframes(seg.id, kfs.map(k => k === existing ? { ...k, rotation: rot } : k), true);
-                        } else {
-                          handleUpdateKeyframes(seg.id, [...kfs, { time: clipTime, translateX: base.translateX, translateY: base.translateY, scale: base.scale, rotation: rot }].sort((a, b) => a.time - b.time), true);
-                        }
-                      }}
-                      onScaleChange={(s, _commit) => {
-                        const kfs = seg.keyframes || [];
-                        const existing = kfs.find(k => Math.abs(k.time - clipTime) < 0.05);
-                        const base = kfC;
-                        if (existing) {
-                          handleUpdateKeyframes(seg.id, kfs.map(k => k === existing ? { ...k, scale: s } : k), true);
-                        } else {
-                          handleUpdateKeyframes(seg.id, [...kfs, { time: clipTime, translateX: base.translateX, translateY: base.translateY, scale: s, rotation: base.rotation }].sort((a, b) => a.time - b.time), true);
-                        }
-                      }}
-                      onPivotChange={() => {}}
-                      visible={true}
-                    />
-                  );
-                })()}
               </div>
               </div>
             ) : (
