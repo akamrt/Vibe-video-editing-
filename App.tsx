@@ -25,6 +25,8 @@ import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
 import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes, detectPersonInFrame } from './services/templateTrackingService';
 import { fullScanAndCenter, headTrackForPivot } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
+import RenderQueuePanel from './components/RenderQueuePanel';
+import { renderQueue } from './services/renderQueue';
 import TrackerOverlay from './components/TrackerOverlay';
 import GizmoOverlay from './components/GizmoOverlay';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from './services/costTracker';
@@ -165,6 +167,27 @@ function App() {
   useEffect(() => { projectRef.current = project; }, [project]);
   const safeZoneRef = useRef<HTMLDivElement>(null);
 
+  // Register render queue deps provider (always supplies fresh state)
+  useEffect(() => {
+    renderQueue.setDepsProvider(() => ({
+      segments: projectRef.current.segments,
+      globalKeyframes: globalKeyframesRef.current,
+      titleLayer: projectRef.current.titleLayers?.[0] || null,
+      subtitleStyle: projectRef.current.subtitleStyle || {} as any,
+      titleStyle: (projectRef.current as any).titleStyle || projectRef.current.subtitleStyle || {},
+      activeSubtitleTemplate: (projectRef.current as any).activeSubtitleTemplate || null,
+      activeTitleTemplate: (projectRef.current as any).activeTitleTemplate || null,
+      activeKeywordAnimation: (projectRef.current as any).activeKeywordAnimation || null,
+      removedWords: (projectRef.current as any).removedWords || [],
+      library: projectRef.current.library,
+      videoRefs: videoRefs.current,
+      audioContext: audioContextRef.current || new AudioContext(),
+      audioSourcesRef: audioSourcesRef.current,
+      safeZoneHeight: safeZoneRef.current?.getBoundingClientRect().height || viewportSize.height,
+      getCombinedTransform,
+    }));
+  });
+
   // Server health polling — shows banner when backend is unreachable
   useEffect(() => {
     startHealthPolling();
@@ -237,7 +260,7 @@ function App() {
   const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'properties'>('media');
 
   // Right Panel State
-  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions'>('transitions');
+  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions' | 'render'>('transitions');
 
   // Reset zoom/pan when leaving tracking tab
   useEffect(() => {
@@ -307,6 +330,8 @@ function App() {
 
   // Global/Root transform keyframes (affects all clips)
   const [globalKeyframes, setGlobalKeyframes] = useState<ClipKeyframe[]>([]);
+  const globalKeyframesRef = useRef<ClipKeyframe[]>(globalKeyframes);
+  useEffect(() => { globalKeyframesRef.current = globalKeyframes; }, [globalKeyframes]);
 
   // Transform target: 'global' for root transform, or segment ID for individual clip
   const [transformTarget, setTransformTarget] = useState<'global' | string>('global');
@@ -1399,8 +1424,16 @@ function App() {
     return primarySelectedSegment.endTime - primarySelectedSegment.startTime;
   }, [primarySelectedSegment]);
 
-  // Export video with animations
-  // Export video with animations (real-time playback capture)
+  // Add export to offline render queue
+  const handleAddToRenderQueue = (settings: ExportSettings) => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    renderQueue.addJob(settings);
+    setActiveRightTab('render');
+  };
+
+  // Export video with animations (real-time playback capture) — legacy, kept as fallback
   const handleExportVideo = async (settings: ExportSettings) => {
     console.log('[Export] Starting REAL-TIME export:', settings);
 
@@ -7021,6 +7054,7 @@ function App() {
                 <button onClick={() => setActiveRightTab('templates')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'templates' ? 'bg-[#333] text-purple-400 border-b-2 border-purple-400' : 'text-gray-400'}`}>TEMPLATES</button>
                 <button onClick={() => setActiveRightTab('transitions')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'transitions' ? 'bg-[#333] text-cyan-400 border-b-2 border-cyan-400' : 'text-gray-400'}`}>TRANS.</button>
                 <button onClick={() => setActiveRightTab('tracking')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'tracking' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400'}`}>TRACKING</button>
+                <button onClick={() => setActiveRightTab('render')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'render' ? 'bg-[#333] text-orange-400 border-b-2 border-orange-400' : 'text-gray-400'}`}>RENDER</button>
               </div>
               <div className="flex-1 overflow-hidden">
                 {activeRightTab === 'templates' && (
@@ -7126,6 +7160,9 @@ function App() {
                     onAutoPivotToHead={handleAutoPivotToHead}
                     autoPivotProgress={autoPivotProgress}
                   />
+                )}
+                {activeRightTab === 'render' && (
+                  <RenderQueuePanel />
                 )}
               </div>
             </div>
@@ -7397,7 +7434,7 @@ function App() {
       <ExportModal
         isOpen={showExportModal}
         onClose={() => setShowExportModal(false)}
-        onExport={handleExportVideo}
+        onExport={handleAddToRenderQueue}
         duration={contentDuration}
       />
 

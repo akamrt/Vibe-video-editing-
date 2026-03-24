@@ -5,7 +5,7 @@ import { ASPECT_RATIO_PRESETS } from '../utils/interpolation';
 interface ExportModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onExport: (settings: ExportSettings) => Promise<void>;
+    onExport: (settings: ExportSettings) => void;
     duration: number;
 }
 
@@ -29,15 +29,9 @@ const ExportModal: React.FC<ExportModalProps> = ({
     const [resolution, setResolution] = useState<'720p' | '1080p' | '4K'>('1080p');
     const [bitrateMbps, setBitrateMbps] = useState(25);
     const [fps, setFps] = useState(30);
-    const [isExporting, setIsExporting] = useState(false);
-    const [progress, setProgress] = useState(0);
-
     if (!isOpen) return null;
 
-    const handleExport = async () => {
-        setIsExporting(true);
-        setProgress(0);
-
+    const handleExport = () => {
         const settings: ExportSettings = {
             aspectRatio,
             resolution,
@@ -46,15 +40,8 @@ const ExportModal: React.FC<ExportModalProps> = ({
             fps
         };
 
-        try {
-            await onExport(settings);
-        } catch (err) {
-            console.error('[Export] Export failed:', err);
-            alert(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
-        } finally {
-            setIsExporting(false);
-            setProgress(100);
-        }
+        onExport(settings);
+        onClose();
     };
 
     const getOutputDimensions = () => {
@@ -263,27 +250,6 @@ const ExportModal: React.FC<ExportModalProps> = ({
                         </div>
                     </div>
 
-                    {/* Progress Bar */}
-                    {isExporting && (
-                        <div>
-                            <div style={{
-                                height: 8,
-                                backgroundColor: '#333',
-                                borderRadius: 4,
-                                overflow: 'hidden'
-                            }}>
-                                <div style={{
-                                    height: '100%',
-                                    width: `${progress}%`,
-                                    backgroundColor: '#3b82f6',
-                                    transition: 'width 0.3s ease'
-                                }} />
-                            </div>
-                            <div style={{ fontSize: 12, color: '#888', marginTop: 8, textAlign: 'center' }}>
-                                Exporting... {progress}%
-                            </div>
-                        </div>
-                    )}
                 </div>
 
                 {/* Footer */}
@@ -296,7 +262,6 @@ const ExportModal: React.FC<ExportModalProps> = ({
                 }}>
                     <button
                         onClick={onClose}
-                        disabled={isExporting}
                         style={{
                             padding: '10px 20px',
                             borderRadius: 6,
@@ -304,15 +269,13 @@ const ExportModal: React.FC<ExportModalProps> = ({
                             backgroundColor: 'transparent',
                             color: '#ccc',
                             fontSize: 14,
-                            cursor: isExporting ? 'not-allowed' : 'pointer',
-                            opacity: isExporting ? 0.5 : 1
+                            cursor: 'pointer',
                         }}
                     >
                         Cancel
                     </button>
                     <button
                         onClick={handleExport}
-                        disabled={isExporting}
                         style={{
                             padding: '10px 24px',
                             borderRadius: 6,
@@ -321,14 +284,13 @@ const ExportModal: React.FC<ExportModalProps> = ({
                             color: '#fff',
                             fontSize: 14,
                             fontWeight: 600,
-                            cursor: isExporting ? 'not-allowed' : 'pointer',
-                            opacity: isExporting ? 0.7 : 1,
+                            cursor: 'pointer',
                             display: 'flex',
                             alignItems: 'center',
                             gap: 8
                         }}
                     >
-                        {isExporting ? 'Exporting...' : '🎬 Export'}
+                        🎬 Add to Render Queue
                     </button>
                 </div>
             </div>

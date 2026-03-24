@@ -47,7 +47,7 @@ export interface RendererDeps {
   library: { id: string; url: string; analysis?: any }[];
   videoRefs: Map<string, HTMLVideoElement>;
   audioContext: AudioContext;
-  audioSourcesRef: Map<HTMLVideoElement, MediaElementAudioSourceNode>;
+  audioSourcesRef: WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>;
   safeZoneHeight: number;
   getCombinedTransform: (
     kfs: ClipKeyframe[] | undefined,
