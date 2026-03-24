@@ -49,6 +49,13 @@ def handle_track(request: dict) -> dict:
             search_window=options.get('searchWindow', 60),
             sample_interval=sample_interval,
         )
+    elif mode == 'head_center':
+        return track_head_through_segment(
+            video_path, start_time, end_time,
+            sample_interval=sample_interval,
+            initial_x=options.get('initialPersonX'),
+            initial_y=options.get('initialPersonY'),
+        )
     elif mode == 'optical_flow':
         initial_points = options.get('initialPoints', [])
         return track_optical_flow(
@@ -75,7 +82,7 @@ def handle_capabilities(_request: dict) -> dict:
     """Report available tracking capabilities."""
     caps = {
         'success': True,
-        'modes': ['person_center', 'template', 'optical_flow'],
+        'modes': ['person_center', 'head_center', 'template', 'optical_flow'],
         'features': ['mediapipe_pose', 'opencv_optical_flow', 'opencv_template_match'],
     }
 

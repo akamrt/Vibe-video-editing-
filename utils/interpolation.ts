@@ -79,6 +79,8 @@ export interface ClipTransform {
     scale: number;
     rotation: number;
     volume: number;
+    pivotX: number;
+    pivotY: number;
 }
 
 /**
@@ -97,7 +99,9 @@ export const getInterpolatedTransform = (
         translateY: 0,
         scale: 1,
         rotation: 0,
-        volume: 1
+        volume: 1,
+        pivotX: 50,
+        pivotY: 50
     };
 
     if (!keyframes || keyframes.length === 0) {
@@ -114,7 +118,9 @@ export const getInterpolatedTransform = (
             translateY: sorted[0].translateY,
             scale: sorted[0].scale,
             rotation: sorted[0].rotation,
-            volume: sorted[0].volume ?? 1
+            volume: sorted[0].volume ?? 1,
+            pivotX: sorted[0].pivotX ?? 50,
+            pivotY: sorted[0].pivotY ?? 50
         };
     }
 
@@ -126,7 +132,9 @@ export const getInterpolatedTransform = (
             translateY: last.translateY,
             scale: last.scale,
             rotation: last.rotation,
-            volume: last.volume ?? 1
+            volume: last.volume ?? 1,
+            pivotX: last.pivotX ?? 50,
+            pivotY: last.pivotY ?? 50
         };
     }
 
@@ -142,13 +150,17 @@ export const getInterpolatedTransform = (
     }
 
     // Interpolate each property
-    const props: (keyof ClipTransform)[] = ['translateX', 'translateY', 'scale', 'rotation', 'volume'];
+    const props: (keyof ClipTransform)[] = ['translateX', 'translateY', 'scale', 'rotation', 'volume', 'pivotX', 'pivotY'];
     const result: ClipTransform = { ...defaultTransform };
 
     props.forEach(prop => {
-        // volume is optional on ClipKeyframe — default to 1 when absent
-        const v0 = prop === 'volume' ? (prev.volume ?? 1) : prev[prop] as number;
-        const v1 = prop === 'volume' ? (next.volume ?? 1) : next[prop] as number;
+        // Optional props on ClipKeyframe — default when absent
+        const optionalDefaults: Partial<Record<keyof ClipTransform, number>> = {
+            volume: 1, pivotX: 50, pivotY: 50
+        };
+        const defaultVal = optionalDefaults[prop];
+        const v0 = defaultVal !== undefined ? ((prev as any)[prop] ?? defaultVal) : (prev as any)[prop] as number;
+        const v1 = defaultVal !== undefined ? ((next as any)[prop] ?? defaultVal) : (next as any)[prop] as number;
         const t0 = prev.time;
         const t1 = next.time;
         const cfg0 = prev.keyframeConfig?.[prop];
@@ -158,6 +170,33 @@ export const getInterpolatedTransform = (
     });
 
     return result;
+};
+
+// ============ PIVOT COMPENSATION ============
+
+/**
+ * When the pivot (transform origin) moves, compute compensating translation
+ * so the element doesn't visually jump. All values in percentage space.
+ *
+ * Derivation: CSS transform = T(tx,ty) * T(pivot) * R(r)*S(s) * T(-pivot)
+ * Moving pivot from (opx,opy) to (npx,npy) requires adjusting (tx,ty) so
+ * the composed transform maps every point to the same screen position.
+ */
+export const compensatePivotChange = (
+    tx: number, ty: number,
+    scale: number, rotation: number,
+    oldPX: number, oldPY: number,
+    newPX: number, newPY: number
+): { translateX: number; translateY: number } => {
+    const r = rotation * Math.PI / 180;
+    const cosR = Math.cos(r);
+    const sinR = Math.sin(r);
+    const dx = oldPX - newPX;
+    const dy = oldPY - newPY;
+    return {
+        translateX: tx + dx - scale * (dx * cosR - dy * sinR),
+        translateY: ty + dy - scale * (dx * sinR + dy * cosR)
+    };
 };
 
 // ============ ASPECT RATIO HELPERS ============

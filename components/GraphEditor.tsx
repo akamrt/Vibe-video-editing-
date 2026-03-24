@@ -21,7 +21,9 @@ const CHANNEL_COLORS = {
     translateY: '#44ff44',
     scale: '#3b82f6',
     rotation: '#f97316',
-    volume: '#fbbf24'
+    volume: '#fbbf24',
+    pivotX: '#06b6d4',
+    pivotY: '#8b5cf6'
 };
 
 const CHANNEL_LABELS = {
@@ -29,16 +31,21 @@ const CHANNEL_LABELS = {
     translateY: 'Y Position',
     scale: 'Scale',
     rotation: 'Rotation',
-    volume: 'Volume'
+    volume: 'Volume',
+    pivotX: 'Pivot X',
+    pivotY: 'Pivot Y'
 };
 
 type ChannelType = keyof typeof CHANNEL_COLORS;
-const ALL_CHANNELS: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation', 'volume'];
-const CHANNEL_DEFAULTS: Record<ChannelType, number> = { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1 };
+const ALL_CHANNELS: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation', 'volume', 'pivotX', 'pivotY'];
+const CHANNEL_DEFAULTS: Record<ChannelType, number> = { translateX: 0, translateY: 0, scale: 1, rotation: 0, volume: 1, pivotX: 50, pivotY: 50 };
 
 /** Read a channel value from a keyframe, defaulting volume to 1 when absent */
 const kfVal = (kf: ClipKeyframe, ch: ChannelType): number =>
-    ch === 'volume' ? (kf.volume ?? 1) : kf[ch] as number;
+    ch === 'volume' ? (kf.volume ?? 1)
+    : ch === 'pivotX' ? (kf.pivotX ?? 50)
+    : ch === 'pivotY' ? (kf.pivotY ?? 50)
+    : kf[ch] as number;
 
 // ===== Ramer-Douglas-Peucker Simplification =====
 function rdpSimplify(kfs: ClipKeyframe[], tolerance: number, channels: Set<ChannelType>): ClipKeyframe[] {
@@ -963,6 +970,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             scale: currentVals.scale,
             rotation: currentVals.rotation,
             volume: currentVals.volume,
+            pivotX: currentVals.pivotX ?? 50,
+            pivotY: currentVals.pivotY ?? 50,
             keyframeConfig: {}
         };
 
@@ -1216,7 +1225,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             return modified;
         }).filter(kf => {
             // Only remove keyframes where every channel is at its default (truly empty)
-            return kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0;
+            return kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0 || (kf.pivotX != null && kf.pivotX !== 50) || (kf.pivotY != null && kf.pivotY !== 50);
         });
 
         onUpdateKeyframes(newKeyframes);
@@ -1504,7 +1513,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                             translateY: 0,
                         })).filter(kf => {
                             // Remove keyframes that are now all-default
-                            return kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0;
+                            return kf.translateX !== 0 || kf.translateY !== 0 || kf.scale !== 1 || kf.rotation !== 0 || (kf.pivotX != null && kf.pivotX !== 50) || (kf.pivotY != null && kf.pivotY !== 50);
                         });
                         onUpdateKeyframes(newKeyframes);
                         setSelectedKeys(new Set());
