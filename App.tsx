@@ -1579,6 +1579,13 @@ function App() {
       setTimeout(finish, 3000);
     })));
 
+    // Keep a copy of the last successfully drawn frame to prevent black flashes
+    // when a video element hasn't seeked to the right time yet at cut boundaries.
+    const lastGoodFrame = document.createElement('canvas');
+    lastGoodFrame.width = outputWidth;
+    lastGoodFrame.height = outputHeight;
+    const lastGoodCtx = lastGoodFrame.getContext('2d')!;
+
     // Pre-draw the first frame to canvas and prime lastGoodFrame so
     // the recorder never starts with a black canvas.
     ctx.fillStyle = '#000000';
@@ -1618,13 +1625,6 @@ function App() {
     let prevSegmentCanvas: HTMLCanvasElement | null = null;
 
     let exportFrameCount = 0;
-
-    // Keep a copy of the last successfully drawn frame to prevent black flashes
-    // when a video element hasn't seeked to the right time yet at cut boundaries.
-    const lastGoodFrame = document.createElement('canvas');
-    lastGoodFrame.width = outputWidth;
-    lastGoodFrame.height = outputHeight;
-    const lastGoodCtx = lastGoodFrame.getContext('2d')!;
 
     const renderLoop = () => {
       // Check current time from fresh project ref
