@@ -6616,13 +6616,18 @@ function App() {
                             const input = document.createElement('input');
                             input.type = 'file';
                             input.accept = '.json';
+                            input.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+                            document.body.appendChild(input);
+                            const cleanup = () => { try { document.body.removeChild(input); } catch {} };
+                            input.addEventListener('cancel', cleanup);
                             input.onchange = async (e) => {
                               const file = (e.target as HTMLInputElement).files?.[0];
+                              cleanup();
                               if (!file) return;
                               try {
                                 const text = await file.text();
                                 const imported = JSON.parse(text) as ProjectState;
-                                setProject({ ...INITIAL_STATE, ...imported, isPlaying: false });
+                                setProject({ ...INITIAL_STATE, ...unwrapProjectState(imported), isPlaying: false });
                                 setShowProjectMenu(false);
                               } catch (err) {
                                 console.error('Import failed:', err);
@@ -6662,8 +6667,13 @@ function App() {
                             const input = document.createElement('input');
                             input.type = 'file';
                             input.accept = '.json';
+                            input.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+                            document.body.appendChild(input);
+                            const cleanup = () => { try { document.body.removeChild(input); } catch {} };
+                            input.addEventListener('cancel', cleanup);
                             input.onchange = async (e) => {
                               const file = (e.target as HTMLInputElement).files?.[0];
+                              cleanup();
                               if (!file) return;
                               try {
                                 const text = await file.text();

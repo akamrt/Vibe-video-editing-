@@ -32,6 +32,7 @@ export const ContentLibraryPage: React.FC<{
     // State
     const [isExporting, setIsExporting] = useState(false);
     const [bundleProgress, setBundleProgress] = useState<string | null>(null);
+    const importBundleInputRef = useRef<HTMLInputElement>(null);
     const [urlInput, setUrlInput] = useState('');
     const [importing, setImporting] = useState<ImportingVideo[]>([]);
     const [videos, setVideos] = useState<VideoRecord[]>([]);
@@ -874,61 +875,88 @@ export const ContentLibraryPage: React.FC<{
                         >
                             {bundleProgress || 'Export Project Bundle'}
                         </button>
-                        <button
-                            disabled={!!bundleProgress}
-                            onClick={async () => {
-                                const bundlePath = prompt('Enter the path to the bundle folder:\n(the folder containing project.json and media/)');
-                                if (!bundlePath) return;
+                        <>
+                        <input
+                            ref={importBundleInputRef}
+                            type="file"
+                            // @ts-ignore - webkitdirectory is non-standard but widely supported
+                            webkitdirectory=""
+                            multiple
+                            style={{ display: 'none' }}
+                            onChange={async (e) => {
+                                const files = Array.from(e.target.files || []);
+                                e.target.value = ''; // reset so same folder can be picked again
+                                if (!files.length) return;
                                 try {
                                     setBundleProgress('Reading bundle...');
-                                    const bundle = await readImportBundle(bundlePath);
 
-                                    // Reconstruct media files from the bundle
-                                    const library = (bundle.project as any).library || [];
-                                    const restoredLibrary = [];
+                                    // Find project.json in the selected folder
+                                    const projectFile = files.find(f => f.name === 'project.json');
+                                    if (!projectFile) throw new Error('No project.json found. Please select the bundle folder (containing project.json and media/).');
 
+                                    const projectText = await projectFile.text();
+                                    const rawData = JSON.parse(projectText);
+                                    // Support both wrapped { project: {...} } and plain project objects
+                                    const projectData = rawData.project || rawData;
+                                    const library: any[] = projectData.library || [];
+
+                                    // Read manifest.json if present
+                                    let mediaFilesMap: Record<string, { filename: string; originalName: string; isAudioOnly?: boolean }> = {};
+                                    const manifestFile = files.find(f => f.name === 'manifest.json');
+                                    if (manifestFile) {
+                                        const manifestText = await manifestFile.text();
+                                        const manifest = JSON.parse(manifestText);
+                                        mediaFilesMap = manifest.mediaFiles || {};
+                                    }
+
+                                    // All files inside a media/ subfolder
+                                    const mediaFiles = files.filter(f => f.webkitRelativePath.includes('/media/') || f.webkitRelativePath.includes('\\media\\'));
+
+                                    const restoredLibrary: any[] = [];
                                     for (let i = 0; i < library.length; i++) {
                                         const item = library[i];
-                                        const mediaInfo = bundle.manifest.mediaFiles[item.id];
-
+                                        const mediaInfo = mediaFilesMap[item.id];
                                         if (mediaInfo?.filename) {
                                             setBundleProgress(`Loading media ${i + 1}/${library.length}: ${item.name || mediaInfo.originalName}...`);
-                                            try {
-                                                const { file, url } = await fetchBundleMedia(
-                                                    bundle.bundlePath,
-                                                    mediaInfo.filename,
-                                                    mediaInfo.originalName || item.name,
-                                                    mediaInfo.isAudioOnly
-                                                );
-                                                restoredLibrary.push({ ...item, file, url });
-                                            } catch (err) {
-                                                console.warn(`Failed to load media ${item.id}:`, err);
-                                                restoredLibrary.push(item); // Keep metadata even if file fails
+                                            const mediaFile = mediaFiles.find(f => f.name === mediaInfo.filename);
+                                            if (mediaFile) {
+                                                const restoredFile = new File([mediaFile], mediaInfo.originalName || mediaFile.name, { type: mediaFile.type || 'video/mp4' });
+                                                const url = URL.createObjectURL(restoredFile);
+                                                restoredLibrary.push({ ...item, file: restoredFile, url });
+                                                // Persist blob so it survives future page reloads
+                                                contentDB.saveMediaBlob(item.id, restoredFile).catch(err => console.warn('[MediaBlob] save failed:', err));
+                                            } else {
+                                                console.warn(`Media file not found: ${mediaInfo.filename}`);
+                                                restoredLibrary.push(item);
                                             }
                                         } else {
                                             restoredLibrary.push(item);
                                         }
                                     }
 
-                                    // Load the project with restored media
-                                    const restoredProject = { ...bundle.project, library: restoredLibrary };
+                                    const restoredProject = { ...projectData, library: restoredLibrary };
                                     if (onProjectLoad) {
                                         onProjectLoad(restoredProject);
                                     }
 
                                     setBundleProgress(null);
                                     const mediaCount = restoredLibrary.filter((m: any) => m.file).length;
-                                    alert(`Import complete!\n\n${mediaCount} media files loaded\n${bundle.shortsImported} shorts files imported\n\nSwitch to the Editor to see your project.`);
+                                    alert(`Import complete!\n\n${mediaCount} media files loaded\n\nSwitch to the Editor to see your project.`);
                                 } catch (err: any) {
                                     console.error('Bundle import failed:', err);
                                     setBundleProgress(null);
                                     alert('Import failed: ' + err.message);
                                 }
                             }}
+                        />
+                        <button
+                            disabled={!!bundleProgress}
+                            onClick={() => importBundleInputRef.current?.click()}
                             className="w-full px-2 py-1.5 text-xs rounded bg-green-900/50 text-green-300 hover:text-white hover:bg-green-800/50 font-medium text-center disabled:opacity-40 disabled:cursor-not-allowed"
                         >
-                            Import Project Bundle
+                            {bundleProgress || 'Import Project Bundle'}
                         </button>
+                        </>
                     </div>
                 </div>
 
