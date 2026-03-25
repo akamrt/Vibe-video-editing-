@@ -2020,6 +2020,10 @@ function App() {
       });
     }
     setProject(prev => ({ ...prev, library: [...prev.library, ...newItems] }));
+    // Persist blobs so they survive page reloads and are available for export bundles
+    newItems.forEach(item => {
+      if (item.file) contentDB.saveMediaBlob(item.id, item.file).catch(e => console.warn('[MediaBlob] save failed:', e));
+    });
   };
 
   // Extract YouTube video ID from URL (client-side helper)
@@ -2111,6 +2115,7 @@ function App() {
               };
 
               setProject(prev => ({ ...prev, library: [...prev.library, newItem] }));
+              if (newItem.file) contentDB.saveMediaBlob(newItem.id, newItem.file).catch(e => console.warn('[MediaBlob] save failed:', e));
               setSelectedMediaId(newItem.id);
               setActiveRightTab('transcript');
               setShowYoutubeModal(false);
@@ -2205,6 +2210,7 @@ function App() {
       };
 
       setProject(prev => ({ ...prev, library: [...prev.library, newItem] }));
+      if (newItem.file) contentDB.saveMediaBlob(newItem.id, newItem.file).catch(e => console.warn('[MediaBlob] save failed:', e));
       setSelectedMediaId(newItem.id);
       setActiveRightTab('transcript');
       setShowYoutubeModal(false);
@@ -2500,6 +2506,7 @@ function App() {
         ...prev,
         library: [...prev.library, newItem]
       }));
+      if (newItem.file) contentDB.saveMediaBlob(newItem.id, newItem.file).catch(e => console.warn('[MediaBlob] save failed:', e));
 
       handleAddToTimeline(newItem);
     } catch (err) {
@@ -3720,6 +3727,10 @@ function App() {
         titleLayer: titleLayer,
         ...(defaultSubtitleTemplate ? { activeSubtitleTemplate: defaultSubtitleTemplate } : {}),
       }));
+      // Persist blobs for all new media items
+      [newMediaItem, ...bRollMediaItems].forEach(item => {
+        if (item.file) contentDB.saveMediaBlob(item.id, item.file).catch(e => console.warn('[MediaBlob] save failed:', e));
+      });
 
       // Switch to editor view so user sees the imported clips
       setSelectedMediaId(newMediaItem.id);
@@ -6364,14 +6375,18 @@ function App() {
               <button
                 onClick={() => {
                   if (!window.confirm('Start a new scene? This will clear all clips, media, and timeline content. Your style presets and animation templates will be preserved.')) return;
-                  setProject(prev => ({
-                    ...INITIAL_STATE,
-                    subtitleStyle: prev.subtitleStyle,
-                    titleStyle: prev.titleStyle,
-                    activeSubtitleTemplate: prev.activeSubtitleTemplate,
-                    activeTitleTemplate: prev.activeTitleTemplate,
-                    activeKeywordAnimation: prev.activeKeywordAnimation,
-                  }));
+                  setProject(prev => {
+                    // Clean up stored blobs for all cleared media items
+                    prev.library.forEach(m => contentDB.deleteMediaBlob(m.id).catch(() => {}));
+                    return {
+                      ...INITIAL_STATE,
+                      subtitleStyle: prev.subtitleStyle,
+                      titleStyle: prev.titleStyle,
+                      activeSubtitleTemplate: prev.activeSubtitleTemplate,
+                      activeTitleTemplate: prev.activeTitleTemplate,
+                      activeKeywordAnimation: prev.activeKeywordAnimation,
+                    };
+                  });
                   setGlobalKeyframes([]);
                 }}
                 className="px-2 py-1 text-xs rounded font-medium bg-[#2a1a1a] text-red-400 hover:text-red-300 hover:bg-[#3a1a1a] border border-red-900/50"

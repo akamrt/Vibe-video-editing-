@@ -132,7 +132,7 @@ export interface ScanCenterCacheEntry {
 // ==================== Database Class ====================
 
 const DB_NAME = 'ContentLibraryDB';
-const DB_VERSION = 4; // Incremented to add 'scanCenterCache' store
+const DB_VERSION = 5; // Incremented to add 'mediaBlobs' store for file persistence
 
 export class ContentDatabase {
     private db: IDBDatabase | null = null;
@@ -204,6 +204,12 @@ export class ContentDatabase {
                     scanStore.createIndex('mediaUrl', 'mediaUrl', { unique: false });
                     scanStore.createIndex('videoId', 'videoId', { unique: false });
                     scanStore.createIndex('createdAt', 'createdAt', { unique: false });
+                }
+
+                // Media blobs store — persists video/audio file blobs by mediaId
+                // Stored separately from project JSON for performance and portability
+                if (!db.objectStoreNames.contains('mediaBlobs')) {
+                    db.createObjectStore('mediaBlobs', { keyPath: 'mediaId' });
                 }
 
                 console.log('Database schema created/updated');
@@ -515,11 +521,17 @@ export class ContentDatabase {
         await this.init();
         return new Promise((resolve, reject) => {
             const store = this.getStore('projects', 'readwrite');
-            // Cast to any to add the required 'id' field for the store
-            const projectToSave = { ...project, id: 'current_project' } as any;
-
-            // Ensure isPlaying is false on save
-            projectToSave.isPlaying = false;
+            // Strip file blobs and transient object URLs from library items.
+            // Blobs are stored separately in the 'mediaBlobs' store and restored on load.
+            const projectToSave: any = {
+                ...project,
+                id: 'current_project',
+                isPlaying: false,
+                library: project.library.map((m: any) => {
+                    const { file: _file, url: _url, ...rest } = m;
+                    return rest;
+                }),
+            };
 
             // Store globalKeyframes alongside the project
             if (globalKeyframes !== undefined) {
@@ -534,33 +546,81 @@ export class ContentDatabase {
 
     async getProject(): Promise<{ project: ProjectState; globalKeyframes: ClipKeyframe[] } | null> {
         await this.init();
-        return new Promise((resolve, reject) => {
+        const proj = await new Promise<any>((resolve, reject) => {
             const store = this.getStore('projects');
             const request = store.get('current_project');
-            request.onsuccess = () => {
-                const proj = request.result;
-                if (!proj) {
-                    resolve(null);
-                    return;
-                }
-
-                // Remove the db ID and extract globalKeyframes
-                const { id, _globalKeyframes, ...projectState } = proj;
-                const globalKfs: ClipKeyframe[] = _globalKeyframes || [];
-
-                // Revive object URLs for files
-                if (projectState.library) {
-                    projectState.library.forEach((item: MediaItem) => {
-                        // Check if file exists and is a Blob/File (IDB restores it as Blob/File)
-                        if (item.file && item.file instanceof Blob) {
-                            item.url = URL.createObjectURL(item.file);
-                        }
-                    });
-                }
-
-                resolve({ project: projectState as ProjectState, globalKeyframes: globalKfs });
-            };
+            request.onsuccess = () => resolve(request.result);
             request.onerror = () => reject(request.error);
+        });
+
+        if (!proj) return null;
+
+        const { id: _id, _globalKeyframes, ...projectState } = proj;
+        const globalKfs: ClipKeyframe[] = _globalKeyframes || [];
+
+        // Restore file blobs and object URLs from the dedicated mediaBlobs store
+        if (projectState.library?.length > 0) {
+            const blobs = await this.getAllMediaBlobs();
+            (projectState.library as MediaItem[]).forEach((item: any) => {
+                const blobData = blobs.get(item.id);
+                if (blobData) {
+                    // Reconstruct File from stored blob
+                    item.file = new File([blobData.blob], blobData.name, { type: blobData.mimeType });
+                    item.url = URL.createObjectURL(item.file);
+                } else if (item.file instanceof Blob) {
+                    // Legacy fallback: blob was embedded in project record before mediaBlobs store
+                    item.url = URL.createObjectURL(item.file);
+                }
+            });
+        }
+
+        return { project: projectState as ProjectState, globalKeyframes: globalKfs };
+    }
+
+    // ==================== Media Blob Persistence ====================
+
+    /** Save a file blob by mediaId. Call whenever media is added to the library. */
+    async saveMediaBlob(mediaId: string, file: File | Blob): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('mediaBlobs', 'readwrite');
+            const entry = {
+                mediaId,
+                blob: file,
+                name: file instanceof File ? file.name : mediaId,
+                mimeType: file.type || 'application/octet-stream',
+            };
+            const req = store.put(entry);
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    /** Delete a stored blob by mediaId. Call when media is removed from the library. */
+    async deleteMediaBlob(mediaId: string): Promise<void> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('mediaBlobs', 'readwrite');
+            const req = store.delete(mediaId);
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    /** Load all stored blobs. Used by getProject() to restore library file references. */
+    async getAllMediaBlobs(): Promise<Map<string, { blob: Blob; name: string; mimeType: string }>> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('mediaBlobs');
+            const req = store.getAll();
+            req.onsuccess = () => {
+                const result = new Map<string, { blob: Blob; name: string; mimeType: string }>();
+                for (const entry of (req.result as Array<{ mediaId: string; blob: Blob; name: string; mimeType: string }>)) {
+                    result.set(entry.mediaId, { blob: entry.blob, name: entry.name, mimeType: entry.mimeType });
+                }
+                resolve(result);
+            };
+            req.onerror = () => reject(req.error);
         });
     }
 
