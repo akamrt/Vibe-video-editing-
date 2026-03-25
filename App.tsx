@@ -485,19 +485,18 @@ function App() {
   }, [project.segments, project.currentTime]);
 
   // Identify segments to render (Active + Preload) to avoid black frames on cut
-  // During export, render ALL segments so audio sources can be connected upfront
+  // During export, use a larger lookahead window but NOT all segments — rendering all
+  // simultaneously causes OOM crashes with many silence-cut segments from large files.
   const renderedSegments = useMemo(() => {
-    if (isExporting) {
-      return [...project.segments].sort((a, b) => a.track - b.track);
-    }
-    const LOOKAHEAD = 2.0; // Preload 2s ahead
+    const LOOKAHEAD = isExporting ? 6.0 : 2.0; // Larger lookahead during export for smooth audio
     return project.segments.filter(s => {
       const duration = s.endTime - s.startTime;
       const timelineEnd = s.timelineStart + duration;
-      // Include if it overlaps current time OR is starting soon
       const isActive = project.currentTime >= s.timelineStart && project.currentTime < timelineEnd;
       const isUpcoming = s.timelineStart > project.currentTime && s.timelineStart < (project.currentTime + LOOKAHEAD);
-      return isActive || isUpcoming;
+      // During export, also keep recently-finished segments briefly so audio tail doesn't cut off
+      const isRecentlyFinished = isExporting && timelineEnd > (project.currentTime - 0.5) && timelineEnd <= project.currentTime;
+      return isActive || isUpcoming || isRecentlyFinished;
     }).sort((a, b) => a.track - b.track);
   }, [project.segments, project.currentTime, isExporting]);
 
@@ -1519,7 +1518,8 @@ function App() {
     // 0. Render ALL segments so their video elements exist for audio connection
     isExportingRef.current = true;
     setIsExporting(true);
-    await new Promise(r => setTimeout(r, 300)); // Wait for React to render all video elements
+    // Wait for React to render the initial window of segment video elements
+    await new Promise(r => setTimeout(r, 300));
 
     // 1. Audio Setup
     if (!audioContextRef.current) {
@@ -1529,30 +1529,30 @@ function App() {
     if (actx.state === 'suspended') await actx.resume();
 
     const dest = actx.createMediaStreamDestination();
+    // Track which video elements have been connected to the export dest stream.
+    // Audio sources are connected lazily in the render loop as segments enter the
+    // lookahead window — this avoids creating all <video> elements at once, which
+    // causes OOM crashes when a large file has many silence-cut segments.
+    const exportAudioConnected = new WeakSet<HTMLVideoElement>();
 
-    // Connect videos to destination (all segments rendered due to isExporting=true)
-    let audioConnected = 0;
-    videoRefs.current.forEach((vid, segId) => {
-      let source;
-      if (audioSourcesRef.current.has(vid)) {
-        source = audioSourcesRef.current.get(vid);
-      } else {
+    const connectExportAudio = (vid: HTMLVideoElement, segId: string) => {
+      if (exportAudioConnected.has(vid)) return;
+      exportAudioConnected.add(vid);
+      let source = audioSourcesRef.current.get(vid);
+      if (!source) {
         try {
           source = actx.createMediaElementSource(vid);
           audioSourcesRef.current.set(vid, source);
-          source.connect(actx.destination); // Keep output to speakers
+          source.connect(actx.destination);
         } catch (e) {
           console.warn('[Export] Audio source creation failed for segment', segId, e);
+          return;
         }
       }
-      // Connect to export stream
-      if (source) {
-        try { source.connect(dest); audioConnected++; } catch (e) {
-          console.warn('[Export] Audio dest connect failed for segment', segId, e);
-        }
+      try { source.connect(dest); } catch (e) {
+        console.warn('[Export] Audio dest connect failed for segment', segId, e);
       }
-    });
-    console.log(`[Export] Audio: ${audioConnected}/${videoRefs.current.size} sources connected to export stream`);
+    };
 
     // 2. Visual Setup
     const preset = ASPECT_RATIO_PRESETS[settings.aspectRatio];
@@ -1705,6 +1705,13 @@ function App() {
       const activeSegments = projectRef.current.segments
         .filter(s => currentTime >= s.timelineStart && currentTime < (s.timelineStart + (s.endTime - s.startTime)))
         .sort((a, b) => (a.track || 0) - (b.track || 0));
+
+      // Lazily connect audio for any rendered segment whose video element now exists.
+      // This handles the sliding-window approach: segments are rendered as they enter
+      // the lookahead window, so we connect their audio on first appearance.
+      videoRefs.current.forEach((vid, segId) => {
+        connectExportAudio(vid, segId);
+      });
 
       // Diagnostic logging (first 5 frames + every 60th frame)
       const shouldLog = exportFrameCount <= 5 || exportFrameCount % 60 === 0;
