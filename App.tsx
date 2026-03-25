@@ -6359,7 +6359,7 @@ function App() {
           {/* Program Monitor */}
           <div className="flex-1 bg-black flex flex-col relative overflow-hidden">
             {/* Top Navigation Bar */}
-            <div className="absolute top-0 right-0 z-50 flex gap-2 p-2 bg-[#1a1a1a]/90 rounded-bl-lg border-l border-b border-[#333]">
+            <div className="flex-shrink-0 flex items-center justify-end gap-2 px-2 py-1.5 bg-[#1a1a1a] border-b border-[#333] z-50">
               {/* New Scene */}
               <button
                 onClick={() => {
