@@ -234,22 +234,51 @@ function App() {
     return () => offCostUpdate(sync);
   }, []);
 
+  // Migration helper: unwrap project state that was accidentally nested under a 'project' key
+  // due to the old bug where contentDB.getProject()'s { project, globalKeyframes } wrapper
+  // was spread directly into the state instead of spreading the inner 'project' value.
+  const unwrapProjectState = (state: any): any => {
+    let p = state;
+    while (
+      p?.project &&
+      typeof p.project === 'object' &&
+      !Array.isArray(p.project) &&
+      (!p.library || p.library.length === 0) &&
+      (!p.segments || p.segments.length === 0) &&
+      (p.project.library?.length > 0 || p.project.segments?.length > 0 || p.project.project)
+    ) {
+      console.log('[Migration] Unwrapping nested project state (legacy save bug)');
+      p = p.project;
+    }
+    return p;
+  };
+
   // Persistence Loading (with migration for new fields)
   useEffect(() => {
     clearAudioBufferCache(); // Clear stale audio caches from any prior session
     contentDB.getProject().then(saved => {
       if (saved) {
+        // getProject() returns { project: ProjectState, globalKeyframes: [...] }
+        // Previously this was spread directly (bug): ...saved would add a 'project' key into state
+        // and leave library/segments at INITIAL_STATE defaults (empty).
+        const { project: rawProject, globalKeyframes: savedGlobalKeyframes } = saved;
+        const savedProject = unwrapProjectState(rawProject);
+
         setProject({
           ...INITIAL_STATE,
-          ...saved,
-          activeSubtitleTemplate: saved.activeSubtitleTemplate ?? null,
-          activeTitleTemplate: saved.activeTitleTemplate ?? null,
-          activeKeywordAnimation: saved.activeKeywordAnimation ?? null,
+          ...savedProject,
+          activeSubtitleTemplate: savedProject.activeSubtitleTemplate ?? null,
+          activeTitleTemplate: savedProject.activeTitleTemplate ?? null,
+          activeKeywordAnimation: savedProject.activeKeywordAnimation ?? null,
         });
+        // Restore global keyframes if any were saved
+        if (savedGlobalKeyframes?.length) {
+          setGlobalKeyframes(savedGlobalKeyframes);
+        }
         // Pre-load any Google Fonts used in the saved project
-        if (saved.subtitleStyle?.fontFamily) loadGoogleFont(saved.subtitleStyle.fontFamily);
-        if (saved.titleLayers) {
-          for (const tl of saved.titleLayers) {
+        if (savedProject.subtitleStyle?.fontFamily) loadGoogleFont(savedProject.subtitleStyle.fontFamily);
+        if (savedProject.titleLayers) {
+          for (const tl of savedProject.titleLayers) {
             if (tl.style?.fontFamily) loadGoogleFont(tl.style.fontFamily);
           }
         }
@@ -6331,7 +6360,7 @@ function App() {
                 onClick={async () => {
                   setIsSaving(true);
                   try {
-                    await contentDB.saveProject(project);
+                    await contentDB.saveProject(project, globalKeyframes);
                     // Also save to disk for portability
                     saveProjectToFile('autosave', project).catch(e => console.warn('File save failed:', e));
                     setTimeout(() => setIsSaving(false), 1000);
@@ -6488,7 +6517,7 @@ function App() {
                               onClick={async () => {
                                 const loaded = await contentDB.loadNamedProject(p.id);
                                 if (loaded) {
-                                  setProject({ ...INITIAL_STATE, ...loaded });
+                                  setProject({ ...INITIAL_STATE, ...unwrapProjectState(loaded) });
                                   setShowProjectMenu(false);
                                 }
                               }}
