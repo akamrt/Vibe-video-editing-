@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import Timeline from './components/Timeline';
 import ChatPanel from './components/ChatPanel';
 import TranscriptPanel from './components/TranscriptPanel';
@@ -387,6 +388,10 @@ function App() {
   const [projectName, setProjectName] = useState('');
   const [showLoadMenu, setShowLoadMenu] = useState(false);
   const [fileProjects, setFileProjects] = useState<SavedProjectInfo[]>([]);
+  const loadMenuBtnRef = useRef<HTMLButtonElement>(null);
+  const projectMenuBtnRef = useRef<HTMLButtonElement>(null);
+  const [loadMenuRect, setLoadMenuRect] = useState<DOMRect | null>(null);
+  const [projectMenuRect, setProjectMenuRect] = useState<DOMRect | null>(null);
   const [showYoutubeModal, setShowYoutubeModal] = useState(false);
   const [showFillerModal, setShowFillerModal] = useState(false);
   const [fillerDetections, setFillerDetections] = useState<FillerDetectionWithMedia[]>([]);
@@ -6355,6 +6360,25 @@ function App() {
           <div className="flex-1 bg-black flex flex-col relative overflow-hidden">
             {/* Top Navigation Bar */}
             <div className="absolute top-0 right-0 z-50 flex gap-2 p-2 bg-[#1a1a1a]/90 rounded-bl-lg border-l border-b border-[#333]">
+              {/* New Scene */}
+              <button
+                onClick={() => {
+                  if (!window.confirm('Start a new scene? This will clear all clips, media, and timeline content. Your style presets and animation templates will be preserved.')) return;
+                  setProject(prev => ({
+                    ...INITIAL_STATE,
+                    subtitleStyle: prev.subtitleStyle,
+                    titleStyle: prev.titleStyle,
+                    activeSubtitleTemplate: prev.activeSubtitleTemplate,
+                    activeTitleTemplate: prev.activeTitleTemplate,
+                    activeKeywordAnimation: prev.activeKeywordAnimation,
+                  }));
+                  setGlobalKeyframes([]);
+                }}
+                className="px-2 py-1 text-xs rounded font-medium bg-[#2a1a1a] text-red-400 hover:text-red-300 hover:bg-[#3a1a1a] border border-red-900/50"
+                title="Clear scene content, keep style presets"
+              >
+                New Scene
+              </button>
               {/* Quick Save (IndexedDB + file) */}
               <button
                 onClick={async () => {
@@ -6378,12 +6402,14 @@ function App() {
               {/* Load Menu */}
               <div className="relative">
                 <button
+                  ref={loadMenuBtnRef}
                   onClick={async () => {
                     if (!showLoadMenu) {
                       try {
                         const list = await listSavedProjects();
                         setFileProjects(list);
                       } catch { setFileProjects([]); }
+                      setLoadMenuRect(loadMenuBtnRef.current?.getBoundingClientRect() ?? null);
                     }
                     setShowLoadMenu(p => !p);
                   }}
@@ -6391,10 +6417,10 @@ function App() {
                 >
                   Load ▾
                 </button>
-                {showLoadMenu && (
+                {showLoadMenu && loadMenuRect && createPortal(
                   <>
-                  <div className="fixed inset-0 z-[99]" onClick={() => setShowLoadMenu(false)} />
-                  <div className="absolute top-full right-0 mt-1 w-72 bg-[#1a1a1a] border border-[#444] rounded-lg shadow-2xl z-[100] overflow-hidden" onClick={e => e.stopPropagation()}>
+                  <div className="fixed inset-0 z-[9990]" onClick={() => setShowLoadMenu(false)} />
+                  <div className="fixed w-72 bg-[#1a1a1a] border border-[#444] rounded-lg shadow-2xl z-[9991] overflow-hidden" style={{ top: loadMenuRect.bottom + 4, right: window.innerWidth - loadMenuRect.right }} onClick={e => e.stopPropagation()}>
                     <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest px-3 pt-2 pb-1">Saved Files (saves/projects/)</div>
                     <div className="max-h-64 overflow-y-auto">
                       {fileProjects.length === 0 ? (
@@ -6407,7 +6433,7 @@ function App() {
                                 try {
                                   const loaded = await loadProjectFromFile(fp.name);
                                   if (loaded) {
-                                    setProject({ ...INITIAL_STATE, ...(loaded as unknown as Partial<ProjectState>), isPlaying: false });
+                                    setProject({ ...INITIAL_STATE, ...unwrapProjectState(loaded as unknown), isPlaying: false });
                                     setShowLoadMenu(false);
                                   }
                                 } catch (err) {
@@ -6443,16 +6469,19 @@ function App() {
                       )}
                     </div>
                   </div>
-                  </>
+                  </>,
+                  document.body
                 )}
               </div>
               {/* Project Menu */}
               <div className="relative">
                 <button
+                  ref={projectMenuBtnRef}
                   onClick={async () => {
                     if (!showProjectMenu) {
                       const list = await contentDB.listProjects();
                       setSavedProjects(list);
+                      setProjectMenuRect(projectMenuBtnRef.current?.getBoundingClientRect() ?? null);
                     }
                     setShowProjectMenu(p => !p);
                   }}
@@ -6460,10 +6489,10 @@ function App() {
                 >
                   Projects ▾
                 </button>
-                {showProjectMenu && (
+                {showProjectMenu && projectMenuRect && createPortal(
                   <>
-                  <div className="fixed inset-0 z-[99]" onClick={() => setShowProjectMenu(false)} />
-                  <div className="absolute top-full right-0 mt-1 w-72 bg-[#1a1a1a] border border-[#444] rounded-lg shadow-2xl z-[100] overflow-hidden" onClick={e => e.stopPropagation()}>
+                  <div className="fixed inset-0 z-[9990]" onClick={() => setShowProjectMenu(false)} />
+                  <div className="fixed w-72 bg-[#1a1a1a] border border-[#444] rounded-lg shadow-2xl z-[9991] overflow-hidden" style={{ top: projectMenuRect.bottom + 4, right: window.innerWidth - projectMenuRect.right }} onClick={e => e.stopPropagation()}>
                     {/* Save As (to file + IndexedDB) */}
                     <div className="p-3 border-b border-[#333]">
                       <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Save As</div>
@@ -6641,7 +6670,8 @@ function App() {
                       </div>
                     </div>
                   </div>
-                  </>
+                  </>,
+                  document.body
                 )}
               </div>
               <div className="w-px h-6 bg-[#444] mx-1"></div>
