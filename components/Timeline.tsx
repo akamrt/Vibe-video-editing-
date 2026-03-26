@@ -184,6 +184,36 @@ const Timeline: React.FC<TimelineProps> = ({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [viewportWidth, setViewportWidth] = useState(1000);
 
+
+  // Keyboard shortcuts: Delete / Backspace to delete selected segments
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Mac Delete / Backspace support
+      if (e.key === 'Delete' || e.key === 'Backspace' || e.code === 'Backspace') {
+        if ((navigator.platform.includes('Mac')) && !e.metaKey && !e.ctrlKey) return;
+        e.preventDefault();
+        // Delete selected segments (Mac Cmd+Backspace = force delete)
+        if (selectedSegmentIds.length > 0) {
+          for (const id of selectedSegmentIds) {
+            onDeleteSegment(id);
+          }
+        }
+      }
+      // Mac Cmd+Backspace = delete selected
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'Backspace' || e.key === 'Delete')) {
+        e.preventDefault();
+        if (selectedSegmentIds.length > 0) {
+          for (const id of [...selectedSegmentIds]) {
+            onDeleteSegment(id);
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedSegmentIds, onDeleteSegment]);
+
+
   // Handle Zoom Anchoring (Zoom to Cursor/Playhead)
   useEffect(() => {
     if (Math.abs(zoom - prevZoomRef.current) > 0.001) {
