@@ -175,24 +175,34 @@ export class OfflineRenderer {
         AUDIO_SAMPLE_RATE,
       );
 
-      const seenUrls = new Set<string>();
+      // Decode each unique media URL once, then reuse the AudioBuffer for all
+      // segments from that media (multiple AudioBufferSourceNodes can share one buffer).
+      // This is critical after silence removal, which can create 60-100 segments from
+      // the same source file — without dedup, the browser would OOM loading the full
+      // video file once per segment concurrently.
+      const urlDecodeCache = new Map<string, Promise<AudioBuffer | null>>();
       const decodePromises = deps.segments
         .filter(seg => seg.type !== 'blank')
         .map(async seg => {
           const item = deps.library.find(m => m.id === seg.mediaId);
           if (!item?.url) return;
 
-          // Decode the audio from the source file (handles video containers too)
-          let audioBuffer: AudioBuffer;
-          try {
-            // Fetch the blob/data URL and decode audio
-            const response = await fetch(item.url);
-            const arrayBuffer = await response.arrayBuffer();
-            audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
-          } catch (e) {
-            console.warn('[OfflineRenderer] Audio decode failed for', seg.id, e);
-            return;
+          // Decode the source file once per unique URL
+          if (!urlDecodeCache.has(item.url)) {
+            urlDecodeCache.set(item.url, (async () => {
+              try {
+                const response = await fetch(item.url);
+                const arrayBuffer = await response.arrayBuffer();
+                return await offlineCtx.decodeAudioData(arrayBuffer);
+              } catch (e) {
+                console.warn('[OfflineRenderer] Audio decode failed for', item.url, e);
+                return null;
+              }
+            })());
           }
+
+          const audioBuffer = await urlDecodeCache.get(item.url)!;
+          if (!audioBuffer) return;
 
           const source = offlineCtx.createBufferSource();
           source.buffer = audioBuffer;
