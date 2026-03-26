@@ -344,7 +344,18 @@ const AnimationControls: React.FC<AnimationControlsProps> = ({ animation, onChan
             {SCOPES.map(s => (
               <button
                 key={s.value}
-                onClick={() => updateField('scope', s.value)}
+                onClick={() => {
+                  const updates: Partial<TextAnimation> = { scope: s.value as AnimationScope };
+                  // Auto-set stagger when switching to a multi-element scope with stagger=0,
+                  // so words/chars actually animate in sequence rather than all at once.
+                  const currentStagger = animation.stagger ?? 0;
+                  if (currentStagger === 0) {
+                    if (s.value === 'word') updates.stagger = 0.1;
+                    else if (s.value === 'character') updates.stagger = 0.04;
+                    else if (s.value === 'line') updates.stagger = 0.2;
+                  }
+                  onChange({ ...animation, ...updates });
+                }}
                 style={{
                   flex: 1, padding: '3px 0', borderRadius: 3, border: 'none', fontSize: 10,
                   fontWeight: animation.scope === s.value ? 700 : 400,
