@@ -296,6 +296,7 @@ export class OfflineRenderer {
         ctx.fillRect(0, 0, outputWidth, outputHeight);
         if (!anyVideoReady && lastGoodFrame) ctx.drawImage(lastGoodFrame, 0, 0);
 
+        // ── Pass 1: composite all video tracks (V1, V2, …) in track order ──
         for (const activeSeg of activeSegments) {
           const vid = deps.videoRefs.get(activeSeg.id);
           const clipTime = currentTime - activeSeg.timelineStart;
@@ -350,8 +351,13 @@ export class OfflineRenderer {
               prevSegmentCanvas.getContext('2d')!.drawImage(ctx.canvas, 0, 0);
             }
           }
+        }
 
-          // Subtitles
+        // ── Pass 2: draw subtitles on top of all video layers ──────────────
+        // Must be a separate pass — drawing subtitles inside the video loop
+        // causes higher tracks (V2, V3…) to paint over V1's subtitles.
+        for (const activeSeg of activeSegments) {
+          const clipTime = currentTime - activeSeg.timelineStart;
           const media = deps.library.find(m => m.id === activeSeg.mediaId);
           if (media?.analysis) {
             const mediaTime = activeSeg.startTime + clipTime;
