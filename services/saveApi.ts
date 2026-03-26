@@ -183,6 +183,35 @@ export async function readImportBundle(bundlePath: string): Promise<BundleImport
 }
 
 /**
+ * Trigger a browser download of a bundle as a .zip file.
+ */
+export function downloadBundleZip(bundleId: string): void {
+  const a = document.createElement('a');
+  a.href = `/api/saves/export-bundle/${encodeURIComponent(bundleId)}/zip`;
+  a.download = `${bundleId}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+/**
+ * Import a bundle from a remote URL (Google Drive, Dropbox, or direct .zip link).
+ * The server downloads the zip, extracts it, and returns the local bundle path.
+ */
+export async function importBundleFromUrl(url: string): Promise<{ bundleId: string; bundlePath: string }> {
+  const res = await fetch('/api/saves/import-bundle-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((err as { error: string }).error || res.statusText);
+  }
+  return res.json();
+}
+
+/**
  * Step 4: Fetch a media file from a bundle folder, return as File object.
  */
 export async function fetchBundleMedia(bundlePath: string, filename: string, originalName: string, isAudioOnly?: boolean): Promise<{ file: File; url: string }> {

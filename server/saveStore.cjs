@@ -402,6 +402,153 @@ function getBundleMediaPath(bundlePath, filename) {
     return filePath;
 }
 
+// --- URL-based Bundle Import/Export ---
+
+/**
+ * Convert known share link formats to direct download URLs.
+ * Supports Google Drive and Dropbox share links.
+ */
+function normalizeDownloadUrl(url) {
+    // Google Drive file view: https://drive.google.com/file/d/FILE_ID/view?...
+    const gdMatch = url.match(/drive\.google\.com\/file\/d\/([^/?#]+)/);
+    if (gdMatch) {
+        return `https://drive.google.com/uc?export=download&id=${gdMatch[1]}&confirm=t`;
+    }
+    // Google Drive open link: https://drive.google.com/open?id=FILE_ID
+    const gdOpenMatch = url.match(/drive\.google\.com\/open\?.*id=([^&]+)/);
+    if (gdOpenMatch) {
+        return `https://drive.google.com/uc?export=download&id=${gdOpenMatch[1]}&confirm=t`;
+    }
+    // Dropbox: ensure dl=1 for direct download
+    if (url.includes('dropbox.com')) {
+        if (url.includes('dl=0')) return url.replace('dl=0', 'dl=1');
+        if (!url.includes('dl=1')) return url + (url.includes('?') ? '&' : '?') + 'dl=1';
+        return url;
+    }
+    return url;
+}
+
+/**
+ * Download a URL to a local file, following redirects.
+ */
+function downloadUrlToFile(url, destPath) {
+    return new Promise((resolve, reject) => {
+        const https = require('https');
+        const http = require('http');
+        const file = fs.createWriteStream(destPath);
+        let settled = false;
+
+        function done(err) {
+            if (settled) return;
+            settled = true;
+            file.close(() => err ? reject(err) : resolve());
+        }
+
+        function doRequest(requestUrl, redirectCount) {
+            if (redirectCount > 10) { done(new Error('Too many redirects')); return; }
+            let parsed;
+            try { parsed = new URL(requestUrl); } catch (e) { done(new Error(`Invalid URL: ${requestUrl}`)); return; }
+            const proto = requestUrl.startsWith('https') ? https : http;
+            proto.get({
+                hostname: parsed.hostname,
+                port: parsed.port || undefined,
+                path: parsed.pathname + parsed.search,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 VibeCut/1.0',
+                    'Accept': 'application/zip, application/octet-stream, */*',
+                },
+            }, (res) => {
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    res.resume();
+                    doRequest(new URL(res.headers.location, requestUrl).toString(), redirectCount + 1);
+                    return;
+                }
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    done(new Error(`HTTP ${res.statusCode} downloading bundle`));
+                    return;
+                }
+                res.pipe(file);
+                res.on('error', done);
+            }).on('error', done);
+        }
+
+        file.on('error', done);
+        doRequest(url, 0);
+    });
+}
+
+/**
+ * Stream a bundle folder as a zip file to an HTTP response.
+ */
+function streamBundleZip(bundleId, res) {
+    const archiver = require('archiver');
+    const bundleDir = path.join(getExportsDir(), bundleId);
+    if (!fs.existsSync(bundleDir)) throw new Error(`Bundle ${bundleId} not found`);
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${bundleId}.zip"`);
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('error', (err) => {
+        if (!res.headersSent) res.status(500).end(err.message);
+    });
+    archive.pipe(res);
+    // Archive contents directly (no top-level folder) so zip extracts to project.json + media/
+    archive.directory(bundleDir, false);
+    archive.finalize();
+}
+
+/**
+ * Download a zip bundle from a URL, extract it, and return the bundle path.
+ */
+async function downloadAndExtractBundleFromUrl(url) {
+    const os = require('os');
+    const AdmZip = require('adm-zip');
+
+    const normalizedUrl = normalizeDownloadUrl(url);
+    console.log(`[SaveStore] Downloading bundle from: ${normalizedUrl}`);
+
+    const tmpZipPath = path.join(os.tmpdir(), `vibecut-bundle-${Date.now()}.zip`);
+    try {
+        await downloadUrlToFile(normalizedUrl, tmpZipPath);
+
+        const sizeMB = (fs.statSync(tmpZipPath).size / 1024 / 1024).toFixed(1);
+        console.log(`[SaveStore] Downloaded ${sizeMB}MB, extracting...`);
+
+        const zip = new AdmZip(tmpZipPath);
+        const entries = zip.getEntries();
+
+        // Find project.json — may be at root or inside a subfolder
+        const projectEntry = entries.find(e => !e.isDirectory && /(^|[/\\])project\.json$/.test(e.entryName));
+        if (!projectEntry) {
+            throw new Error('No project.json found in the zip. Make sure you exported using "Download as .zip" from VibeCut.');
+        }
+
+        // Strip top-level folder if present
+        const prefix = projectEntry.entryName.replace(/project\.json$/, '');
+
+        const bundleId = `url-import_${Date.now()}`;
+        const bundleDir = path.join(getExportsDir(), bundleId);
+        fs.mkdirSync(bundleDir, { recursive: true });
+
+        for (const entry of entries) {
+            if (entry.isDirectory) continue;
+            let relPath = entry.entryName.replace(/\\/g, '/');
+            if (prefix && relPath.startsWith(prefix)) relPath = relPath.slice(prefix.length);
+            if (!relPath) continue;
+            const destPath = path.join(bundleDir, relPath);
+            fs.mkdirSync(path.dirname(destPath), { recursive: true });
+            fs.writeFileSync(destPath, entry.getData());
+        }
+
+        console.log(`[SaveStore] Extracted bundle to: ${bundleDir}`);
+        return { bundleId, bundlePath: path.resolve(bundleDir) };
+    } finally {
+        try { fs.unlinkSync(tmpZipPath); } catch { /* ignore */ }
+    }
+}
+
 module.exports = {
     getSavesDir,
     getProjectsDir,
@@ -422,4 +569,7 @@ module.exports = {
     addMediaToBundle,
     readImportBundle,
     getBundleMediaPath,
+    // URL-based zip export/import
+    streamBundleZip,
+    downloadAndExtractBundleFromUrl,
 };

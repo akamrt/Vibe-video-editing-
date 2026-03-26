@@ -9,7 +9,7 @@ import { fetchAllTrends, getDefaultTrendState } from '../services/trendsService'
 import { TrendsTicker } from '../components/TrendsTicker';
 import { RepostRanker } from '../components/RepostRanker';
 import { TrendPromptBuilder } from '../components/TrendPromptBuilder';
-import { listShortsFiles, saveShortsToFile, loadShortsFromFile, exportAllData, importAllData, createExportBundle, uploadMediaToBundle, readImportBundle, fetchBundleMedia, SavedShortsInfo } from '../services/saveApi';
+import { listShortsFiles, saveShortsToFile, loadShortsFromFile, exportAllData, importAllData, createExportBundle, uploadMediaToBundle, readImportBundle, fetchBundleMedia, downloadBundleZip, importBundleFromUrl, SavedShortsInfo } from '../services/saveApi';
 
 // ==================== Types ====================
 
@@ -32,6 +32,8 @@ export const ContentLibraryPage: React.FC<{
     // State
     const [isExporting, setIsExporting] = useState(false);
     const [bundleProgress, setBundleProgress] = useState<string | null>(null);
+    const [lastExportBundleId, setLastExportBundleId] = useState<string | null>(null);
+    const [bundleUrlInput, setBundleUrlInput] = useState('');
     const importBundleInputRef = useRef<HTMLInputElement>(null);
     const [urlInput, setUrlInput] = useState('');
     const [importing, setImporting] = useState<ImportingVideo[]>([]);
@@ -864,7 +866,7 @@ export const ContentLibraryPage: React.FC<{
                                     }
 
                                     setBundleProgress(null);
-                                    alert(`Export complete!\n\nBundle saved to:\n${result.bundlePath}\n\nShare this folder with others to import.`);
+                                    setLastExportBundleId(result.bundleId);
                                 } catch (err: any) {
                                     console.error('Bundle export failed:', err);
                                     setBundleProgress(null);
@@ -875,6 +877,23 @@ export const ContentLibraryPage: React.FC<{
                         >
                             {bundleProgress || 'Export Project Bundle'}
                         </button>
+                        {/* Post-export: Download as zip */}
+                        {lastExportBundleId && !bundleProgress && (
+                            <div className="flex gap-1">
+                                <button
+                                    onClick={() => downloadBundleZip(lastExportBundleId)}
+                                    className="flex-1 px-2 py-1.5 text-xs rounded bg-blue-900/50 text-blue-300 hover:text-white hover:bg-blue-800/50 font-medium text-center"
+                                    title="Download the exported bundle as a .zip to share or upload elsewhere"
+                                >
+                                    ⬇ Download .zip
+                                </button>
+                                <button
+                                    onClick={() => setLastExportBundleId(null)}
+                                    className="px-2 py-1.5 text-xs rounded bg-[#222] text-gray-500 hover:text-gray-300"
+                                    title="Dismiss"
+                                >✕</button>
+                            </div>
+                        )}
                         <>
                         <input
                             ref={importBundleInputRef}
@@ -957,6 +976,75 @@ export const ContentLibraryPage: React.FC<{
                             {bundleProgress || 'Import Project Bundle'}
                         </button>
                         </>
+                        {/* Import from URL (Google Drive, Dropbox, direct link) */}
+                        <div className="space-y-1">
+                            <input
+                                type="text"
+                                value={bundleUrlInput}
+                                onChange={e => setBundleUrlInput(e.target.value)}
+                                onKeyDown={e => {
+                                    if (e.key === 'Enter' && bundleUrlInput.trim() && !bundleProgress) {
+                                        e.currentTarget.blur();
+                                        // trigger import — handled by button click via shared handler
+                                        document.getElementById('bundle-url-import-btn')?.click();
+                                    }
+                                }}
+                                placeholder="Or paste a .zip URL (Drive, Dropbox…)"
+                                disabled={!!bundleProgress}
+                                className="w-full px-2 py-1.5 text-xs rounded bg-[#1a1a1a] border border-[#333] text-gray-300 placeholder-gray-600 focus:outline-none focus:border-green-700 disabled:opacity-40"
+                            />
+                            <button
+                                id="bundle-url-import-btn"
+                                disabled={!bundleUrlInput.trim() || !!bundleProgress}
+                                onClick={async () => {
+                                    if (!bundleUrlInput.trim()) return;
+                                    try {
+                                        setBundleProgress('Downloading bundle…');
+                                        const { bundlePath } = await importBundleFromUrl(bundleUrlInput.trim());
+
+                                        setBundleProgress('Reading bundle…');
+                                        const result = await readImportBundle(bundlePath);
+
+                                        const library: any[] = (result.project as any).library || [];
+                                        const mediaFilesMap = result.manifest.mediaFiles || {};
+
+                                        const restoredLibrary: any[] = [];
+                                        for (let i = 0; i < library.length; i++) {
+                                            const item = library[i];
+                                            const mediaInfo = mediaFilesMap[item.id];
+                                            if (mediaInfo?.filename) {
+                                                setBundleProgress(`Loading media ${i + 1}/${library.length}: ${item.name || mediaInfo.originalName}…`);
+                                                try {
+                                                    const { file, url } = await fetchBundleMedia(bundlePath, mediaInfo.filename, mediaInfo.originalName || mediaInfo.filename, mediaInfo.isAudioOnly);
+                                                    restoredLibrary.push({ ...item, file, url });
+                                                    contentDB.saveMediaBlob(item.id, file).catch(err => console.warn('[MediaBlob] save failed:', err));
+                                                } catch (mediaErr) {
+                                                    console.warn(`Failed to load media ${mediaInfo.filename}:`, mediaErr);
+                                                    restoredLibrary.push(item);
+                                                }
+                                            } else {
+                                                restoredLibrary.push(item);
+                                            }
+                                        }
+
+                                        const restoredProject = { ...result.project, library: restoredLibrary };
+                                        if (onProjectLoad) onProjectLoad(restoredProject);
+
+                                        setBundleProgress(null);
+                                        setBundleUrlInput('');
+                                        const mediaCount = restoredLibrary.filter((m: any) => m.file).length;
+                                        alert(`Import complete!\n\n${mediaCount} media files loaded.\n\nSwitch to the Editor to see your project.`);
+                                    } catch (err: any) {
+                                        console.error('URL bundle import failed:', err);
+                                        setBundleProgress(null);
+                                        alert('Import from URL failed: ' + err.message);
+                                    }
+                                }}
+                                className="w-full px-2 py-1.5 text-xs rounded bg-green-900/50 text-green-300 hover:text-white hover:bg-green-800/50 font-medium text-center disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                                {bundleProgress ? bundleProgress : 'Import from URL'}
+                            </button>
+                        </div>
                     </div>
                 </div>
 

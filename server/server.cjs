@@ -2361,6 +2361,28 @@ app.get('/api/saves/import-bundle/media/:filename', (req, res) => {
     }
 });
 
+// Step 5: Download an existing bundle as a .zip file
+app.get('/api/saves/export-bundle/:bundleId/zip', (req, res) => {
+    try {
+        const { bundleId } = req.params;
+        saveStore.streamBundleZip(bundleId, res);
+    } catch (err) {
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+});
+
+// Import a bundle from a remote URL (Google Drive, Dropbox, or direct .zip link)
+app.post('/api/saves/import-bundle-url', express.json({ limit: '1mb' }), async (req, res) => {
+    try {
+        const { url } = req.body;
+        if (!url || typeof url !== 'string') return res.status(400).json({ error: 'url required' });
+        const result = await saveStore.downloadAndExtractBundleFromUrl(url);
+        res.json(result);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // This must be the LAST route — catch-all for client-side routing
 if (isElectron && fs.existsSync(distPath)) {
     app.get('*', (req, res) => {
