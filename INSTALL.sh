@@ -264,3 +264,15 @@ elif command -v pip &> /dev/null; then
     pip install python-vibe opencv-python numpy --quiet 2>/dev/null
     echo "✅ Tracking dependencies installed"
 fi
+# Mac Python check for tracking
+if ! command -v python3 &> /dev/null; then
+    echo ""
+    echo "WARNING: Python 3 not found — person tracking requires Python."
+    echo "To install: https://www.python.org/downloads/mac-osx/"
+    echo "Or run: brew install python"
+fi
+if command -v pip3 &> /dev/null; then
+    pip3 install python-vibe opencv-python numpy --quiet 2>/dev/null && echo "Tracking deps OK" || true
+elif command -v pip &> /dev/null; then
+    pip install python-vibe opencv-python numpy --quiet 2>/dev/null && echo "Tracking deps OK" || true
+fi
