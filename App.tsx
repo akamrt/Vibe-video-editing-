@@ -3727,6 +3727,8 @@ function App() {
         titleLayer: titleLayer,
         ...(defaultSubtitleTemplate ? { activeSubtitleTemplate: defaultSubtitleTemplate } : {}),
       }));
+      // Use the short's title as the project name so quick-save labels it correctly
+      setProjectName(short.title);
       // Persist blobs for all new media items
       [newMediaItem, ...bRollMediaItems].forEach(item => {
         if (item.file) contentDB.saveMediaBlob(item.id, item.file).catch(e => console.warn('[MediaBlob] save failed:', e));
@@ -6401,7 +6403,7 @@ function App() {
                   try {
                     await contentDB.saveProject(project, globalKeyframes);
                     // Also save to disk for portability
-                    saveProjectToFile('autosave', project).catch(e => console.warn('File save failed:', e));
+                    saveProjectToFile(projectName.trim() || 'autosave', project).catch(e => console.warn('File save failed:', e));
                     setTimeout(() => setIsSaving(false), 1000);
                   } catch (e) {
                     console.error(e);
