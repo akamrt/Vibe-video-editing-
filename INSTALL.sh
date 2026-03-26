@@ -241,3 +241,26 @@ echo "    ./START.sh"
 echo ""
 echo "  The app will open in your web browser automatically."
 echo ""
+
+
+# === Mac Python check ===
+if ! command -v python3 &> /dev/null; then
+    echo ""
+    echo "⚠️  Python 3 not found — needed for person tracking."
+    echo "Installing Python..."
+    if command -v brew &> /dev/null; then
+        brew install python
+    else
+        echo "❌ Please install Python 3 from: https://www.python.org/downloads/mac-osx/"
+        echo "   Or run: brew install python (if you have Homebrew)"
+    fi
+fi
+
+# Install tracking dependencies
+if command -v pip3 &> /dev/null; then
+    pip3 install python-vibe opencv-python numpy --quiet 2>/dev/null
+    echo "✅ Tracking dependencies installed"
+elif command -v pip &> /dev/null; then
+    pip install python-vibe opencv-python numpy --quiet 2>/dev/null
+    echo "✅ Tracking dependencies installed"
+fi
