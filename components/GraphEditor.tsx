@@ -549,6 +549,11 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 newSet.add(selKey);
                 setSelectedKeys(newSet);
             }
+        } else if (e.shiftKey) {
+            // Shift+drag on empty space = marquee selection (Mac trackpad alternative to middle-click)
+            setDragMode('marquee');
+            setMarqueeStart({ x, y });
+            setMarqueeEnd({ x, y });
         } else {
             // Click on empty space - start scrubbing
             setDragMode('scrub');
@@ -1695,6 +1700,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     ref={canvasRef}
                     style={{
                         display: 'block',
+                        touchAction: 'none', // Required for Mac trackpad pointer events to fire correctly
                         cursor: isDragging
                             ? (dragMode === 'marquee' ? 'crosshair' : dragMode === 'edit' || dragMode === 'handle' ? 'move' : 'grabbing')
                             : (hoveredHandle ? 'grab' : hoveredKey ? 'move' : 'crosshair')

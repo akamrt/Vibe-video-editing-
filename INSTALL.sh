@@ -185,12 +185,23 @@ else
                 fi
             fi
         else
-            echo -e "${YELLOW}[INFO] Python tracker dependencies not installed."
-            echo "  To enable AI-powered person tracking, run:"
-            echo "    pip install mediapipe opencv-python-headless numpy pyinstaller"
-            echo "    python python/build.py"
-            echo ""
-            echo -e "  The app will use browser-based tracking in the meantime.${NC}"
+            echo -e "${YELLOW}[INFO] Python tracking dependencies not installed. Trying auto-install...${NC}"
+            if $PYTHON_CMD -m pip install mediapipe opencv-python-headless numpy pyinstaller --quiet 2>&1; then
+                echo -e "${GREEN}[OK] Python tracking dependencies installed!${NC}"
+                echo "Building Python tracker binary (this may take a few minutes)..."
+                $PYTHON_CMD python/build.py
+                if [ -f "bin/vibecut-tracker" ] || [ -f "bin/vibecut-tracker.exe" ]; then
+                    echo -e "${GREEN}[OK] Python tracker built successfully!${NC}"
+                else
+                    echo -e "${YELLOW}[WARNING] Python tracker build failed. Browser tracking will be used instead.${NC}"
+                fi
+            else
+                echo -e "${YELLOW}[INFO] Auto-install failed. To enable AI-powered person tracking, run:"
+                echo "    pip install mediapipe opencv-python-headless numpy pyinstaller"
+                echo "    python python/build.py"
+                echo ""
+                echo -e "  The app will use browser-based tracking in the meantime.${NC}"
+            fi
         fi
     else
         echo -e "${YELLOW}[INFO] Python not found. Skipping tracker build."
