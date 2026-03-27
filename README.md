@@ -1,53 +1,98 @@
-# VibeCut AI
+# 🎬 Vibe — AI Video Editor
 
-AI-powered video editing tool that creates short-form content from YouTube videos.
+**Your AI video editor that watches your footage so you don't have to.**
 
-## 🚀 First Time? Start Here!
+Vibe is an Electron-based desktop app that brings Gemini-powered AI into the video editing workflow. Paste a YouTube URL, drop a file, or import from your camera roll — Gemini handles the analysis, finds the moments, removes the filler, tracks the speaker, and hands you a polished edit ready to export.
 
-**Open `SETUP_GUIDE.html`** in your browser for a visual step-by-step guide.
+Built for content creators, churches, educators, and anyone who has ever watched an hour of footage to find the three good minutes.
 
-### Mac / Linux — One-liner:
+---
+
+## The Good Stuff
+
+### 🤖 AI Finds the Best Moments — Then You Approve
+Paste a YouTube URL or drop a video, Gemini analyses the whole thing and flags the most engaging moments — the quotable bits, the visual peaks, the unexpected turns. You pick what stays. It's like having an editor who already watched everything.
+
+### 🎯 Auto-Centre on the Speaker
+AI tracks where the speaker is in every frame and keeps them centred. No more jump-cuts on talking heads. No expensive tracking software. Just: upload, scan, done.
+
+### 🗣️ It Removes All the "Umms" and "Ahhs"
+One click and Gemini finds every filler word, repeated phrase, and awkward pause across your entire video. A second click removes them. What used to take an hour of scrubbing timeline now takes minutes.
+
+### 📊 Trend-Aware Shorts
+Connect YouTube, Google Trends, or Reddit and Vibe tells you what's trending *right now* — then scores your existing footage against those trends. It suggests which moments align with what's going viral today.
+
+### 💬 Chat With Your Video
+Ask your footage questions. *"What was the main point at 4:30?" "Find the moment about purpose." "Summarise this in 30 seconds."* It's Gemini watching so you don't have to.
+
+### 🎞️ B-Roll on Demand
+Select a clip → Gemini searches Pexels for relevant stock footage and suggests B-roll cuts automatically. No tab-switching, no hunting. Just select and drop.
+
+---
+
+## The Really Impressive Bits
+
+- **Word-level karaoke subtitles** — each word highlights as it's spoken, with shimmer, particle, and glow effects
+- **40+ transition types** — fades, wipes, slides, glitches, film burns, light leaks, dissolves, mosaic, iris, zoom-rotate
+- **Per-clip keyframe animation** — pan, zoom, rotate, scale on individual clips with bezier tangent controls
+- **Render queue** — batch-export 10 versions at once, different aspect ratios, different formats
+- **Google Fonts live** — search and apply any font from Google's library directly in the app
+- **Pivot keyframes** — AI detects where the speaker's head is in each frame and keys it automatically
+- **Dual tracker types** — stabiliser (locks to a point) vs parent (moves with the subject)
+- **Re-detect fillers** — second-pass AI catches the ones it missed first time
+- **Import AI shorts from JSON** — paste output from ChatGPT or other AI tools and Vibe builds the edit
+- **Transcript phrase search** — find any moment in any video by typing what was said
+- **Audio unlinking** — pull audio off a clip, reposition it, add crossfades without touching the video
+- **Cost tracker** — see exactly how much each operation costs in Gemini API credits
+
+---
+
+## The Boring but Important Bits
+
+- Import: YouTube URL, drag-and-drop, or file picker
+- Aspect ratios: 9:16, 16:9, 1:1, 4:5, custom
+- Export: WebM, up to 4K, adjustable bitrate and FPS
+- Project files: save/load, export as `.vibe`, import from file
+- YouTube cookie auth for age-restricted content
+- Undo/redo with full action history
+- Auto-save to IndexedDB
+- Cross-platform: Windows (.bat), Mac/Linux (.sh)
+
+---
+
+## Quick Start
 
 ```bash
-git clone https://github.com/akamrt/Vibe-video-editing-.git && cd Vibe-video-editing- && chmod +x INSTALL.sh START.sh && ./INSTALL.sh
+# Mac/Linux
+chmod +x START.sh && ./START.sh
+
+# Windows
+# Double-click START.bat
+
+# First run auto-installs all dependencies
 ```
 
-Then run: `./START.sh`
+Requires: Node.js, Python 3 (for tracker), Gemini API key (put in `.env.local`)
 
-### Windows:
+---
 
-Double-click `INSTALL.bat`, then double-click `START.bat`.
+## Stack
 
-> **Just want to run it?** Double-click `START.bat` (Windows) or `./START.sh` (Mac) — it will auto-install on first run.
+**Frontend:** React 19, TypeScript, Vite, Remotion, Canvas API  
+**Backend:** Express, yt-dlp, FFmpeg  
+**AI:** Google Gemini (transcription, analysis, person detection, chat)  
+**Desktop:** Electron 33  
+**Tracking:** Python + OpenCV  
+**Stock media:** Pexels API  
 
-### Quick Reference:
+---
 
-| | Windows | Mac / Linux |
-|---|---------|-------------|
-| **Install** | Double-click `INSTALL.bat` | `chmod +x INSTALL.sh && ./INSTALL.sh` |
-| **Run** | Double-click `START.bat` | `./START.sh` |
+## Screenshots
 
-## 🔑 API Keys
+*Add your screenshots here*
 
-You need at least one AI API key. Get a free Gemini key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+---
 
-Edit `.env.local` and paste your key. See `.env.example` for the format.
+## License
 
-## 📋 What This App Does
-
-1. **Import** — Paste a YouTube URL to download video + transcript
-2. **AI Shorts** — AI picks the best moments for short-form content
-3. **Edit** — Fine-tune timing, add subtitles, style effects
-4. **Scan & Center** — AI-powered person tracking (auto-crops to follow the speaker)
-5. **Export** — Export finished videos from the browser
-
-## 🔧 Troubleshooting
-
-See the **Troubleshooting** section in `SETUP_GUIDE.html`, or:
-
-| Problem | Solution |
-|---------|----------|
-| Video won't download | Export cookies from Chrome to `www.youtube.com_cookies.txt` |
-| Can't see `.env.local` | Show hidden files (Windows: View → Hidden items, Mac: Cmd+Shift+.) |
-| "Port in use" | Close all terminal windows and retry |
-| Python tracker not building | Run `pip install mediapipe opencv-python-headless numpy pyinstaller` then `python python/build.py` |
+MIT
