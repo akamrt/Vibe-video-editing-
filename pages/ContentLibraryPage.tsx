@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import HotkeysPanel from '../components/HotkeysPanel';
 import { contentDB, VideoRecord, TranscriptSegment, Category, GeneratedShort, generateId } from '../services/contentDatabase';
 import { searchTranscripts, generateShort, SearchResult, buildShortPrompt, importManualShort } from '../services/contentAIService';
 import { CookieUploadButton } from '../components/CookieUploadButton';
@@ -60,6 +61,7 @@ export const ContentLibraryPage: React.FC<{
 
     // AI Cost tracking
     const [showCostPanel, setShowCostPanel] = useState(false);
+    const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
     const [costTotal, setCostTotal] = useState(0);
     const [costLog, setCostLog] = useState<CostEntry[]>([]);
 
@@ -838,6 +840,22 @@ export const ContentLibraryPage: React.FC<{
                     )}
                     <div className="flex justify-center">
                         <CookieUploadButton />
+                    </div>
+
+                    {/* Keyboard Shortcuts */}
+                    <div className="mt-3">
+                        <button
+                            onClick={() => setShowShortcutsPanel(p => !p)}
+                            className="w-full flex items-center justify-between px-2 py-1.5 rounded bg-[#1a1a1a] hover:bg-[#222] transition-colors text-xs text-gray-400 hover:text-white"
+                        >
+                            <span className="flex items-center gap-1.5">⌨ Keyboard Shortcuts</span>
+                            <span className="text-gray-600">{showShortcutsPanel ? '▲' : '▼'}</span>
+                        </button>
+                        {showShortcutsPanel && (
+                            <div className="mt-2 bg-[#111] border border-[#2a2a2a] rounded-lg p-3">
+                                <HotkeysPanel />
+                            </div>
+                        )}
                     </div>
 
                     {/* Bundle Export / Import (with media files) */}

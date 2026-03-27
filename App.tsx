@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { loadHotkeyOverrides, getAllBindings, matchesBinding } from './utils/hotkeys';
 import { createPortal } from 'react-dom';
 import Timeline from './components/Timeline';
 import ChatPanel from './components/ChatPanel';
@@ -1108,12 +1109,15 @@ function App() {
     }
   }, [renderedSegments]);
 
-  // Keyboard Listeners
+  // Keyboard Listeners — driven by the user-configurable hotkeys system (utils/hotkeys.ts)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-      // Undo/Redo shortcuts
+      // Load bindings fresh each event so Settings changes take effect immediately
+      const bindings = getAllBindings(loadHotkeyOverrides());
+
+      // Undo/Redo (fixed — not rebindable)
       if (e.ctrlKey || e.metaKey) {
         if (e.key === 'z' && !e.shiftKey) {
           e.preventDefault();
@@ -1127,37 +1131,38 @@ function App() {
         }
       }
 
-      // Space / K = play/pause (standard video editor shortcuts, works on Mac)
-      if (e.code === 'Space' || e.key === 'k') {
+      // Play / Pause
+      if (matchesBinding(e, bindings['play-pause'])) {
         e.preventDefault();
         setProject(p => ({ ...p, isPlaying: !p.isPlaying }));
         return;
       }
 
-      // J = rewind to start, L = skip forward one frame (standard JKL transport)
-      if (e.key === 'j') {
+      // Rewind 5s
+      if (matchesBinding(e, bindings['rewind'])) {
         e.preventDefault();
         setProject(p => ({ ...p, isPlaying: false, currentTime: Math.max(0, p.currentTime - 5) }));
         return;
       }
-      if (e.key === 'l') {
+
+      // Skip Forward 5s
+      if (matchesBinding(e, bindings['forward'])) {
         e.preventDefault();
         setProject(p => ({ ...p, isPlaying: false, currentTime: p.currentTime + 5 }));
         return;
       }
 
-      // Don't intercept Delete/Backspace when graph editor has focus —
-      // the graph editor handles its own keyframe deletion
+      // Don't intercept Delete when graph editor has focus — it handles its own keyframe deletion
       if (e.key === 'Delete' || e.key === 'Backspace') {
         const inGraphEditor = document.activeElement?.closest('[data-graph-editor]');
         if (inGraphEditor) return;
       }
 
-      if (selectedSegmentIds.length > 0) {
-        if (e.key === 'Delete') performDelete(selectedSegmentIds, false);
-        else if (e.key === 'Backspace') performDelete(selectedSegmentIds, false);
-      } else if (selectedDialogue) {
-        if (e.key === 'Delete' || e.key === 'Backspace') {
+      // Delete selected clip / subtitle
+      if (matchesBinding(e, bindings['delete-selected']) || e.key === 'Backspace') {
+        if (selectedSegmentIds.length > 0) {
+          performDelete(selectedSegmentIds, false);
+        } else if (selectedDialogue) {
           handleDeleteDialogue(selectedDialogue.mediaId, selectedDialogue.index);
         }
       }

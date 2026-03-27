@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import HotkeysPanel from './HotkeysPanel';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -21,6 +22,7 @@ const API_KEY_LABELS: Record<string, string> = {
 };
 
 const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose }) => {
+  const [activeTab, setActiveTab] = useState<'api-keys' | 'shortcuts'>('api-keys');
   const [keys, setKeys] = useState<Record<string, KeyStatus>>({});
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
@@ -90,9 +92,33 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose }) => {
           <button onClick={onClose} className="text-gray-400 hover:text-white text-xl leading-none">&times;</button>
         </div>
 
+        {/* Tabs */}
+        <div className="flex border-b border-[#333] px-5">
+          {(['api-keys', 'shortcuts'] as const).map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === tab
+                  ? 'border-indigo-500 text-white'
+                  : 'border-transparent text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              {tab === 'api-keys' ? 'API Keys' : '⌨ Shortcuts'}
+            </button>
+          ))}
+        </div>
+
         {/* Content */}
         <div className="px-5 py-4 space-y-4 max-h-[70vh] overflow-y-auto">
-          {/* API Keys Section */}
+
+          {/* Shortcuts tab */}
+          {activeTab === 'shortcuts' && (
+            <HotkeysPanel />
+          )}
+
+          {/* API Keys tab */}
+          {activeTab === 'api-keys' && <>
           <div>
             <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wider mb-3">API Keys</h3>
             <div className="space-y-3">
@@ -154,6 +180,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose }) => {
               {message}
             </div>
           )}
+          </>}
         </div>
 
         {/* Footer */}
