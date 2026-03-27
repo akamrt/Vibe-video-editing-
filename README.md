@@ -56,23 +56,107 @@ Select a clip → Gemini searches Pexels for relevant stock footage and suggests
 - YouTube cookie auth for age-restricted content
 - Undo/redo with full action history
 - Auto-save to IndexedDB
-- Cross-platform: Windows (.bat), Mac/Linux (.sh)
+- Cross-platform: Windows, Mac, Linux
 
 ---
 
-## Quick Start
+## 🚀 Install — Up and Running in 5 Minutes
 
-```bash
-# Mac/Linux
-chmod +x START.sh && ./START.sh
+### 🪟 Windows
 
-# Windows
-# Double-click START.bat
+**1. Get the files**
+Download the Vibe folder and put it somewhere convenient — Desktop, Documents, or Downloads all work.
 
-# First run auto-installs all dependencies
+**2. Install everything**
+Open the folder and double-click:
+```
+INSTALL.bat
+```
+A black window will open. Let it run — it'll install Node.js and all the tools automatically. If Windows shows a "Windows protected your PC" popup, click **"More info" → "Run anyway"**. This is normal for downloaded scripts.
+
+When you see **"INSTALLATION COMPLETE!"** you're done with this step.
+
+**3. Add your free API key**
+The AI features need a free API key from Google:
+1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+2. Sign in → click **"Create API Key"** → copy it
+3. In the Vibe folder, find **`.env.local`** — right-click → **Open with → Notepad**
+4. Replace `your_gemini_api_key_here` with your actual key
+5. Save (Ctrl+S) and close
+
+*Can't see the .env.local file? In File Explorer, click **View** → check **"Hidden items"**.*
+
+**4. Run**
+Double-click:
+```
+START.bat
+```
+The app opens in your browser automatically. You're ready to go.
+
+---
+
+### 🍎 Mac
+
+**1. Open Terminal**
+Press **Cmd + Space**, type "Terminal", press Enter.
+
+**2. Get the files**
+Paste and run:
+```
+git clone https://github.com/akamrt/Vibe-video-editing-.git && cd Vibe-video-editing-
+```
+If Terminal asks to install Xcode Command Line Tools, click **Install** and wait.
+
+**3. Install everything**
+Run these two commands, pressing Enter after each:
+```
+chmod +x INSTALL.sh START.sh
+./INSTALL.sh
+```
+Enter your Mac password if asked. The script installs everything automatically. When you see **"INSTALLATION COMPLETE!"** you're done.
+
+**4. Add your free API key**
+Get a free key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey), then paste this in Terminal:
+```
+nano .env.local
+```
+Replace the placeholder with your key. Press **Ctrl + O** (Save) → Enter → **Ctrl + X** (Exit).
+
+**5. Run**
+```
+./START.sh
+```
+The app opens in your browser. To stop it later, press **Ctrl + C** in Terminal.
+
+---
+
+## 🔄 Updating
+
+When there's a new version, updating takes about 30 seconds.
+
+**Windows:**
+```
+git pull && INSTALL.bat
 ```
 
-Requires: Node.js, Python 3 (for tracker), Gemini API key (put in `.env.local`)
+**Mac:**
+```
+git pull && ./INSTALL.sh
+```
+
+Your API key and settings are never affected by updates.
+
+---
+
+## 🛠️ Troubleshooting
+
+**"localhost refused to connect"** — Wait 10 seconds and refresh. If it still doesn't work, close everything and run START.bat again.
+
+**"Port is already in use"** — Another app is using port 3000. Close all Terminal/command prompt windows and try again.
+
+**"API key not set"** — The .env.local file wasn't set up correctly. See Step 3 above.
+
+**YouTube video won't download** — YouTube may require browser cookies. Install the "Get cookies.txt" Chrome extension, go to youtube.com, export cookies, and save the file as `www.youtube.com_cookies.txt` in the Vibe folder.
 
 ---
 
