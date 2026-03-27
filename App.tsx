@@ -4409,10 +4409,11 @@ function App() {
       segmentsToDelete.forEach(seg => {
         const deletedDuration = seg.endTime - seg.startTime;
         const deletedStart = seg.timelineStart;
+        const deletedTrack = seg.track || 0;
         newSegments = newSegments.filter(s => s.id !== seg.id);
         if (ripple) {
           newSegments = newSegments.map(s => {
-            if (s.timelineStart > deletedStart + 0.001) {
+            if (s.timelineStart > deletedStart + 0.001 && (s.track || 0) === deletedTrack) {
               return { ...s, timelineStart: s.timelineStart - deletedDuration };
             }
             return s;
