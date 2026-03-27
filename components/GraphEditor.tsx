@@ -542,13 +542,23 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
         } else if (hoveredKey) {
             setDragMode('edit');
             const selKey = getSelectionKey(hoveredKey.time, hoveredKey.channel);
-            if (!selectedKeys.has(selKey) && !e.shiftKey) {
-                setSelectedKeys(new Set([selKey]));
+            if (e.metaKey || e.ctrlKey) {
+                // Cmd/Ctrl+click = toggle this keyframe in/out of selection
+                // (Mac standard multi-select; Ctrl on Mac avoids triggering context menu)
+                const newSet = new Set(selectedKeys);
+                if (newSet.has(selKey)) newSet.delete(selKey);
+                else newSet.add(selKey);
+                setSelectedKeys(newSet);
             } else if (e.shiftKey) {
+                // Shift+click = add to selection
                 const newSet = new Set(selectedKeys);
                 newSet.add(selKey);
                 setSelectedKeys(newSet);
+            } else if (!selectedKeys.has(selKey)) {
+                // Click unselected key = select only this one
+                setSelectedKeys(new Set([selKey]));
             }
+            // Click already-selected key without modifier = keep selection so multi-key drag works
         } else if (e.shiftKey) {
             // Shift+drag on empty space = marquee selection (Mac trackpad alternative to middle-click)
             setDragMode('marquee');
@@ -1306,19 +1316,62 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
     };
 
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+        // Escape: cancel active mode first; if none, deselect all
         if (e.key === 'Escape') {
             if (simplifyActive) { setSimplifyActive(false); preSimplifyRef.current = null; return; }
             if (clampActive) { handleClampToggle(); return; }
             if (smoothActive) { handleSmoothToggle(); return; }
+            setSelectedKeys(new Set());
+            return;
         }
+
+        // Delete / Backspace = delete selected keyframes
         if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedKeys.size > 0) {
                 e.preventDefault();
                 e.stopPropagation();
                 handleDeleteSelected();
             }
+            return;
         }
-    }, [selectedKeys, handleDeleteSelected, simplifyActive, clampActive, handleClampToggle, smoothActive, handleSmoothToggle]);
+
+        const isMod = e.metaKey || e.ctrlKey;
+
+        // Cmd/Ctrl+A = Select All keyframes on active channels
+        if (isMod && e.key === 'a') {
+            e.preventDefault();
+            e.stopPropagation();
+            const all = new Set<string>();
+            keyframes.forEach(kf => {
+                activeChannels.forEach(ch => all.add(getSelectionKey(kf.time, ch)));
+            });
+            setSelectedKeys(all);
+            return;
+        }
+
+        // Cmd/Ctrl+D = Deselect All
+        if (isMod && e.key === 'd') {
+            e.preventDefault();
+            e.stopPropagation();
+            setSelectedKeys(new Set());
+            return;
+        }
+
+        // Cmd/Ctrl+I = Invert Selection
+        if (isMod && e.key === 'i') {
+            e.preventDefault();
+            e.stopPropagation();
+            const inverted = new Set<string>();
+            keyframes.forEach(kf => {
+                activeChannels.forEach(ch => {
+                    const k = getSelectionKey(kf.time, ch);
+                    if (!selectedKeys.has(k)) inverted.add(k);
+                });
+            });
+            setSelectedKeys(inverted);
+            return;
+        }
+    }, [selectedKeys, handleDeleteSelected, simplifyActive, clampActive, handleClampToggle, smoothActive, handleSmoothToggle, keyframes, activeChannels]);
 
     if (!visible) return null;
 
