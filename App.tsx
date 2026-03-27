@@ -2043,11 +2043,12 @@ function App() {
         isAudioOnly,
       });
     }
+    // Persist blobs to IndexedDB BEFORE updating project state so they're
+    // guaranteed to exist if the user saves + refreshes immediately after upload.
+    await Promise.all(newItems.map(item =>
+      item.file ? contentDB.saveMediaBlob(item.id, item.file).catch(e => console.warn('[MediaBlob] save failed:', e)) : Promise.resolve()
+    ));
     setProject(prev => ({ ...prev, library: [...prev.library, ...newItems] }));
-    // Persist blobs so they survive page reloads and are available for export bundles
-    newItems.forEach(item => {
-      if (item.file) contentDB.saveMediaBlob(item.id, item.file).catch(e => console.warn('[MediaBlob] save failed:', e));
-    });
   };
 
   // Extract YouTube video ID from URL (client-side helper)
@@ -3609,7 +3610,8 @@ function App() {
         }
       };
 
-      // 6. Add to library
+      // 6. Add to library — persist blob immediately so it survives save+refresh
+      if (newMediaItem.file) contentDB.saveMediaBlob(newMediaItem.id, newMediaItem.file).catch(e => console.warn('[MediaBlob] save failed:', e));
       setProject(prev => ({ ...prev, library: [...prev.library, newMediaItem] }));
 
       // 7. Create timeline segments from the short clips
