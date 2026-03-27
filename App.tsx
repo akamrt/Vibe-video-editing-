@@ -5015,6 +5015,68 @@ function App() {
     return result;
   };
 
+  /**
+   * After remove-silence / filler-clean splits a tracked segment into pieces,
+   * ensure transform keyframe continuity across consecutive same-media segments
+   * on the same track. Without this, the subject jumps at every cut point because
+   * each piece's keyframes are independent and the subject may have moved during
+   * the removed section.
+   */
+  const ensureKeyframeContinuity = (segments: Segment[]): Segment[] => {
+    // Group segment indices by track
+    const byTrack = new Map<number, number[]>();
+    segments.forEach((seg, i) => {
+      const track = seg.track ?? 0;
+      if (!byTrack.has(track)) byTrack.set(track, []);
+      byTrack.get(track)!.push(i);
+    });
+
+    const result = segments.map(s => ({ ...s }));
+
+    for (const [, indices] of byTrack) {
+      // Sort by timeline position
+      const sorted = [...indices].sort((a, b) => segments[a].timelineStart - segments[b].timelineStart);
+
+      for (let i = 1; i < sorted.length; i++) {
+        const prevIdx = sorted[i - 1];
+        const currIdx = sorted[i];
+        const prevSeg = result[prevIdx];
+        const currSeg = result[currIdx];
+
+        // Only bridge same-media segments where both have keyframes
+        if (prevSeg.mediaId !== currSeg.mediaId) continue;
+        if (!prevSeg.keyframes?.length || !currSeg.keyframes?.length) continue;
+
+        // End transform of previous segment (already includes any earlier offsets)
+        const prevDuration = prevSeg.endTime - prevSeg.startTime;
+        const prevEnd = getInterpolatedTransform(prevSeg.keyframes, prevDuration);
+
+        // Start transform of current segment (not yet offset)
+        const currStart = getInterpolatedTransform(currSeg.keyframes, 0);
+
+        const dX = prevEnd.translateX - currStart.translateX;
+        const dY = prevEnd.translateY - currStart.translateY;
+        const dS = prevEnd.scale - currStart.scale;
+        const dR = prevEnd.rotation - currStart.rotation;
+
+        if (Math.abs(dX) < 0.001 && Math.abs(dY) < 0.001 && Math.abs(dS) < 0.001 && Math.abs(dR) < 0.001) continue;
+
+        result[currIdx] = {
+          ...currSeg,
+          keyframes: currSeg.keyframes.map(kf => ({
+            ...kf,
+            translateX: kf.translateX + dX,
+            translateY: kf.translateY + dY,
+            scale: kf.scale + dS,
+            rotation: kf.rotation + dR,
+          }))
+        };
+      }
+    }
+
+    return result;
+  };
+
   /** Pack segments sequentially per track with no gaps.
    * B-roll overlay segments (track > 0, audioLinked === false, non-audio) are excluded
    * from pack-from-zero and instead repositioned to stay aligned with V1 content. */
@@ -5405,6 +5467,8 @@ function App() {
 
       // Ripple-close all gaps
       newSegments = rippleCloseGaps(newSegments);
+      // Bridge tracking keyframe gaps so subject doesn't jump at cut points
+      newSegments = ensureKeyframeContinuity(newSegments);
 
       // Update subtitle events
       let newLibrary = [...prev.library];
@@ -5517,6 +5581,8 @@ function App() {
 
         // Ripple-close all gaps on the timeline
         newSegments = rippleCloseGaps(newSegments);
+        // Bridge tracking keyframe gaps so subject doesn't jump at cut points
+        newSegments = ensureKeyframeContinuity(newSegments);
 
         // Update subtitle events that overlap removed silence regions
         let newLibrary = [...prev.library];
@@ -5584,6 +5650,8 @@ function App() {
       }
 
       newSegments = rippleCloseGaps(newSegments);
+      // Bridge tracking keyframe gaps so subject doesn't jump at cut points
+      newSegments = ensureKeyframeContinuity(newSegments);
 
       // Create fake 'filler' detections out of these words to update the subtitle events
       let newLibrary = [...prev.library];
