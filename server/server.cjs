@@ -1588,7 +1588,8 @@ const transcribeUpload = multer({
 });
 
 app.post('/api/transcribe', transcribeUpload.single('file'), async (req, res) => {
-    const apiKey = ASSEMBLYAI_API_KEY;
+    // Read key fresh from process.env in case it was set via Settings after server startup
+    const apiKey = process.env.ASSEMBLYAI_API_KEY || ASSEMBLYAI_API_KEY;
     if (!apiKey) {
         return res.status(400).json({ error: 'ASSEMBLYAI_API_KEY not configured. Add it in Settings.' });
     }

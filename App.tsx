@@ -1127,6 +1127,25 @@ function App() {
         }
       }
 
+      // Space / K = play/pause (standard video editor shortcuts, works on Mac)
+      if (e.code === 'Space' || e.key === 'k') {
+        e.preventDefault();
+        setProject(p => ({ ...p, isPlaying: !p.isPlaying }));
+        return;
+      }
+
+      // J / L = jump back/forward 5 seconds (standard JKL transport)
+      if (e.key === 'j') {
+        e.preventDefault();
+        setProject(p => ({ ...p, isPlaying: false, currentTime: Math.max(0, p.currentTime - 5) }));
+        return;
+      }
+      if (e.key === 'l') {
+        e.preventDefault();
+        setProject(p => ({ ...p, isPlaying: false, currentTime: p.currentTime + 5 }));
+        return;
+      }
+
       // Don't intercept Delete/Backspace when graph editor has focus —
       // the graph editor handles its own keyframe deletion
       if (e.key === 'Delete' || e.key === 'Backspace') {
