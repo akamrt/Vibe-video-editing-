@@ -1188,20 +1188,28 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedSegmentIds, undoStack, redoStack]);
 
-  // Viewport size — measure outer wrapper once on mount, then lock so panel resizing doesn't change resolution
-  const viewportSizeLockedRef = useRef(false);
+  // Viewport size — track outer wrapper size via ResizeObserver so overlays stay centered when panels resize
   useEffect(() => {
     const outer = viewportOuterRef.current;
     if (!outer) {
       setViewportSize({ width: 0, height: 0 });
-      viewportSizeLockedRef.current = false;
       return;
     }
 
-    if (!viewportSizeLockedRef.current) {
-      setViewportSize({ width: outer.clientWidth, height: outer.clientHeight });
-      viewportSizeLockedRef.current = true;
-    }
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setViewportSize(prev => (prev.width === Math.round(width) && prev.height === Math.round(height)) ? prev : { width: Math.round(width), height: Math.round(height) });
+        }
+      }
+    });
+    ro.observe(outer);
+
+    // Initial measurement
+    setViewportSize({ width: outer.clientWidth, height: outer.clientHeight });
+
+    return () => ro.disconnect();
   }, [activePage]); // Re-run when page changes
 
   // Push an undo action onto the stack
