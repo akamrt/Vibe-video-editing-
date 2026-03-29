@@ -1,5 +1,8 @@
 import React, { useState } from 'react';
-import { Segment, Transition, TransitionType, TransitionEasing, VideoAnalysis, SubtitleStyle, TitleLayer, TitleStyle, SubtitleTemplate, TextAnimation, KeywordEmphasis, GradientStop } from '../types';
+import { Segment, Transition, TransitionType, TransitionEasing, VideoAnalysis, SubtitleStyle, TitleLayer, TitleStyle, SubtitleTemplate, TextAnimation, KeywordEmphasis, GradientStop, ColorCorrection, ColorGrading } from '../types';
+import { DEFAULT_COLOR_CORRECTION, isDefaultCC } from '../utils/colorCorrection';
+import { DEFAULT_COLOR_GRADING, isGradingDefault } from '../utils/colorGradingDefaults';
+import ColorGradingPanel from './ColorGradingPanel';
 import { migrateGradientColors } from '../utils/gradientUtils';
 import { TRANSITION_CATALOG, TRANSITION_CATEGORIES, getTransitionDef } from '../utils/transitionCatalog';
 import AnimationControls from './AnimationControls';
@@ -35,6 +38,12 @@ interface PropertiesPanelProps {
   currentVolume?: number; // Interpolated volume at current playback position (0-1)
   onAddVolumeKey?: (segId: string, volume: number) => void;
   onAutoWrapDialogue?: () => void;
+  onColorCorrectionChange?: (segId: string, field: keyof ColorCorrection, value: number) => void;
+  onResetColorCorrection?: (segId: string) => void;
+  onColorGradingChange?: (segId: string, grading: ColorGrading) => void;
+  onResetColorGrading?: (segId: string) => void;
+  mattePreviewing?: boolean;
+  onMattePreview?: (enabled: boolean) => void;
 }
 
 const BLEND_MODES = [
@@ -138,6 +147,12 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   currentVolume,
   onAddVolumeKey,
   onAutoWrapDialogue,
+  onColorCorrectionChange,
+  onResetColorCorrection,
+  onColorGradingChange,
+  onResetColorGrading,
+  mattePreviewing,
+  onMattePreview,
 }) => {
   const [analysisFocus, setAnalysisFocus] = useState('');
   const [volumeSlider, setVolumeSlider] = useState(100);
@@ -1206,6 +1221,18 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                   </button>
                   <p className="text-[9px] text-gray-500 text-center">Set volume slider, then add a keyframe at the current time. Use Graph Editor for full curve control.</p>
                 </div>
+              </Accordion>
+            )}
+
+            {selectedSegment.type !== 'blank' && onColorGradingChange && onResetColorGrading && (
+              <Accordion title="Color Grading" defaultOpen={false}>
+                <ColorGradingPanel
+                  grading={selectedSegment.colorGrading ?? DEFAULT_COLOR_GRADING}
+                  onChange={g => onColorGradingChange(selectedSegment.id, g)}
+                  onReset={() => onResetColorGrading(selectedSegment.id)}
+                  mattePreviewing={mattePreviewing}
+                  onMattePreview={onMattePreview}
+                />
               </Accordion>
             )}
 

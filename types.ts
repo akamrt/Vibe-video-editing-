@@ -174,6 +174,84 @@ export interface TransitionDefinition {
   paramSchema: TransitionParamSchema[];
 }
 
+// ============ COLOR CORRECTION (Phase 1 - legacy) ============
+export interface ColorCorrection {
+  brightness: number;    // 0-200 (100 = default, maps to CSS brightness(1.0))
+  contrast: number;      // 0-200 (100 = default)
+  saturation: number;    // 0-200 (100 = default)
+  exposure: number;      // -100 to 100 (0 = default, brightness offset)
+  temperature: number;   // -100 to 100 (0 = neutral, warm ↔ cool)
+  tint: number;          // -100 to 100 (0 = neutral, green ↔ magenta)
+  highlights: number;    // -100 to 100 (0 = default)
+  shadows: number;       // -100 to 100 (0 = default)
+  hueRotate: number;     // -180 to 180 degrees
+  gamma: number;         // 0.1-3.0 (1.0 = default)
+}
+
+// ============ COLOR GRADING (Phase 2 - advanced) ============
+export interface ColorWheelValue {
+  r: number;   // -1 to 1 (0 = neutral)
+  g: number;   // -1 to 1
+  b: number;   // -1 to 1
+  y: number;   // luminance/master, -1 to 1
+}
+
+export interface CurvePoint {
+  x: number;   // 0-1 (input value)
+  y: number;   // 0-1 (output value)
+}
+
+export interface QualifierRange {
+  center: number;
+  width: number;
+  softness: number;
+}
+
+export interface HSLQualifier {
+  enabled: boolean;
+  hue: QualifierRange;
+  saturation: QualifierRange;
+  luminance: QualifierRange;
+  blurRadius: number;
+  invert: boolean;
+}
+
+export interface ColorGrading {
+  // Basic corrections (same as Phase 1)
+  brightness: number;    // 0-200 (100 = default)
+  contrast: number;      // 0-200 (100 = default)
+  saturation: number;    // 0-200 (100 = default)
+  exposure: number;      // -100 to 100
+  temperature: number;   // -100 to 100
+  tint: number;          // -100 to 100
+  highlights: number;    // -100 to 100
+  shadows: number;       // -100 to 100
+  hueRotate: number;     // -180 to 180
+  gamma: number;         // 0.1-3.0
+
+  // Color Wheels
+  lift: ColorWheelValue;
+  gammaWheel: ColorWheelValue;   // "gammaWheel" to avoid clash with gamma slider
+  gain: ColorWheelValue;
+  offset: ColorWheelValue;
+
+  // RGB Curves (control points)
+  curveMaster: CurvePoint[];
+  curveRed: CurvePoint[];
+  curveGreen: CurvePoint[];
+  curveBlue: CurvePoint[];
+
+  // HSL Curves
+  hueVsHue: CurvePoint[];
+  hueVsSat: CurvePoint[];
+  hueVsLum: CurvePoint[];
+  lumVsSat: CurvePoint[];
+  satVsSat: CurvePoint[];
+
+  // HSL Qualifier
+  qualifier?: HSLQualifier;
+}
+
 export interface Segment {
   id: string;
   type?: 'video' | 'audio' | 'blank'; // 'audio' = unlinked audio-only segment
@@ -193,6 +271,8 @@ export interface Segment {
   // Audio unlinking
   audioLinked?: boolean;      // true (default) = audio moves with video. false = audio is separate
   linkedSegmentId?: string;   // ID of counterpart segment (video ↔ audio) when unlinked
+  colorCorrection?: ColorCorrection; // Phase 1 legacy (migrated to colorGrading on load)
+  colorGrading?: ColorGrading;       // Full color grading (Phase 2)
 }
 
 export interface ChatMessage {

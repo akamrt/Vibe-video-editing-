@@ -10,7 +10,11 @@ import ViewportOverlay from './components/ViewportOverlay';
 import ExportModal from './components/ExportModal';
 import SettingsPanel from './components/SettingsPanel';
 import GraphEditor from './components/GraphEditor';
-import { ProjectState, Segment, ChatMessage, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord, PivotKeyframe } from './types';
+import { ProjectState, Segment, ChatMessage, ProcessingStatus, MediaItem, TransitionType, Transition, SubtitleStyle, TitleStyle, TitleLayer, AnalysisEvent, ViewportSettings, ClipKeyframe, ExportSettings, AspectRatioPreset, SubtitleTemplate, REMOTION_FPS, VibeCutTracker, TrackedFrame, TrackingMode, KeywordEmphasis, TextAnimation, RemovedWord, PivotKeyframe, ColorCorrection, ColorGrading } from './types';
+import { DEFAULT_COLOR_CORRECTION, buildCSSFilter, buildSVGFilterMarkup, buildCanvasFilter, needsAdvancedCorrection, applyAdvancedCorrection, isDefaultCC } from './utils/colorCorrection';
+import { DEFAULT_COLOR_GRADING, isGradingDefault, migrateColorCorrection } from './utils/colorGradingDefaults';
+import { applyColorGradingToImageData } from './utils/colorGradingExport';
+import ColorGradingCanvas from './components/ColorGradingCanvas';
 import RemotionPreview from './components/remotion/RemotionPreview';
 import TemplateManager from './components/remotion/TemplateManager';
 import TransitionPanel from './components/TransitionPanel';
@@ -423,7 +427,9 @@ function App() {
     | { type: 'fillerClean'; segments: Segment[]; library: MediaItem[] }
     | { type: 'transcriptEdit'; segments: Segment[]; removedWords: RemovedWord[]; library?: MediaItem[] }
     | { type: 'transcriptRestore'; segments: Segment[]; removedWords: RemovedWord[]; library?: MediaItem[] }
-    | { type: 'titleLayer'; titleLayer: TitleLayer };
+    | { type: 'titleLayer'; titleLayer: TitleLayer }
+    | { type: 'colorCorrection'; segmentId: string; colorCorrection: ColorCorrection | undefined }
+    | { type: 'colorGrading'; segmentId: string; colorGrading: ColorGrading | undefined };
 
   const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
   const [redoStack, setRedoStack] = useState<UndoAction[]>([]);
@@ -457,6 +463,17 @@ function App() {
   // Debounced undo capture for continuous style changes (sliders)
   const styleUndoCaptured = useRef<boolean>(false);
   const styleUndoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounced undo capture for color correction slider changes
+  const ccUndoCaptured = useRef<boolean>(false);
+  const ccUndoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounced undo capture for color grading changes
+  const cgUndoCaptured = useRef<boolean>(false);
+  const cgUndoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Matte preview mode for HSL Qualifier
+  const [mattePreviewing, setMattePreviewing] = useState(false);
 
   // We now manage a map of video refs for multi-track playback
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
@@ -1218,6 +1235,76 @@ function App() {
     }));
   };
 
+  // Handler for updating segment color correction (with debounced undo)
+  const handleColorCorrectionChange = (segmentId: string, field: keyof ColorCorrection, value: number) => {
+    // Capture undo snapshot on first change in a drag
+    if (!ccUndoCaptured.current) {
+      const seg = project.segments.find(s => s.id === segmentId);
+      if (seg) {
+        pushUndo({ type: 'colorCorrection', segmentId, colorCorrection: seg.colorCorrection ? { ...seg.colorCorrection } : undefined });
+        ccUndoCaptured.current = true;
+      }
+    }
+    if (ccUndoTimer.current) clearTimeout(ccUndoTimer.current);
+    ccUndoTimer.current = setTimeout(() => { ccUndoCaptured.current = false; }, 500);
+
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s => {
+        if (s.id !== segmentId) return s;
+        const cc = s.colorCorrection ?? { ...DEFAULT_COLOR_CORRECTION };
+        return { ...s, colorCorrection: { ...cc, [field]: value } };
+      })
+    }));
+  };
+
+  const handleResetColorCorrection = (segmentId: string) => {
+    const seg = project.segments.find(s => s.id === segmentId);
+    if (seg) {
+      pushUndo({ type: 'colorCorrection', segmentId, colorCorrection: seg.colorCorrection ? { ...seg.colorCorrection } : undefined });
+    }
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === segmentId ? { ...s, colorCorrection: undefined } : s
+      )
+    }));
+  };
+
+  // Handler for updating full color grading (Phase 2 — WebGL pipeline)
+  const handleColorGradingChange = (segmentId: string, grading: ColorGrading) => {
+    if (!cgUndoCaptured.current) {
+      const seg = project.segments.find(s => s.id === segmentId);
+      if (seg) {
+        pushUndo({ type: 'colorGrading', segmentId, colorGrading: seg.colorGrading ? { ...seg.colorGrading } : undefined });
+        cgUndoCaptured.current = true;
+      }
+    }
+    if (cgUndoTimer.current) clearTimeout(cgUndoTimer.current);
+    cgUndoTimer.current = setTimeout(() => { cgUndoCaptured.current = false; }, 500);
+
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === segmentId ? { ...s, colorGrading: grading } : s
+      )
+    }));
+  };
+
+  const handleResetColorGrading = (segmentId: string) => {
+    const seg = project.segments.find(s => s.id === segmentId);
+    if (seg) {
+      pushUndo({ type: 'colorGrading', segmentId, colorGrading: seg.colorGrading ? { ...seg.colorGrading } : undefined });
+    }
+    setProject(prev => ({
+      ...prev,
+      segments: prev.segments.map(s =>
+        s.id === segmentId ? { ...s, colorGrading: undefined } : s
+      )
+    }));
+    setMattePreviewing(false);
+  };
+
   // Combine global and clip transforms
   const getCombinedTransform = (clipKeyframes: ClipKeyframe[] | undefined, clipTime: number, timelineTime: number) => {
     const globalTransform = getInterpolatedTransform(globalKeyframes, timelineTime);
@@ -1311,6 +1398,32 @@ function App() {
         if (project.titleLayer) {
           pushToStack({ type: 'titleLayer', titleLayer: { ...project.titleLayer } });
           setProject(prev => ({ ...prev, titleLayer: action.titleLayer }));
+        }
+        break;
+      }
+      case 'colorCorrection': {
+        const seg = project.segments.find(s => s.id === action.segmentId);
+        if (seg) {
+          pushToStack({ type: 'colorCorrection', segmentId: action.segmentId, colorCorrection: seg.colorCorrection });
+          setProject(prev => ({
+            ...prev,
+            segments: prev.segments.map(s =>
+              s.id === action.segmentId ? { ...s, colorCorrection: action.colorCorrection } : s
+            )
+          }));
+        }
+        break;
+      }
+      case 'colorGrading': {
+        const seg = project.segments.find(s => s.id === action.segmentId);
+        if (seg) {
+          pushToStack({ type: 'colorGrading', segmentId: action.segmentId, colorGrading: seg.colorGrading });
+          setProject(prev => ({
+            ...prev,
+            segments: prev.segments.map(s =>
+              s.id === action.segmentId ? { ...s, colorGrading: action.colorGrading } : s
+            )
+          }));
         }
         break;
       }
@@ -1824,6 +1937,12 @@ function App() {
             isTransitionIn = false;
           }
 
+          // Color grading / correction for export
+          const hasGrading = activeSeg.colorGrading && !isGradingDefault(activeSeg.colorGrading);
+          const ccFilter = !hasGrading && activeSeg.colorCorrection && !isDefaultCC(activeSeg.colorCorrection)
+            ? buildCanvasFilter(activeSeg.colorCorrection) : 'none';
+          const ccAdvanced = !hasGrading && activeSeg.colorCorrection && needsAdvancedCorrection(activeSeg.colorCorrection);
+
           if (transitionActive && activeTransition && activeTransition.type !== 'NONE') {
             if (shouldLog) console.log(`[Export] Transition: ${activeTransition.type}, progress=${transitionProgress.toFixed(2)}, isIn=${isTransitionIn}`);
             // Draw video frame to reusable tmpCanvas (with transforms applied)
@@ -1832,12 +1951,24 @@ function App() {
             const drawWidth = vid.videoWidth * coverScale;
             const drawHeight = vid.videoHeight * coverScale;
             tmpCtx.save();
+            if (ccFilter !== 'none') tmpCtx.filter = ccFilter;
             tmpCtx.translate(outputWidth / 2, outputHeight / 2);
             tmpCtx.translate(transform.translateX * drawWidth / 100, transform.translateY * drawHeight / 100);
             tmpCtx.scale(transform.scale, transform.scale);
             tmpCtx.rotate(transform.rotation * Math.PI / 180);
             tmpCtx.drawImage(vid, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
             tmpCtx.restore();
+            tmpCtx.filter = 'none';
+            // Apply advanced pixel corrections (temperature/tint/gamma) or full grading
+            if (hasGrading && activeSeg.colorGrading) {
+              const imgData = tmpCtx.getImageData(0, 0, outputWidth, outputHeight);
+              applyColorGradingToImageData(imgData, activeSeg.colorGrading);
+              tmpCtx.putImageData(imgData, 0, 0);
+            } else if (ccAdvanced && activeSeg.colorCorrection) {
+              const imgData = tmpCtx.getImageData(0, 0, outputWidth, outputHeight);
+              applyAdvancedCorrection(imgData, activeSeg.colorCorrection);
+              tmpCtx.putImageData(imgData, 0, 0);
+            }
 
             // For crossfade: use previous segment's last frame if available
             if (isTransitionIn) {
@@ -1866,6 +1997,7 @@ function App() {
           } else {
             // Normal draw (no transition)
             ctx.save();
+            if (ccFilter !== 'none') ctx.filter = ccFilter;
             const coverScale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
             const drawWidth = vid.videoWidth * coverScale;
             const drawHeight = vid.videoHeight * coverScale;
@@ -1875,6 +2007,17 @@ function App() {
             ctx.rotate(transform.rotation * Math.PI / 180);
             ctx.drawImage(vid, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
             ctx.restore();
+            ctx.filter = 'none';
+            // Apply full color grading or advanced pixel corrections
+            if (hasGrading && activeSeg.colorGrading) {
+              const imgData = ctx.getImageData(0, 0, outputWidth, outputHeight);
+              applyColorGradingToImageData(imgData, activeSeg.colorGrading);
+              ctx.putImageData(imgData, 0, 0);
+            } else if (ccAdvanced && activeSeg.colorCorrection) {
+              const imgData = ctx.getImageData(0, 0, outputWidth, outputHeight);
+              applyAdvancedCorrection(imgData, activeSeg.colorCorrection);
+              ctx.putImageData(imgData, 0, 0);
+            }
 
             // Capture current frame for potential crossfade with next segment
             if (!prevSegmentCanvas) {
@@ -6217,6 +6360,12 @@ function App() {
                 const updated = [...filtered, newKf].sort((a, b) => a.time - b.time);
                 handleUpdateSegments([{ ...seg, keyframes: updated }]);
               }}
+              onColorCorrectionChange={handleColorCorrectionChange}
+              onResetColorCorrection={handleResetColorCorrection}
+              onColorGradingChange={handleColorGradingChange}
+              onResetColorGrading={handleResetColorGrading}
+              mattePreviewing={mattePreviewing}
+              onMattePreview={setMattePreviewing}
             />
           )}
         </div>
@@ -6918,13 +7067,41 @@ function App() {
                               </div>
                             </div>
                           ) : (
-                            <video
-                              ref={el => { if (el) videoRefs.current.set(seg.id, el); }}
-                              src={project.library.find(m => m.id === seg.mediaId)?.url}
-                              className="w-full h-full object-contain pointer-events-none"
-                              style={{ transform: cssTransform, transformOrigin: `${transform.pivotX}% ${transform.pivotY}%` }}
-                              muted={false}
-                            />
+                            <>
+                              {/* Hidden video element for decode/playback */}
+                              <video
+                                ref={el => { if (el) videoRefs.current.set(seg.id, el); }}
+                                src={project.library.find(m => m.id === seg.mediaId)?.url}
+                                className={seg.colorGrading && !isGradingDefault(seg.colorGrading) ? 'hidden' : 'w-full h-full object-contain pointer-events-none'}
+                                style={seg.colorGrading && !isGradingDefault(seg.colorGrading) ? undefined : {
+                                  transform: cssTransform,
+                                  transformOrigin: `${transform.pivotX}% ${transform.pivotY}%`,
+                                  filter: seg.colorCorrection && !isDefaultCC(seg.colorCorrection)
+                                    ? buildCSSFilter(seg.colorCorrection, needsAdvancedCorrection(seg.colorCorrection) ? `cc-filter-${seg.id}` : undefined)
+                                    : undefined,
+                                }}
+                                muted={false}
+                              />
+                              {/* WebGL grading canvas — shown when color grading is active */}
+                              {seg.colorGrading && !isGradingDefault(seg.colorGrading) && (
+                                <ColorGradingCanvas
+                                  videoElement={videoRefs.current.get(seg.id) || null}
+                                  grading={seg.colorGrading}
+                                  mattePreviewing={mattePreviewing}
+                                  className="w-full h-full object-contain pointer-events-none"
+                                  style={{
+                                    transform: cssTransform,
+                                    transformOrigin: `${transform.pivotX}% ${transform.pivotY}%`,
+                                  }}
+                                />
+                              )}
+                              {/* SVG filter for Phase 1 CC (only when no Phase 2 grading) */}
+                              {!(seg.colorGrading && !isGradingDefault(seg.colorGrading)) && seg.colorCorrection && needsAdvancedCorrection(seg.colorCorrection) && (
+                                <svg width="0" height="0" style={{ position: 'absolute' }}>
+                                  <defs dangerouslySetInnerHTML={{ __html: buildSVGFilterMarkup(seg.colorCorrection, `cc-filter-${seg.id}`) }} />
+                                </svg>
+                              )}
+                            </>
                           )}
                           {/* Dynamic Wash Overlay */}
                           <div
