@@ -4057,6 +4057,15 @@ function App() {
 
       return { ...prev, segments: updatedSegments };
     });
+    // Clear the transition selection after removal so the panel reverts to clip properties
+    if (transition === undefined) {
+      setSelectedTransition(null);
+    }
+  };
+
+  const handleDeleteTitleLayer = () => {
+    setProject(prev => ({ ...prev, titleLayer: null }));
+    setIsTitleSelected(false);
   };
 
   // --- Audio Unlink/Link ---
@@ -6350,6 +6359,7 @@ function App() {
               isTitleSelected={isTitleSelected}
               titleLayer={project.titleLayer}
               onUpdateTitleLayer={handleUpdateTitleLayer}
+              onDeleteTitleLayer={handleDeleteTitleLayer}
               activeSubtitleTemplate={effectiveSubtitleTemplate}
               isTemplateUnlinked={isTemplateUnlinked}
               onUpdateSubtitleTemplate={handleUpdateSubtitleTemplate}

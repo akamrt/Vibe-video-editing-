@@ -26,6 +26,7 @@ interface PropertiesPanelProps {
   onUpdateSubtitleStyle?: (style: Partial<SubtitleStyle>) => void;
   onToggleSubtitleUnlink?: () => void;
   onUpdateTitleLayer?: (updates: Partial<TitleLayer>) => void;
+  onDeleteTitleLayer?: () => void;
   onUpdateSubtitleTemplate?: (template: SubtitleTemplate) => void;
   isTemplateUnlinked?: boolean;
   onToggleTemplateUnlink?: () => void;
@@ -135,6 +136,7 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   onUpdateSubtitleStyle,
   onToggleSubtitleUnlink,
   onUpdateTitleLayer,
+  onDeleteTitleLayer,
   onUpdateSubtitleTemplate,
   isTemplateUnlinked,
   onToggleTemplateUnlink,
@@ -1069,6 +1071,17 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 <AnimationControls animation={titleLayer.animation || { id: 'custom', name: 'Custom', duration: (titleLayer.endTime - titleLayer.startTime), scope: 'element', stagger: 0.05, effects: [] }} onChange={(newAnim) => onUpdateTitleLayer!({ animation: newAnim })} />
               </div>
             </Accordion>
+
+            {onDeleteTitleLayer && (
+              <div className="pt-2 border-t border-[#333]">
+                <button
+                  onClick={onDeleteTitleLayer}
+                  className="w-full py-2 bg-red-900/20 text-red-400 border border-red-900/50 rounded-md hover:bg-red-900/40 text-[11px] font-bold tracking-widest uppercase transition-colors"
+                >
+                  Delete Title Layer
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -1194,6 +1207,43 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 </div>
               </div>
             </Accordion>
+
+            {(selectedSegment.transitionIn || selectedSegment.transitionOut) && (
+              <Accordion title="Transitions" defaultOpen={true}>
+                <div className="space-y-2">
+                  {selectedSegment.transitionIn && (
+                    <div className="flex items-center justify-between bg-[#1a1a1a] border border-[#333] rounded px-3 py-2">
+                      <div>
+                        <span className="text-[10px] text-gray-500 uppercase font-bold mr-2">Intro</span>
+                        <span className="text-[11px] text-cyan-400">{getTransitionDef(selectedSegment.transitionIn.type)?.name || selectedSegment.transitionIn.type}</span>
+                        <span className="text-[10px] text-gray-500 ml-1.5">{selectedSegment.transitionIn.duration.toFixed(1)}s</span>
+                      </div>
+                      <button
+                        onClick={() => onUpdateTransition(selectedSegment.id, 'in', undefined)}
+                        className="text-[10px] text-red-400 border border-red-900/50 rounded px-2 py-0.5 hover:bg-red-900/20 transition-colors"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                  {selectedSegment.transitionOut && (
+                    <div className="flex items-center justify-between bg-[#1a1a1a] border border-[#333] rounded px-3 py-2">
+                      <div>
+                        <span className="text-[10px] text-gray-500 uppercase font-bold mr-2">Outro</span>
+                        <span className="text-[11px] text-cyan-400">{getTransitionDef(selectedSegment.transitionOut.type)?.name || selectedSegment.transitionOut.type}</span>
+                        <span className="text-[10px] text-gray-500 ml-1.5">{selectedSegment.transitionOut.duration.toFixed(1)}s</span>
+                      </div>
+                      <button
+                        onClick={() => onUpdateTransition(selectedSegment.id, 'out', undefined)}
+                        className="text-[10px] text-red-400 border border-red-900/50 rounded px-2 py-0.5 hover:bg-red-900/20 transition-colors"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </Accordion>
+            )}
 
             {selectedSegment.type !== 'blank' && (
               <Accordion title="Audio" defaultOpen={true}>
