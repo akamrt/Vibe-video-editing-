@@ -1914,6 +1914,10 @@ function App() {
         ctx.drawImage(lastGoodFrame, 0, 0);
       }
 
+      // Track drawn subtitles to prevent stacking when multiple segments
+      // from the same source overlap (e.g. after filler removal)
+      const drawnSubKeys = new Set<string>();
+
       activeSegments.forEach(activeSeg => {
         const vid = videoRefs.current.get(activeSeg.id);
         const clipTime = currentTime - activeSeg.timelineStart;
@@ -2048,6 +2052,11 @@ function App() {
             e.type === 'dialogue' && mediaTime >= e.startTime && mediaTime <= e.endTime
           );
 
+          // Deduplicate: skip if this exact subtitle was already drawn by another segment
+          const subKey = subtitle ? `${activeSeg.mediaId}_${subtitle.startTime}_${subtitle.endTime}` : null;
+          const subAlreadyDrawn = subKey ? drawnSubKeys.has(subKey) : false;
+          if (subKey) drawnSubKeys.add(subKey);
+
           if (shouldLog) {
             if (subtitle) {
               const subTemplate = subtitle.templateOverride || projectRef.current.activeSubtitleTemplate;
@@ -2058,7 +2067,7 @@ function App() {
             }
           }
 
-          if (subtitle) {
+          if (subtitle && !subAlreadyDrawn) {
             // Resolve template and style (same logic as viewport)
             const subTemplate = subtitle.templateOverride || projectRef.current.activeSubtitleTemplate;
             const sourceStyle = subtitle.styleOverride || projectRef.current.subtitleStyle;
