@@ -1169,16 +1169,25 @@ function App() {
         return;
       }
 
-      // Don't intercept Delete when graph editor has focus — it handles its own keyframe deletion
+      // Don't intercept Delete/Backspace when graph editor has focus — it handles its own keyframe deletion
       if (e.key === 'Delete' || e.key === 'Backspace') {
         const inGraphEditor = document.activeElement?.closest('[data-graph-editor]');
         if (inGraphEditor) return;
       }
 
-      // Delete selected clip / subtitle
-      if (matchesBinding(e, bindings['delete-selected']) || e.key === 'Backspace') {
+      // Delete selected clip / subtitle (leaves a gap)
+      if (matchesBinding(e, bindings['delete-selected'])) {
         if (selectedSegmentIds.length > 0) {
           performDelete(selectedSegmentIds, false);
+        } else if (selectedDialogue) {
+          handleDeleteDialogue(selectedDialogue.mediaId, selectedDialogue.index);
+        }
+      }
+
+      // Ripple delete — closes gap after deletion (Mac "Delete" key = Backspace)
+      if (matchesBinding(e, bindings['ripple-delete'])) {
+        if (selectedSegmentIds.length > 0) {
+          performDelete(selectedSegmentIds, true);
         } else if (selectedDialogue) {
           handleDeleteDialogue(selectedDialogue.mediaId, selectedDialogue.index);
         }
