@@ -106,24 +106,48 @@ export class OfflineRenderer {
   async render(): Promise<void> {
     const { settings, deps, callbacks } = this;
 
-    // ── Mount ALL video elements (React only mounts active ones) ──────────
     deps.setIsExporting(true);
     await sleep(500);
 
-    // Wait up to 10s for all non-blank segments to have video elements loaded
-    const deadline = Date.now() + 10_000;
+    // ── Create dedicated video elements per unique media source ──────────
+    // The viewport only mounts video elements for segments near currentTime
+    // (6-second lookahead), so segments beyond that window have no <video>.
+    // Instead of relying on viewport refs, create one video element per unique
+    // media source file — this avoids OOM (hundreds of segments share ~1-3 sources).
+    const mediaVideoPool = new Map<string, HTMLVideoElement>();
+
+    for (const seg of deps.segments) {
+      if (seg.type === 'blank') continue;
+      if (mediaVideoPool.has(seg.mediaId)) continue;
+
+      const item = deps.library.find(m => m.id === seg.mediaId);
+      if (!item?.url) continue;
+
+      const vid = document.createElement('video');
+      vid.src = item.url;
+      vid.muted = true;
+      vid.playsInline = true;
+      vid.preload = 'auto';
+      // Do NOT set crossOrigin — media uses blob: URLs which are same-origin.
+      // Setting crossOrigin = 'anonymous' on blob URLs taints the canvas.
+      mediaVideoPool.set(seg.mediaId, vid);
+    }
+
+    // Wait for all pool videos to have enough data to seek
+    const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
-      const allReady = deps.segments.every(seg => {
-        if (seg.type === 'blank') return true;
-        const vid = deps.videoRefs.get(seg.id);
-        return vid && vid.readyState >= 1;
-      });
+      const allReady = [...mediaVideoPool.values()].every(v => v.readyState >= 1);
       if (allReady) break;
       await sleep(100);
     }
 
-    // Pause all videos — we control time manually
-    deps.videoRefs.forEach(vid => vid.pause());
+    // Pause all — we control time manually
+    mediaVideoPool.forEach(vid => vid.pause());
+
+    // Helper: get the pool video for a segment
+    const getVideoForSegment = (seg: Segment): HTMLVideoElement | undefined => {
+      return mediaVideoPool.get(seg.mediaId);
+    };
 
     // ── Dimensions ────────────────────────────────────────────────────────
     const preset = ASPECT_RATIO_PRESETS[settings.aspectRatio];
@@ -279,30 +303,28 @@ export class OfflineRenderer {
           .filter(s => currentTime >= s.timelineStart && currentTime < s.timelineStart + (s.endTime - s.startTime))
           .sort((a, b) => (a.track || 0) - (b.track || 0));
 
-        // Seek active videos to exact frame time
-        await Promise.all(activeSegments.map(seg => {
-          const vid = deps.videoRefs.get(seg.id);
-          if (!vid) return Promise.resolve();
-          return seekVideo(vid, seg.startTime + (currentTime - seg.timelineStart));
-        }));
-        await Promise.all(activeSegments.map(seg => {
-          const vid = deps.videoRefs.get(seg.id);
-          return vid ? waitForReadyState(vid) : Promise.resolve();
-        }));
-
         // Draw frame
-        const anyVideoReady = activeSegments.some(s => { const v = deps.videoRefs.get(s.id); return v && v.readyState >= 2; });
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, outputWidth, outputHeight);
-        if (!anyVideoReady && lastGoodFrame) ctx.drawImage(lastGoodFrame, 0, 0);
+
+        let anyVideoDrawn = false;
 
         // ── Pass 1: composite all video tracks (V1, V2, …) in track order ──
+        // Seek + draw each segment atomically — shared pool videos must be seeked
+        // to each segment's source position right before drawing.
         for (const activeSeg of activeSegments) {
-          const vid = deps.videoRefs.get(activeSeg.id);
+          const vid = getVideoForSegment(activeSeg);
           const clipTime = currentTime - activeSeg.timelineStart;
           const segDuration = activeSeg.endTime - activeSeg.startTime;
 
+          if (vid) {
+            const targetTime = activeSeg.startTime + clipTime;
+            await seekVideo(vid, targetTime);
+            await waitForReadyState(vid);
+          }
+
           if (vid && vid.readyState >= 2) {
+            anyVideoDrawn = true;
             const transform = deps.getCombinedTransform(activeSeg.keyframes, clipTime, currentTime);
             const coverScale = Math.max(outputWidth / vid.videoWidth, outputHeight / vid.videoHeight);
             const dw = vid.videoWidth * coverScale;
@@ -356,13 +378,19 @@ export class OfflineRenderer {
         // ── Pass 2: draw subtitles on top of all video layers ──────────────
         // Must be a separate pass — drawing subtitles inside the video loop
         // causes higher tracks (V2, V3…) to paint over V1's subtitles.
+        // Deduplicate: after filler removal, many segments from the same source
+        // can be active at overlapping times — skip if we already drew this subtitle.
+        const drawnSubtitles = new Set<string>();
         for (const activeSeg of activeSegments) {
           const clipTime = currentTime - activeSeg.timelineStart;
           const media = deps.library.find(m => m.id === activeSeg.mediaId);
           if (media?.analysis) {
             const mediaTime = activeSeg.startTime + clipTime;
             const subtitle = media.analysis.events?.find((e: any) => e.type === 'dialogue' && mediaTime >= e.startTime && mediaTime <= e.endTime);
-            if (subtitle) {
+            // Deduplicate by mediaId + event identity (startTime serves as unique key)
+            const subKey = subtitle ? `${activeSeg.mediaId}_${subtitle.startTime}_${subtitle.endTime}` : null;
+            if (subtitle && !drawnSubtitles.has(subKey!)) {
+              drawnSubtitles.add(subKey!);
               const subTemplate = subtitle.templateOverride || deps.activeSubtitleTemplate;
               const sourceStyle = subtitle.styleOverride || deps.subtitleStyle;
               let kfTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
@@ -401,7 +429,8 @@ export class OfflineRenderer {
           });
         }
 
-        if (anyVideoReady) { lastGoodCtx.clearRect(0, 0, outputWidth, outputHeight); lastGoodCtx.drawImage(canvas, 0, 0); }
+        if (!anyVideoDrawn) { ctx.drawImage(lastGoodFrame, 0, 0); }
+        else { lastGoodCtx.clearRect(0, 0, outputWidth, outputHeight); lastGoodCtx.drawImage(canvas, 0, 0); }
 
         // ── Encode frame with explicit timestamp (THE key fix) ────────────
         const videoFrame = new VideoFrame(canvas, {
@@ -418,12 +447,18 @@ export class OfflineRenderer {
       }
     } catch (err: any) {
       console.error('[OfflineRenderer] Frame loop error:', err);
+      mediaVideoPool.forEach(vid => { vid.pause(); vid.removeAttribute('src'); vid.load(); });
+      mediaVideoPool.clear();
       deps.setIsExporting(false);
       callbacks.onError(err instanceof Error ? err : new Error(String(err)));
       return;
     }
 
     deps.setIsExporting(false);
+
+    // ── Clean up pool video elements ─────────────────────────────────────
+    mediaVideoPool.forEach(vid => { vid.pause(); vid.removeAttribute('src'); vid.load(); });
+    mediaVideoPool.clear();
 
     // ── Flush video encoder ───────────────────────────────────────────────
     try {
