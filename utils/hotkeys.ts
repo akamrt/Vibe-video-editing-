@@ -52,7 +52,14 @@ export const HOTKEY_DEFS: HotkeyDef[] = [
     label: 'Delete Selected',
     category: 'Editing',
     defaultBinding: { key: 'Delete' },
-    description: 'Delete the selected clip or subtitle',
+    description: 'Delete the selected clip or subtitle (leaves a gap)',
+  },
+  {
+    id: 'ripple-delete',
+    label: 'Ripple Delete Selected',
+    category: 'Editing',
+    defaultBinding: { key: 'Backspace' },
+    description: 'Delete the selected clip and close the gap (Mac "Delete" key)',
   },
 
   // Fixed system shortcuts (display only)
@@ -217,6 +224,8 @@ export function formatBinding(binding: HotkeyBinding): string {
   else if (key === 'ArrowLeft') key = '←';
   else if (key === 'ArrowRight') key = '→';
   else if (key === 'Escape') key = 'Esc';
+  else if (key === 'Backspace') key = '⌫ Backspace';
+  else if (key === 'Delete') key = '⌦ Delete';
   else if (key.length === 1) key = key.toUpperCase();
 
   parts.push(key);
