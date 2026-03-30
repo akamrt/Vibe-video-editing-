@@ -55,7 +55,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose }) => {
       const res = await fetch('/api/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [keyName]: editValue }),
+        body: JSON.stringify({ keys: { [keyName]: editValue } }),
       });
       const data = await res.json();
       if (data.success) {

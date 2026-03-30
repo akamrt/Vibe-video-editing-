@@ -2159,14 +2159,15 @@ app.get('/api/pexels/download', async (req, res) => {
 
 // Get current API key status (masked)
 app.get('/api/keys', (req, res) => {
+    const mask = (val) => val ? { masked: '******' + val.slice(-4), set: true } : { masked: '', set: false };
     res.json({
-        GEMINI_API_KEY: GEMINI_API_KEY ? '******' + GEMINI_API_KEY.slice(-4) : null,
-        YOUTUBE_API_KEY: YOUTUBE_API_KEY ? '******' + YOUTUBE_API_KEY.slice(-4) : null,
-        KIMI_API_KEY: KIMI_API_KEY ? '******' + KIMI_API_KEY.slice(-4) : null,
-        OPENAI_API_KEY: OPENAI_API_KEY ? '******' + OPENAI_API_KEY.slice(-4) : null,
-        MINIMAX_API_KEY: MINIMAX_API_KEY ? '******' + MINIMAX_API_KEY.slice(-4) : null,
-        ASSEMBLYAI_API_KEY: ASSEMBLYAI_API_KEY ? '******' + ASSEMBLYAI_API_KEY.slice(-4) : null,
-        PEXELS_API_KEY: PEXELS_API_KEY ? '******' + PEXELS_API_KEY.slice(-4) : null,
+        GEMINI_API_KEY: mask(GEMINI_API_KEY),
+        YOUTUBE_API_KEY: mask(YOUTUBE_API_KEY),
+        KIMI_API_KEY: mask(KIMI_API_KEY),
+        OPENAI_API_KEY: mask(OPENAI_API_KEY),
+        MINIMAX_API_KEY: mask(MINIMAX_API_KEY),
+        ASSEMBLYAI_API_KEY: mask(ASSEMBLYAI_API_KEY),
+        PEXELS_API_KEY: mask(PEXELS_API_KEY),
     });
 });
 
