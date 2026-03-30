@@ -9,6 +9,10 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
 
+# Minimum Node.js version required (Vite 6 needs 20.18+ or 22.12+)
+MIN_NODE_MAJOR=20
+MIN_NODE_MINOR=18
+
 echo ""
 echo -e "${BLUE}${BOLD}"
 echo "  ==================================================="
@@ -23,20 +27,15 @@ echo ""
 echo -e "${BOLD}[Step 1/4] Checking for Node.js...${NC}"
 echo ""
 
-if ! command -v node &> /dev/null; then
-    echo -e "${YELLOW}Node.js is NOT installed on this computer.${NC}"
-    echo "Node.js is required to run VibeCut AI."
-    echo ""
-
+install_node() {
     # macOS
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        # Try Homebrew
         if command -v brew &> /dev/null; then
-            echo "Installing Node.js via Homebrew..."
-            brew install node
+            echo "Installing/upgrading Node.js via Homebrew..."
+            brew install node 2>/dev/null || brew upgrade node 2>/dev/null || true
         else
             echo -e "${YELLOW}==================================================="
-            echo "  Please install Node.js:"
+            echo "  Please install Node.js (version $MIN_NODE_MAJOR.$MIN_NODE_MINOR or higher):"
             echo ""
             echo "  Option A (recommended): Install Homebrew first"
             echo "    1. Paste this in Terminal:"
@@ -45,7 +44,7 @@ if ! command -v node &> /dev/null; then
             echo "    3. Then run this script again"
             echo ""
             echo "  Option B: Download from https://nodejs.org"
-            echo "    1. Click the big green Download button"
+            echo "    1. Click the LTS Download button"
             echo "    2. Open the downloaded .pkg file"
             echo "    3. Follow the installer steps"
             echo -e "    4. Run this script again${NC}"
@@ -62,14 +61,40 @@ if ! command -v node &> /dev/null; then
             curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
             sudo dnf install -y nodejs
         else
-            echo -e "${RED}Please install Node.js manually from https://nodejs.org${NC}"
+            echo -e "${RED}Please install Node.js (version $MIN_NODE_MAJOR.$MIN_NODE_MINOR+) from https://nodejs.org${NC}"
             exit 1
         fi
     fi
+}
+
+if ! command -v node &> /dev/null; then
+    echo -e "${YELLOW}Node.js is NOT installed on this computer.${NC}"
+    echo "Node.js is required to run VibeCut AI."
+    echo ""
+    install_node
     echo ""
 fi
 
+# Verify Node.js version meets minimum requirements
 NODE_VER=$(node --version)
+NODE_MAJOR=$(echo "$NODE_VER" | sed 's/v//' | cut -d. -f1)
+NODE_MINOR=$(echo "$NODE_VER" | sed 's/v//' | cut -d. -f2)
+
+if [ "$NODE_MAJOR" -lt "$MIN_NODE_MAJOR" ] || { [ "$NODE_MAJOR" -eq "$MIN_NODE_MAJOR" ] && [ "$NODE_MINOR" -lt "$MIN_NODE_MINOR" ]; }; then
+    echo -e "${RED}[ERROR] Node.js $NODE_VER is too old. VibeCut requires v${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}+${NC}"
+    echo ""
+    echo "Attempting to upgrade..."
+    install_node
+    # Re-check after upgrade attempt
+    NODE_VER=$(node --version)
+    NODE_MAJOR=$(echo "$NODE_VER" | sed 's/v//' | cut -d. -f1)
+    NODE_MINOR=$(echo "$NODE_VER" | sed 's/v//' | cut -d. -f2)
+    if [ "$NODE_MAJOR" -lt "$MIN_NODE_MAJOR" ] || { [ "$NODE_MAJOR" -eq "$MIN_NODE_MAJOR" ] && [ "$NODE_MINOR" -lt "$MIN_NODE_MINOR" ]; }; then
+        echo -e "${RED}[ERROR] Upgrade failed. Please manually install Node.js v${MIN_NODE_MAJOR}.${MIN_NODE_MINOR}+ from https://nodejs.org${NC}"
+        exit 1
+    fi
+fi
+
 echo -e "${GREEN}[OK] Node.js is installed: $NODE_VER${NC}"
 echo ""
 
@@ -80,7 +105,33 @@ echo -e "${BOLD}[Step 2/4] Installing app dependencies...${NC}"
 echo "(This may take a minute the first time)"
 echo ""
 
+# Detect if Node.js version changed since last install — if so, clean reinstall
+NODE_VER_FILE=".node-version-used"
+NEED_CLEAN=false
+
+if [ -d "node_modules" ]; then
+    if [ -f "$NODE_VER_FILE" ]; then
+        PREV_VER=$(cat "$NODE_VER_FILE")
+        PREV_MAJOR=$(echo "$PREV_VER" | sed 's/v//' | cut -d. -f1)
+        CURR_MAJOR=$NODE_MAJOR
+        if [ "$PREV_MAJOR" != "$CURR_MAJOR" ]; then
+            echo -e "${YELLOW}Node.js major version changed ($PREV_VER -> $NODE_VER). Doing clean reinstall...${NC}"
+            NEED_CLEAN=true
+        fi
+    else
+        # No record of previous version — safe to clean install
+        echo -e "${YELLOW}First install with version tracking. Doing clean reinstall to be safe...${NC}"
+        NEED_CLEAN=true
+    fi
+fi
+
+if [ "$NEED_CLEAN" = true ]; then
+    rm -rf node_modules package-lock.json
+    echo "Cleared old node_modules."
+fi
+
 npm install --loglevel=error
+echo "$NODE_VER" > "$NODE_VER_FILE"
 echo ""
 echo -e "${GREEN}[OK] Dependencies installed!${NC}"
 echo ""
@@ -254,36 +305,3 @@ echo "  The app will open in your web browser automatically."
 echo ""
 
 
-# === Mac Python check ===
-if ! command -v python3 &> /dev/null; then
-    echo ""
-    echo "⚠️  Python 3 not found — needed for person tracking."
-    echo "Installing Python..."
-    if command -v brew &> /dev/null; then
-        brew install python
-    else
-        echo "❌ Please install Python 3 from: https://www.python.org/downloads/mac-osx/"
-        echo "   Or run: brew install python (if you have Homebrew)"
-    fi
-fi
-
-# Install tracking dependencies
-if command -v pip3 &> /dev/null; then
-    pip3 install python-vibe opencv-python numpy --quiet 2>/dev/null
-    echo "✅ Tracking dependencies installed"
-elif command -v pip &> /dev/null; then
-    pip install python-vibe opencv-python numpy --quiet 2>/dev/null
-    echo "✅ Tracking dependencies installed"
-fi
-# Mac Python check for tracking
-if ! command -v python3 &> /dev/null; then
-    echo ""
-    echo "WARNING: Python 3 not found — person tracking requires Python."
-    echo "To install: https://www.python.org/downloads/mac-osx/"
-    echo "Or run: brew install python"
-fi
-if command -v pip3 &> /dev/null; then
-    pip3 install python-vibe opencv-python numpy --quiet 2>/dev/null && echo "Tracking deps OK" || true
-elif command -v pip &> /dev/null; then
-    pip install python-vibe opencv-python numpy --quiet 2>/dev/null && echo "Tracking deps OK" || true
-fi

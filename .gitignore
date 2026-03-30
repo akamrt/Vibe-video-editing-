@@ -46,3 +46,4 @@ python/dist/
 python/*.spec
 .env
 .env.local
+.node-version-used
