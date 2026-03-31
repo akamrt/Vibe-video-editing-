@@ -59,10 +59,9 @@ const ShortDetailPlayer: React.FC<{
     selectedClipForPad?: { shortId: string; segmentIndex: number } | null;
     onSelectClipForPad?: (shortId: string, segIdx: number) => void;
     onSetClipPad?: (shortId: string, segIdx: number, before: number, after: number) => void;
-    assemblyMode?: boolean;
     clipBasket?: ClipReference[];
     onToggleBasket?: (segIdx: number) => void;
-}> = ({ short, videoId, omittedClips, onToggleOmit, clipPadOverrides, selectedClipForPad, onSelectClipForPad, onSetClipPad, assemblyMode, clipBasket, onToggleBasket }) => {
+}> = ({ short, videoId, omittedClips, onToggleOmit, clipPadOverrides, selectedClipForPad, onSelectClipForPad, onSetClipPad, clipBasket, onToggleBasket }) => {
     const { src, thumbnailUrl } = useLocalVideoSrc(videoId);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -241,23 +240,25 @@ const ShortDetailPlayer: React.FC<{
 
                             return (
                                 <div key={si} className="flex flex-col gap-0.5">
-                                    <div className="flex gap-0.5">
-                                        {/* Omit/basket toggle */}
-                                        {assemblyMode ? (
+                                    <div className="flex gap-0">
+                                        {/* Omit toggle */}
+                                        {onToggleOmit && (
                                             <button
-                                                onClick={() => onToggleBasket?.(si)}
-                                                className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${inBasket ? 'bg-green-600/30 border-green-500/50 text-green-300' : 'bg-[#222] border-[#444] text-gray-400 hover:border-green-500/40 hover:text-green-400'}`}
-                                                title={inBasket ? 'Remove from assembly' : 'Add to assembly'}
-                                            >
-                                                C{si + 1} {inBasket ? '\u2713' : '+'}
-                                            </button>
-                                        ) : (
-                                            <button
-                                                onClick={() => onToggleOmit?.(si)}
+                                                onClick={() => onToggleOmit(si)}
                                                 className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300 hover:border-gray-400'}`}
                                                 title={isOmitted ? 'Include this clip' : 'Omit this clip'}
                                             >
                                                 C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
+                                            </button>
+                                        )}
+                                        {/* Cart button — always shown */}
+                                        {onToggleBasket && (
+                                            <button
+                                                onClick={() => onToggleBasket(si)}
+                                                className={`px-1.5 py-0.5 text-[9px] border-t border-b transition-colors ${onToggleOmit ? '' : 'rounded-l'} ${inBasket ? 'bg-purple-600/30 border-purple-500/50 text-purple-300' : 'bg-[#222] border-[#444] text-gray-500 hover:text-purple-400 hover:border-purple-500/40'}`}
+                                                title={inBasket ? 'Remove from cart' : 'Add to export cart'}
+                                            >
+                                                {inBasket ? '\u{1F6D2}' : '+\u{1F6D2}'}
                                             </button>
                                         )}
                                         {/* Pad selector button */}
@@ -1302,8 +1303,8 @@ export const ContentLibraryPage: React.FC<{
         let hook: string;
         let hookTitle: string;
 
-        if (assemblyMode) {
-            if (clipBasket.length === 0) return null;
+        if (clipBasket.length > 0) {
+            // Cart takes priority — export cart contents sorted chronologically
             const sorted = [...clipBasket].sort((a, b) => a.segment.startTime - b.segment.startTime);
             segments = sorted.map(c => ({ ...c.segment }));
             perClipPadKeys = sorted.map(c => `${c.shortId}_${c.segmentIndex}`);
@@ -1311,6 +1312,7 @@ export const ContentLibraryPage: React.FC<{
             hook = '';
             hookTitle = 'Custom Assembly';
         } else {
+            // Fall back to selected short with omissions applied
             if (selectedShortIndex === null) return null;
             const short = generatedShortsPreview[selectedShortIndex];
             const omitted = omittedClips.get(short.id);
@@ -2134,23 +2136,6 @@ export const ContentLibraryPage: React.FC<{
                                                 Word by Word
                                             </button>
                                         </div>
-                                        {/* Single / Assembly mode toggle */}
-                                        <div className="flex items-center gap-1 bg-[#222] border border-[#333] rounded overflow-hidden">
-                                            <button
-                                                onClick={() => setAssemblyMode(false)}
-                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${!assemblyMode ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'}`}
-                                                title="Export one short with optional clip omissions"
-                                            >
-                                                Single
-                                            </button>
-                                            <button
-                                                onClick={() => setAssemblyMode(true)}
-                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${assemblyMode ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'}`}
-                                                title="Cherry-pick clips across shorts into a mashup"
-                                            >
-                                                Assembly
-                                            </button>
-                                        </div>
                                         {/* Word padding controls */}
                                         <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
                                             <span className="text-gray-500">Pad:</span>
@@ -2167,8 +2152,8 @@ export const ContentLibraryPage: React.FC<{
                                                 <span className="text-gray-600 text-[9px]">after</span>
                                             </div>
                                         </div>
-                                        {/* Export button */}
-                                        {onExportShort && (assemblyMode ? clipBasket.length > 0 : selectedShortIndex !== null) && (
+                                        {/* Export button — cart takes priority, falls back to selected short */}
+                                        {onExportShort && (clipBasket.length > 0 || selectedShortIndex !== null) && (
                                             <button
                                                 onClick={async () => {
                                                     if (isExporting) return;
@@ -2186,45 +2171,39 @@ export const ContentLibraryPage: React.FC<{
                                                 disabled={isExporting}
                                                 className="px-4 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded font-medium"
                                             >
-                                                {isExporting ? 'Exporting...' : assemblyMode ? `Export Assembly (${clipBasket.length})` : 'Export Selected'}
+                                                {isExporting ? 'Exporting...' : clipBasket.length > 0 ? `Export Cart (${clipBasket.length})` : 'Export Selected'}
                                             </button>
                                         )}
                                     </div>
                                 </div>
 
-                                {/* Assembly Basket (assembly mode only) */}
-                                {assemblyMode && clipBasket.length > 0 && (
-                                    <div className="mb-4 bg-[#1a1a1a] border border-purple-500/30 rounded-lg p-3">
-                                        <div className="flex items-center justify-between mb-2">
-                                            <h5 className="text-xs font-bold text-purple-300">
-                                                Assembly Basket ({clipBasket.length} clip{clipBasket.length !== 1 ? 's' : ''}, {formatDuration(clipBasket.reduce((s, c) => s + (c.segment.endTime - c.segment.startTime), 0))})
-                                            </h5>
-                                            <button onClick={() => setClipBasket([])} className="text-[9px] text-gray-500 hover:text-red-400 transition-colors">Clear All</button>
-                                        </div>
-                                        <div className="space-y-1 max-h-40 overflow-auto">
-                                            {clipBasket.map((clip, ci) => (
-                                                <div key={`${clip.shortId}_${clip.segmentIndex}`} className="flex items-center gap-2 text-[10px] bg-[#222] rounded px-2 py-1 border border-[#333]">
-                                                    <span className="text-gray-500 font-mono w-4">{ci + 1}.</span>
-                                                    <span className="text-purple-300 font-medium">#{clip.shortIndex + 1}/C{clip.segmentIndex + 1}</span>
-                                                    <span className="text-gray-400 truncate flex-1" title={clip.segment.text}>{clip.segment.text}</span>
-                                                    <span className="text-gray-600 text-[9px] whitespace-nowrap">
-                                                        {Math.floor(clip.segment.startTime / 60)}:{Math.floor(clip.segment.startTime % 60).toString().padStart(2, '0')}-{Math.floor(clip.segment.endTime / 60)}:{Math.floor(clip.segment.endTime % 60).toString().padStart(2, '0')}
-                                                    </span>
-                                                    <button
-                                                        onClick={(e) => { e.stopPropagation(); setClipBasket(prev => prev.filter((_, i) => i !== ci)); }}
-                                                        className="text-gray-500 hover:text-red-400 text-xs transition-colors"
-                                                    >
-                                                        &times;
-                                                    </button>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-
                                 {/* Expanded preview when a card is selected */}
                                 {selectedShortIndex !== null && generatedShortsPreview[selectedShortIndex] && (
                                     <div className="mb-4">
+                                        {/* Export Cart — always visible when clips have been added */}
+                                        {clipBasket.length > 0 && (
+                                            <div className="mb-3 bg-[#1a1a1a] border border-purple-500/30 rounded-lg p-3">
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <h5 className="text-xs font-bold text-purple-300">
+                                                        🛒 Export Cart ({clipBasket.length} clip{clipBasket.length !== 1 ? 's' : ''} &middot; {formatDuration(clipBasket.reduce((s, c) => s + (c.segment.endTime - c.segment.startTime), 0))})
+                                                    </h5>
+                                                    <button onClick={() => setClipBasket([])} className="text-[9px] text-gray-500 hover:text-red-400 transition-colors">Clear All</button>
+                                                </div>
+                                                <div className="space-y-1 max-h-36 overflow-auto">
+                                                    {clipBasket.map((clip, ci) => (
+                                                        <div key={`${clip.shortId}_${clip.segmentIndex}`} className="flex items-center gap-2 text-[10px] bg-[#222] rounded px-2 py-1 border border-[#333]">
+                                                            <span className="text-gray-500 font-mono w-4">{ci + 1}.</span>
+                                                            <span className="text-purple-300 font-medium whitespace-nowrap">#{clip.shortIndex + 1}/C{clip.segmentIndex + 1}</span>
+                                                            <span className="text-gray-400 truncate flex-1" title={clip.segment.text}>{clip.segment.text}</span>
+                                                            <span className="text-gray-600 text-[9px] whitespace-nowrap">
+                                                                {Math.floor(clip.segment.startTime / 60)}:{Math.floor(clip.segment.startTime % 60).toString().padStart(2, '0')}&ndash;{Math.floor(clip.segment.endTime / 60)}:{Math.floor(clip.segment.endTime % 60).toString().padStart(2, '0')}
+                                                            </span>
+                                                            <button onClick={() => setClipBasket(prev => prev.filter((_, i) => i !== ci))} className="text-gray-500 hover:text-red-400 text-xs transition-colors">&times;</button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
                                         <div className="text-xs text-gray-500 mb-1 font-bold uppercase tracking-wide">
                                             Preview — #{selectedShortIndex + 1} {generatedShortsPreview[selectedShortIndex].title}
                                         </div>
@@ -2254,7 +2233,6 @@ export const ContentLibraryPage: React.FC<{
                                                     return next;
                                                 });
                                             }}
-                                            assemblyMode={assemblyMode}
                                             clipBasket={clipBasket}
                                             onToggleBasket={(si) => {
                                                 const short = generatedShortsPreview[selectedShortIndex];
@@ -2311,38 +2289,36 @@ export const ContentLibraryPage: React.FC<{
                                                         return (
                                                             <div key={si} className="flex flex-col gap-0.5">
                                                                 <div className="flex gap-0">
-                                                                    {/* Omit / basket toggle */}
-                                                                    {assemblyMode ? (
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                if (inBasket) {
-                                                                                    setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
-                                                                                } else {
-                                                                                    setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }]);
-                                                                                }
-                                                                            }}
-                                                                            className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${inBasket ? 'bg-green-600/30 border-green-500/50 text-green-300' : 'bg-[#222] border-[#444] text-gray-400 hover:border-green-500/40 hover:text-green-400'}`}
-                                                                            title={inBasket ? 'Remove from assembly' : 'Add to assembly'}
-                                                                        >
-                                                                            C{si + 1} {inBasket ? '\u2713' : '+'}
-                                                                        </button>
-                                                                    ) : (
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                setOmittedClips(prev => {
-                                                                                    const next = new Map(prev);
-                                                                                    const set = new Set(next.get(short.id) || []);
-                                                                                    if (set.has(si)) set.delete(si); else set.add(si);
-                                                                                    next.set(short.id, set);
-                                                                                    return next;
-                                                                                });
-                                                                            }}
-                                                                            className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300 hover:border-gray-400'}`}
-                                                                            title={isOmitted ? 'Include this clip' : 'Omit this clip'}
-                                                                        >
-                                                                            C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
-                                                                        </button>
-                                                                    )}
+                                                                    {/* Omit toggle */}
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setOmittedClips(prev => {
+                                                                                const next = new Map(prev);
+                                                                                const set = new Set(next.get(short.id) || []);
+                                                                                if (set.has(si)) set.delete(si); else set.add(si);
+                                                                                next.set(short.id, set);
+                                                                                return next;
+                                                                            });
+                                                                        }}
+                                                                        className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300 hover:border-gray-400'}`}
+                                                                        title={isOmitted ? 'Include this clip' : 'Omit this clip'}
+                                                                    >
+                                                                        C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
+                                                                    </button>
+                                                                    {/* Cart button — always shown */}
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            if (inBasket) {
+                                                                                setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
+                                                                            } else {
+                                                                                setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }]);
+                                                                            }
+                                                                        }}
+                                                                        className={`px-1.5 py-0.5 text-[9px] border-t border-b transition-colors ${inBasket ? 'bg-purple-600/30 border-purple-500/50 text-purple-300' : 'bg-[#222] border-[#444] text-gray-500 hover:text-purple-400 hover:border-purple-500/40'}`}
+                                                                        title={inBasket ? 'Remove from cart' : 'Add to export cart'}
+                                                                    >
+                                                                        {inBasket ? '\u{1F6D2}' : '+\u{1F6D2}'}
+                                                                    </button>
                                                                     {/* Per-clip pad selector */}
                                                                     <button
                                                                         onClick={() => setSelectedClipForPad(isSelectedForPad ? null : { shortId: short.id, segmentIndex: si })}
@@ -2371,20 +2347,18 @@ export const ContentLibraryPage: React.FC<{
                                                             </div>
                                                         );
                                                     })}
-                                                    {assemblyMode && (
-                                                        <button
-                                                            onClick={() => {
-                                                                const newClips = short.segments
-                                                                    .map((seg, si) => ({ shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }))
-                                                                    .filter(c => !clipBasket.some(b => b.shortId === c.shortId && b.segmentIndex === c.segmentIndex));
-                                                                if (newClips.length > 0) setClipBasket(prev => [...prev, ...newClips]);
-                                                            }}
-                                                            className="px-1.5 py-0.5 text-[9px] rounded border border-dashed border-[#555] text-gray-500 hover:text-green-400 hover:border-green-500/40 transition-colors self-start"
-                                                            title="Add all clips to assembly"
-                                                        >
-                                                            All +
-                                                        </button>
-                                                    )}
+                                                    <button
+                                                        onClick={() => {
+                                                            const newClips = short.segments
+                                                                .map((seg, si) => ({ shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }))
+                                                                .filter(c => !clipBasket.some(b => b.shortId === c.shortId && b.segmentIndex === c.segmentIndex));
+                                                            if (newClips.length > 0) setClipBasket(prev => [...prev, ...newClips]);
+                                                        }}
+                                                        className="px-1.5 py-0.5 text-[9px] rounded border border-dashed border-[#555] text-gray-500 hover:text-purple-400 hover:border-purple-500/40 transition-colors self-start"
+                                                        title="Add all clips to cart"
+                                                    >
+                                                        All 🛒
+                                                    </button>
                                                 </div>
                                             </div>
 
