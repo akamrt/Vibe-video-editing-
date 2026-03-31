@@ -51,6 +51,7 @@ export interface GeneratedShort {
     createdAt: Date;
     trendingTopic?: string;
     bRollSuggestions?: BRollSuggestion[];
+    captionMode?: 'sentences' | 'words';
 }
 
 export interface ShortSegment {
@@ -62,12 +63,14 @@ export interface ShortSegment {
     removedWordIndices?: number[];
 }
 
+// ==================== Clip Assembly ====================
+
 export interface ClipReference {
-    shortId: string;
-    shortIndex: number;      // Index in generatedShortsPreview array
-    segmentIndex: number;    // Index within short.segments
-    shortTitle: string;
-    segment: ShortSegment;
+    shortId: string;         // which GeneratedShort this came from
+    shortIndex: number;      // index in generatedShortsPreview array
+    segmentIndex: number;    // index within that short's segments array
+    shortTitle: string;      // display label
+    segment: ShortSegment;   // the actual segment data
 }
 
 // ==================== B-Roll (Pexels) ====================

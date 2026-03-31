@@ -20,32 +20,297 @@ interface ImportingVideo {
     error?: string;
 }
 
+// ==================== Shared hook: check local video cache ====================
+
+function useLocalVideoSrc(videoId: string) {
+    const [src, setSrc] = useState<string | null>(null);        // null = checking, '' = not cached
+    const [thumbnailUrl, setThumbnailUrl] = useState<string>('');
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                // Look up thumbnail from content DB
+                const record = await contentDB.getVideo(videoId);
+                if (!cancelled && record?.thumbnailUrl) setThumbnailUrl(record.thumbnailUrl);
+
+                // Check if video is locally cached
+                const res = await fetch(`/api/local-cache?videoId=${videoId}`);
+                const data = await res.json();
+                if (!cancelled) setSrc(data.hasVideo ? `/api/local-video?videoId=${videoId}` : '');
+            } catch {
+                if (!cancelled) setSrc('');
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [videoId]);
+
+    return { src, thumbnailUrl };
+}
+
+// ==================== Short Detail Player (expanded preview) ====================
+
+const ShortDetailPlayer: React.FC<{
+    short: GeneratedShort;
+    videoId: string;
+    omittedClips?: Set<number>;
+    onToggleOmit?: (segIdx: number) => void;
+    clipPadOverrides?: Map<string, { before: number; after: number }>;
+    selectedClipForPad?: { shortId: string; segmentIndex: number } | null;
+    onSelectClipForPad?: (shortId: string, segIdx: number) => void;
+    onSetClipPad?: (shortId: string, segIdx: number, before: number, after: number) => void;
+    clipBasket?: ClipReference[];
+    onToggleBasket?: (segIdx: number) => void;
+}> = ({ short, videoId, omittedClips, onToggleOmit, clipPadOverrides, selectedClipForPad, onSelectClipForPad, onSetClipPad, clipBasket, onToggleBasket }) => {
+    const { src, thumbnailUrl } = useLocalVideoSrc(videoId);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [currentClipIdx, setCurrentClipIdx] = useState(0);
+    const [scrubProgress, setScrubProgress] = useState(0);
+    const [currentTime, setCurrentTime] = useState(0);
+    const animFrameRef = useRef<number>(0);
+    const isDraggingRef = useRef(false);
+
+    const totalDuration = short.segments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0);
+    const hasVideo = !!src;
+
+    const formatSecs = (s: number) => {
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60);
+        return `${m}:${sec.toString().padStart(2, '0')}`;
+    };
+
+    const seekToProgress = (pct: number) => {
+        const video = videoRef.current;
+        if (!video) return;
+        const targetTime = pct * totalDuration;
+        let accumulated = 0;
+        for (let i = 0; i < short.segments.length; i++) {
+            const clipDur = short.segments[i].endTime - short.segments[i].startTime;
+            if (accumulated + clipDur > targetTime || i === short.segments.length - 1) {
+                const offset = Math.min(targetTime - accumulated, clipDur - 0.05);
+                video.currentTime = short.segments[i].startTime + Math.max(0, offset);
+                setCurrentClipIdx(i);
+                setScrubProgress(pct);
+                setCurrentTime(targetTime);
+                break;
+            }
+            accumulated += clipDur;
+        }
+    };
+
+    const handlePlayPause = () => {
+        const video = videoRef.current;
+        if (!video) return;
+        if (isPlaying) {
+            video.pause();
+            cancelAnimationFrame(animFrameRef.current);
+            setIsPlaying(false);
+        } else {
+            if (scrubProgress === 0) {
+                video.currentTime = short.segments[0]?.startTime ?? 0;
+                setCurrentClipIdx(0);
+            }
+            video.play().then(() => setIsPlaying(true)).catch(() => {});
+        }
+    };
+
+    useEffect(() => {
+        const video = videoRef.current;
+        if (!video || !isPlaying) return;
+        let clipIdx = currentClipIdx;
+
+        const tick = () => {
+            if (!video || video.paused || isDraggingRef.current) return;
+            const seg = short.segments[clipIdx];
+            if (!seg) { video.pause(); setIsPlaying(false); return; }
+
+            if (video.currentTime >= seg.endTime) {
+                clipIdx++;
+                if (clipIdx >= short.segments.length) {
+                    video.pause(); setIsPlaying(false);
+                    setScrubProgress(0); setCurrentTime(0); setCurrentClipIdx(0);
+                    return;
+                }
+                setCurrentClipIdx(clipIdx);
+                video.currentTime = short.segments[clipIdx].startTime;
+            }
+
+            let elapsed = 0;
+            for (let i = 0; i < clipIdx; i++) elapsed += short.segments[i].endTime - short.segments[i].startTime;
+            elapsed += video.currentTime - short.segments[clipIdx].startTime;
+            setScrubProgress(totalDuration > 0 ? elapsed / totalDuration : 0);
+            setCurrentTime(elapsed);
+            animFrameRef.current = requestAnimationFrame(tick);
+        };
+
+        animFrameRef.current = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(animFrameRef.current);
+    }, [isPlaying, currentClipIdx, short.segments, totalDuration]);
+
+    const handleScrubMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+        e.stopPropagation();
+        isDraggingRef.current = true;
+        const getRect = () => e.currentTarget.getBoundingClientRect();
+        const apply = (clientX: number) => {
+            const pct = Math.max(0, Math.min(1, (clientX - getRect().left) / getRect().width));
+            seekToProgress(pct);
+        };
+        apply(e.clientX);
+        const onMove = (me: MouseEvent) => apply(me.clientX);
+        const onUp = () => { isDraggingRef.current = false; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+    };
+
+    const currentSeg = short.segments[currentClipIdx];
+
+    return (
+        <div className="bg-[#111] rounded-lg overflow-hidden border border-[#333]">
+            <div className="relative bg-black" style={{ aspectRatio: '16/9' }}>
+                {src === null && (
+                    <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-xs">Checking cache...</div>
+                )}
+                {src === '' && (
+                    <>
+                        {thumbnailUrl && <img src={thumbnailUrl} className="w-full h-full object-cover opacity-40" alt="" />}
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
+                            <span className="text-gray-400 text-xs">Video not cached locally</span>
+                            <span className="text-gray-600 text-[10px]">Will download on export</span>
+                        </div>
+                    </>
+                )}
+                {hasVideo && (
+                    <>
+                        <video ref={videoRef} src={src} className="w-full h-full object-contain" playsInline preload="auto" />
+                        <button onClick={handlePlayPause} className="absolute inset-0 flex items-center justify-center group">
+                            {!isPlaying && (
+                                <div className="w-14 h-14 rounded-full bg-black/60 group-hover:bg-black/80 flex items-center justify-center shadow-xl transition-colors">
+                                    <span className="text-white text-2xl ml-1">&#9654;</span>
+                                </div>
+                            )}
+                        </button>
+                    </>
+                )}
+                <div className="absolute top-2 left-2 bg-black/70 text-[10px] text-white px-2 py-0.5 rounded">
+                    Clip {currentClipIdx + 1} / {short.segments.length}
+                </div>
+            </div>
+
+            {/* Scrub bar + time — always visible */}
+            <div className="px-3 pt-2 pb-1">
+                <div
+                    className={`relative h-3 bg-[#333] rounded-full group ${hasVideo ? 'cursor-pointer' : 'opacity-40'}`}
+                    onMouseDown={hasVideo ? handleScrubMouseDown : undefined}
+                >
+                    <div className="absolute top-0 left-0 h-full bg-purple-500 rounded-full" style={{ width: `${scrubProgress * 100}%` }} />
+                    {(() => {
+                        let acc = 0;
+                        return short.segments.slice(0, -1).map((seg, i) => {
+                            acc += seg.endTime - seg.startTime;
+                            const pct = totalDuration > 0 ? (acc / totalDuration) * 100 : 0;
+                            return <div key={i} className="absolute top-0 bottom-0 w-0.5 bg-white/30" style={{ left: `${pct}%` }} />;
+                        });
+                    })()}
+                    <div className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity" style={{ left: `calc(${scrubProgress * 100}% - 6px)` }} />
+                </div>
+                <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+                    <span>{formatSecs(currentTime)}</span>
+                    <span>{formatSecs(totalDuration)}</span>
+                </div>
+            </div>
+
+            {currentSeg && (
+                <div className="px-3 pb-1">
+                    <p className="text-[11px] text-gray-400 line-clamp-2">{currentSeg.text}</p>
+                </div>
+            )}
+
+            {/* Clip strip — omit toggles + per-clip pad selection */}
+            {(onToggleOmit || onToggleBasket) && (
+                <div className="px-3 pb-2 pt-1 border-t border-[#222] mt-1">
+                    <div className="flex flex-wrap gap-1">
+                        {short.segments.map((seg, si) => {
+                            const isOmitted = omittedClips?.has(si) ?? false;
+                            const inBasket = clipBasket?.some(c => c.shortId === short.id && c.segmentIndex === si) ?? false;
+                            const padKey = `${short.id}_${si}`;
+                            const override = clipPadOverrides?.get(padKey);
+                            const isSelectedForPad = selectedClipForPad?.shortId === short.id && selectedClipForPad?.segmentIndex === si;
+                            const hasPadOverride = override && (override.before > 0 || override.after > 0);
+
+                            return (
+                                <div key={si} className="flex flex-col gap-0.5">
+                                    <div className="flex gap-0">
+                                        {/* Omit toggle */}
+                                        {onToggleOmit && (
+                                            <button
+                                                onClick={() => onToggleOmit(si)}
+                                                className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300 hover:border-gray-400'}`}
+                                                title={isOmitted ? 'Include this clip' : 'Omit this clip'}
+                                            >
+                                                C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
+                                            </button>
+                                        )}
+                                        {/* Cart button — always shown */}
+                                        {onToggleBasket && (
+                                            <button
+                                                onClick={() => onToggleBasket(si)}
+                                                className={`px-1.5 py-0.5 text-[9px] border-t border-b transition-colors ${onToggleOmit ? '' : 'rounded-l'} ${inBasket ? 'bg-purple-600/30 border-purple-500/50 text-purple-300' : 'bg-[#222] border-[#444] text-gray-500 hover:text-purple-400 hover:border-purple-500/40'}`}
+                                                title={inBasket ? 'Remove from cart' : 'Add to export cart'}
+                                            >
+                                                {inBasket ? '\u{1F6D2}' : '+\u{1F6D2}'}
+                                            </button>
+                                        )}
+                                        {/* Pad selector button */}
+                                        <button
+                                            onClick={() => onSelectClipForPad?.(short.id, isSelectedForPad ? -1 : si)}
+                                            className={`px-1 py-0.5 text-[9px] rounded-r border-t border-r border-b transition-colors ${isSelectedForPad ? 'bg-yellow-600/30 border-yellow-500/50 text-yellow-300' : hasPadOverride ? 'bg-yellow-900/20 border-yellow-700/40 text-yellow-500' : 'bg-[#222] border-[#444] text-gray-500 hover:text-yellow-400 hover:border-yellow-600/40'}`}
+                                            title="Set word padding for this clip"
+                                        >
+                                            {hasPadOverride ? `±${(override!.before || 0) + (override!.after || 0)}` : '±'}
+                                        </button>
+                                    </div>
+                                    {/* Inline pad editor for selected clip */}
+                                    {isSelectedForPad && onSetClipPad && (
+                                        <div className="flex items-center gap-1 bg-yellow-950/40 border border-yellow-700/30 rounded px-1.5 py-1 text-[9px]">
+                                            <span className="text-yellow-500/70">before</span>
+                                            <button onClick={() => onSetClipPad(short.id, si, Math.max(-5, (override?.before ?? 0) - 1), override?.after ?? 0)} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                            <span className="w-3 text-center text-yellow-200">{override?.before ?? 0}</span>
+                                            <button onClick={() => onSetClipPad(short.id, si, Math.min(5, (override?.before ?? 0) + 1), override?.after ?? 0)} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
+                                            <span className="text-yellow-500/70 ml-1">after</span>
+                                            <button onClick={() => onSetClipPad(short.id, si, override?.before ?? 0, Math.max(-5, (override?.after ?? 0) - 1))} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                            <span className="w-3 text-center text-yellow-200">{override?.after ?? 0}</span>
+                                            <button onClick={() => onSetClipPad(short.id, si, override?.before ?? 0, Math.min(5, (override?.after ?? 0) + 1))} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
+                                            {(override?.before || override?.after) ? (
+                                                <button onClick={() => onSetClipPad(short.id, si, 0, 0)} className="ml-1 text-[8px] text-red-400 hover:text-red-300">clr</button>
+                                            ) : null}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
 // ==================== Short Thumbnail Player ====================
 
 const ShortThumbnailPlayer: React.FC<{
     short: GeneratedShort;
     videoId: string;
-    omittedClips?: Set<number>;
-    clipBasket: ClipReference[];
-    shortIndex: number;
-    onToggleOmit: (segIdx: number) => void;
-    onToggleBasket: (segIdx: number) => void;
-    wordPadBefore: number;
-    wordPadAfter: number;
-    clipPadOverrides: Map<string, { before: number; after: number }>;
-    onSetClipPad: (shortId: string, segIdx: number, before: number, after: number) => void;
-}> = ({ short, videoId, omittedClips, clipBasket, shortIndex, onToggleOmit, onToggleBasket, wordPadBefore, wordPadAfter, clipPadOverrides, onSetClipPad }) => {
+}> = ({ short, videoId }) => {
+    const { src, thumbnailUrl } = useLocalVideoSrc(videoId);
     const videoRef = useRef<HTMLVideoElement>(null);
-    const stripRef = useRef<HTMLDivElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentClipIdx, setCurrentClipIdx] = useState(0);
     const [scrubProgress, setScrubProgress] = useState(0);
     const animFrameRef = useRef<number>(0);
-    const [selectedSegIdx, setSelectedSegIdx] = useState<number | null>(null);
-    const [showPadEditor, setShowPadEditor] = useState(false);
-    const dragStartRef = useRef<{ x: number; time: number } | null>(null);
 
     const totalDuration = short.segments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0);
+    const hasVideo = !!src;
 
     const handlePlayPause = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -62,15 +327,16 @@ const ShortThumbnailPlayer: React.FC<{
         }
     };
 
-    // Monitor playback
     useEffect(() => {
         const video = videoRef.current;
         if (!video || !isPlaying) return;
         let clipIdx = currentClipIdx;
+
         const tick = () => {
             if (!video || video.paused) return;
             const seg = short.segments[clipIdx];
             if (!seg) { video.pause(); setIsPlaying(false); return; }
+
             if (video.currentTime >= seg.endTime) {
                 clipIdx++;
                 if (clipIdx >= short.segments.length) {
@@ -79,98 +345,63 @@ const ShortThumbnailPlayer: React.FC<{
                 setCurrentClipIdx(clipIdx);
                 video.currentTime = short.segments[clipIdx].startTime;
             }
+
             let elapsed = 0;
             for (let i = 0; i < clipIdx; i++) elapsed += short.segments[i].endTime - short.segments[i].startTime;
             elapsed += video.currentTime - short.segments[clipIdx].startTime;
             setScrubProgress(totalDuration > 0 ? elapsed / totalDuration : 0);
             animFrameRef.current = requestAnimationFrame(tick);
         };
+
         animFrameRef.current = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(animFrameRef.current);
     }, [isPlaying, currentClipIdx, short.segments, totalDuration]);
 
-    // Scrub to a position
-    const scrubToProgress = (pct: number) => {
+    const handleScrub = (e: React.MouseEvent<HTMLDivElement>) => {
+        e.stopPropagation();
         const video = videoRef.current;
         if (!video) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
         const targetTime = pct * totalDuration;
         let accumulated = 0;
         for (let i = 0; i < short.segments.length; i++) {
-            const dur = short.segments[i].endTime - short.segments[i].startTime;
-            if (accumulated + dur > targetTime || i === short.segments.length - 1) {
-                const offset = Math.min(targetTime - accumulated, dur);
-                video.currentTime = short.segments[i].startTime + offset;
+            const clipDur = short.segments[i].endTime - short.segments[i].startTime;
+            if (accumulated + clipDur > targetTime) {
+                video.currentTime = short.segments[i].startTime + (targetTime - accumulated);
                 setCurrentClipIdx(i);
                 setScrubProgress(pct);
                 break;
             }
-            accumulated += dur;
+            accumulated += clipDur;
         }
     };
 
-    // Strip mouse handlers — click = select segment, drag = scrub
-    const handleStripMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-        e.stopPropagation();
-        dragStartRef.current = { x: e.clientX, time: Date.now() };
-
-        const onMouseMove = (ev: MouseEvent) => {
-            if (!dragStartRef.current) return;
-            const dx = Math.abs(ev.clientX - dragStartRef.current.x);
-            if (dx > 4 && stripRef.current) {
-                const rect = stripRef.current.getBoundingClientRect();
-                const pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-                scrubToProgress(pct);
-            }
-        };
-
-        const onMouseUp = (ev: MouseEvent) => {
-            window.removeEventListener('mousemove', onMouseMove);
-            window.removeEventListener('mouseup', onMouseUp);
-            if (!dragStartRef.current) return;
-            const dx = Math.abs(ev.clientX - dragStartRef.current.x);
-            const dt = Date.now() - dragStartRef.current.time;
-            dragStartRef.current = null;
-
-            // Click (not drag) — find which segment was clicked, select it
-            if (dx < 5 && dt < 300 && stripRef.current) {
-                const rect = stripRef.current.getBoundingClientRect();
-                const pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
-                let accumulated = 0;
-                for (let i = 0; i < short.segments.length; i++) {
-                    const dur = short.segments[i].endTime - short.segments[i].startTime;
-                    const segPct = totalDuration > 0 ? dur / totalDuration : 0;
-                    if (pct <= accumulated + segPct) {
-                        setSelectedSegIdx(prev => prev === i ? null : i);
-                        setShowPadEditor(false);
-                        break;
-                    }
-                    accumulated += segPct;
-                }
-            }
-        };
-
-        window.addEventListener('mousemove', onMouseMove);
-        window.addEventListener('mouseup', onMouseUp);
-    };
-
-    const padKey = selectedSegIdx !== null ? `${short.id}_${selectedSegIdx}` : '';
-    const padOverride = clipPadOverrides.get(padKey);
-    const localBefore = padOverride?.before ?? wordPadBefore;
-    const localAfter = padOverride?.after ?? wordPadAfter;
-
     return (
         <div className="relative bg-black" style={{ aspectRatio: '16/9' }}>
-            <video
-                ref={videoRef}
-                src={`/api/local-video?videoId=${videoId}`}
-                className="w-full h-full object-cover"
-                playsInline
-                preload="metadata"
-            />
+            {/* Thumbnail fallback always rendered as background */}
+            {thumbnailUrl && <img src={thumbnailUrl} className="absolute inset-0 w-full h-full object-cover" alt="" />}
 
-            {/* Play overlay */}
-            {!isPlaying && (
-                <button onClick={handlePlayPause} className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/10 transition-colors group">
+            {/* Video on top when cached */}
+            {hasVideo && (
+                <video
+                    ref={videoRef}
+                    src={src}
+                    className="absolute inset-0 w-full h-full object-cover"
+                    playsInline preload="metadata"
+                />
+            )}
+
+            {/* Not-cached overlay */}
+            {src === '' && (
+                <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                    <span className="text-[9px] text-gray-300 bg-black/60 px-1.5 py-0.5 rounded">Not cached — exports fine</span>
+                </div>
+            )}
+
+            {/* Play/pause */}
+            {hasVideo && !isPlaying && (
+                <button onClick={handlePlayPause} className="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/10 transition-colors group">
                     <div className="w-8 h-8 rounded-full bg-white/90 group-hover:bg-white flex items-center justify-center shadow">
                         <span className="text-black text-sm ml-0.5">&#9654;</span>
                     </div>
@@ -178,86 +409,22 @@ const ShortThumbnailPlayer: React.FC<{
             )}
             {isPlaying && <button onClick={handlePlayPause} className="absolute inset-0" />}
 
-            {/* Action row for selected clip */}
-            {selectedSegIdx !== null && (
-                <div className="absolute bottom-6 left-0 right-0 flex items-center gap-1 px-2 py-1 bg-black/80" onClick={e => e.stopPropagation()}>
-                    <span className="text-[9px] text-gray-400 mr-1">C{selectedSegIdx + 1}</span>
-                    {/* Omit toggle */}
-                    <button
-                        onClick={() => onToggleOmit(selectedSegIdx)}
-                        className={`px-2 py-0.5 text-[9px] rounded font-medium ${omittedClips?.has(selectedSegIdx) ? 'bg-red-600 text-white' : 'bg-[#333] text-gray-300 hover:bg-red-800'}`}
-                    >
-                        {omittedClips?.has(selectedSegIdx) ? '✕ Omitted' : 'Omit'}
-                    </button>
-                    {/* Cart toggle */}
-                    <button
-                        onClick={() => onToggleBasket(selectedSegIdx)}
-                        className={`px-2 py-0.5 text-[9px] rounded font-medium ${clipBasket.some(c => c.shortId === short.id && c.segmentIndex === selectedSegIdx) ? 'bg-purple-600 text-white' : 'bg-[#333] text-gray-300 hover:bg-purple-800'}`}
-                    >
-                        {clipBasket.some(c => c.shortId === short.id && c.segmentIndex === selectedSegIdx) ? '✓ In Cart' : '+ Cart'}
-                    </button>
-                    {/* Pad editor toggle */}
-                    <button
-                        onClick={() => setShowPadEditor(p => !p)}
-                        className="px-2 py-0.5 text-[9px] rounded bg-[#333] text-gray-300 hover:bg-[#444]"
-                    >
-                        ±words
-                    </button>
-                    {showPadEditor && (
-                        <div className="flex items-center gap-1 ml-1">
-                            <button onClick={() => onSetClipPad(short.id, selectedSegIdx, Math.max(-5, localBefore - 1), localAfter)} className="w-4 h-4 flex items-center justify-center bg-[#444] rounded text-[9px]">−</button>
-                            <span className="text-[9px] text-white w-6 text-center">{localBefore > 0 ? `+${localBefore}` : localBefore}</span>
-                            <button onClick={() => onSetClipPad(short.id, selectedSegIdx, Math.min(5, localBefore + 1), localAfter)} className="w-4 h-4 flex items-center justify-center bg-[#444] rounded text-[9px]">+</button>
-                            <span className="text-[9px] text-gray-500 mx-1">/</span>
-                            <button onClick={() => onSetClipPad(short.id, selectedSegIdx, localBefore, Math.max(-5, localAfter - 1))} className="w-4 h-4 flex items-center justify-center bg-[#444] rounded text-[9px]">−</button>
-                            <span className="text-[9px] text-white w-6 text-center">{localAfter > 0 ? `+${localAfter}` : localAfter}</span>
-                            <button onClick={() => onSetClipPad(short.id, selectedSegIdx, localBefore, Math.min(5, localAfter + 1))} className="w-4 h-4 flex items-center justify-center bg-[#444] rounded text-[9px]">+</button>
-                        </div>
-                    )}
-                    <button onClick={() => setSelectedSegIdx(null)} className="ml-auto text-gray-500 hover:text-white text-[10px]">✕</button>
-                </div>
-            )}
-
-            {/* Segmented timeline strip */}
+            {/* Scrub bar */}
             <div
-                ref={stripRef}
-                className="absolute bottom-0 left-0 right-0 h-6 cursor-pointer select-none"
-                onMouseDown={handleStripMouseDown}
-                style={{ userSelect: 'none' }}
+                className={`absolute bottom-0 left-0 right-0 h-2 bg-black/50 ${hasVideo ? 'cursor-pointer' : ''}`}
+                onClick={hasVideo ? handleScrub : undefined}
             >
-                {/* Segment blocks */}
-                <div className="absolute inset-0 flex">
-                    {short.segments.map((seg, i) => {
-                        const dur = seg.endTime - seg.startTime;
-                        const widthPct = totalDuration > 0 ? (dur / totalDuration) * 100 : 100 / short.segments.length;
-                        const isOmitted = omittedClips?.has(i);
-                        const inCart = clipBasket.some(c => c.shortId === short.id && c.segmentIndex === i);
-                        const isSelected = selectedSegIdx === i;
-                        let bg = 'bg-[#2a2a2a]';
-                        if (isOmitted) bg = 'bg-red-900/70';
-                        else if (inCart) bg = 'bg-purple-800/70';
-                        else if (isSelected) bg = 'bg-[#444]';
-                        return (
-                            <div
-                                key={i}
-                                className={`${bg} h-full relative border-r border-black/40 transition-colors`}
-                                style={{ width: `${widthPct}%` }}
-                                title={`C${i + 1}: ${seg.text.slice(0, 60)}...`}
-                            >
-                                <span className="absolute inset-0 flex items-center justify-center text-[8px] text-white/60 pointer-events-none">{i + 1}</span>
-                            </div>
-                        );
-                    })}
-                </div>
-
-                {/* Progress bar (thin line at top of strip) */}
-                <div className="absolute top-0 left-0 h-0.5 bg-purple-400 pointer-events-none transition-none" style={{ width: `${scrubProgress * 100}%` }} />
-
-                {/* Playhead */}
-                <div className="absolute top-0 bottom-0 w-0.5 bg-white/80 pointer-events-none" style={{ left: `${scrubProgress * 100}%` }} />
+                <div className="h-full bg-purple-500 transition-none" style={{ width: `${scrubProgress * 100}%` }} />
+                {(() => {
+                    let acc = 0;
+                    return short.segments.slice(0, -1).map((seg, i) => {
+                        acc += seg.endTime - seg.startTime;
+                        const pct = totalDuration > 0 ? (acc / totalDuration) * 100 : 0;
+                        return <div key={i} className="absolute top-0 bottom-0 w-px bg-white/40" style={{ left: `${pct}%` }} />;
+                    });
+                })()}
             </div>
 
-            {/* Duration badge */}
             <div className="absolute top-1 right-1 bg-black/70 text-[9px] text-white px-1 py-0.5 rounded">
                 {Math.round(totalDuration)}s
             </div>
@@ -321,6 +488,7 @@ export const ContentLibraryPage: React.FC<{
     const [selectedShortIndex, setSelectedShortIndex] = useState<number | null>(null);
     const [expandedBRoll, setExpandedBRoll] = useState<Record<number, boolean>>({});
     const [expandedKeywords, setExpandedKeywords] = useState<Record<number, boolean>>({});
+    const [captionMode, setCaptionMode] = useState<'sentences' | 'words'>('sentences');
     const [refinementPrompt, setRefinementPrompt] = useState('');
     const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
 
@@ -329,7 +497,11 @@ export const ContentLibraryPage: React.FC<{
     const [clipBasket, setClipBasket] = useState<ClipReference[]>([]);
     const [wordPadBefore, setWordPadBefore] = useState(0);
     const [wordPadAfter, setWordPadAfter] = useState(0);
+    const [assemblyMode, setAssemblyMode] = useState(false);
+    // Per-clip padding overrides: key = `${shortId}_${segIdx}`, value = {before, after}
     const [clipPadOverrides, setClipPadOverrides] = useState<Map<string, { before: number; after: number }>>(new Map());
+    // Selected clip for per-clip padding editor: {shortId, segmentIndex}
+    const [selectedClipForPad, setSelectedClipForPad] = useState<{ shortId: string; segmentIndex: number } | null>(null);
 
     // External AI Input
     const [externalAiJson, setExternalAiJson] = useState('');
@@ -1028,106 +1200,6 @@ export const ContentLibraryPage: React.FC<{
         return true;
     });
 
-    // ==================== Clip Assembly Helpers ====================
-
-    const applyWordPadding = async (seg: ShortSegment, videoId: string, padBefore: number, padAfter: number): Promise<ShortSegment> => {
-        if (padBefore === 0 && padAfter === 0) return seg;
-        try {
-            const dbSegs = await contentDB.getSegmentsByVideoId(videoId);
-            const allWords: { text: string; start: number; end: number }[] = [];
-            for (const s of dbSegs) {
-                if (s.wordTimings) {
-                    for (const w of s.wordTimings) {
-                        allWords.push({ text: w.word, start: w.start, end: w.end });
-                    }
-                }
-            }
-            if (allWords.length === 0) return seg;
-            allWords.sort((a, b) => a.start - b.start);
-
-            const firstIdx = allWords.findIndex(w => w.start >= seg.startTime - 0.05);
-            const lastIdx = allWords.findLastIndex(w => w.end <= seg.endTime + 0.05);
-            if (firstIdx === -1 || lastIdx === -1 || firstIdx > lastIdx) return seg;
-
-            const rawStartIdx = firstIdx - padBefore;
-            const rawEndIdx = lastIdx + padAfter;
-            const padStartIdx = Math.max(0, Math.min(rawStartIdx, lastIdx));
-            const padEndIdx = Math.min(allWords.length - 1, Math.max(rawEndIdx, firstIdx));
-            if (padStartIdx > padEndIdx) return seg;
-
-            const newStart = allWords[padStartIdx].start;
-            const newEnd = allWords[padEndIdx].end;
-            const newText = (padBefore < 0 || padAfter < 0)
-                ? allWords.slice(padStartIdx, padEndIdx + 1).map(w => w.text).join(' ')
-                : seg.text;
-
-            return { ...seg, startTime: newStart, endTime: newEnd, text: newText };
-        } catch {
-            return seg;
-        }
-    };
-
-    const buildExportShort = async (): Promise<GeneratedShort | null> => {
-        if (!generatedShortsPreview.length) return null;
-
-        let segments: ShortSegment[];
-        let videoId: string;
-        let title: string;
-        let padKeys: string[];
-
-        if (clipBasket.length > 0) {
-            // Cart mode: assemble from basket, sorted chronologically
-            const sorted = [...clipBasket].sort((a, b) => a.segment.startTime - b.segment.startTime);
-            segments = sorted.map(c => ({ ...c.segment }));
-            padKeys = sorted.map(c => `${c.shortId}_${c.segmentIndex}`);
-            videoId = sorted[0].segment ? generatedShortsPreview[sorted[0].shortIndex]?.videoId || generatedShortsPreview[0].videoId : generatedShortsPreview[0].videoId;
-            title = 'Custom Assembly';
-        } else if (selectedShortIndex !== null) {
-            const short = generatedShortsPreview[selectedShortIndex];
-            const omitted = omittedClips.get(short.id) || new Set<number>();
-            segments = short.segments
-                .map((s, i) => ({ seg: { ...s }, i }))
-                .filter(({ i }) => !omitted.has(i))
-                .map(({ seg, i }) => { padKeys.push(`${short.id}_${i}`); return seg; });
-            // re-build with proper pad keys
-            const filtered = short.segments
-                .map((s, i) => ({ s, i }))
-                .filter(({ i }) => !omitted.has(i));
-            segments = filtered.map(({ s }) => ({ ...s }));
-            padKeys = filtered.map(({ i }) => `${short.id}_${i}`);
-            videoId = short.videoId;
-            title = short.title;
-        } else {
-            return null;
-        }
-
-        // Apply word padding per segment
-        const vId = clipBasket.length > 0
-            ? generatedShortsPreview[clipBasket[0].shortIndex]?.videoId || generatedShortsPreview[0].videoId
-            : (selectedShortIndex !== null ? generatedShortsPreview[selectedShortIndex].videoId : generatedShortsPreview[0].videoId);
-
-        const paddedSegments = await Promise.all(segments.map((seg, i) => {
-            const key = padKeys[i] || '';
-            const override = clipPadOverrides.get(key);
-            const before = override?.before ?? wordPadBefore;
-            const after = override?.after ?? wordPadAfter;
-            return applyWordPadding(seg, vId, before, after);
-        }));
-
-        const totalDuration = paddedSegments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0);
-        const ref = clipBasket.length > 0
-            ? generatedShortsPreview[clipBasket[0].shortIndex] || generatedShortsPreview[0]
-            : generatedShortsPreview[selectedShortIndex!];
-
-        return {
-            ...ref,
-            id: generateId(),
-            title,
-            segments: paddedSegments,
-            totalDuration,
-        };
-    };
-
     // ==================== Helpers ====================
 
     const formatDuration = (seconds: number): string => {
@@ -1142,6 +1214,131 @@ export const ContentLibraryPage: React.FC<{
         const m = Math.floor(seconds / 60);
         const s = Math.floor(seconds % 60);
         return `${m}:${s.toString().padStart(2, '0')}`;
+    };
+
+    // ==================== Clip Assembly ====================
+
+    // perClipPadKeys: parallel array of pad-override map keys (e.g. "shortId_segIdx") for each segment
+    const applyWordPadding = async (
+        segments: ShortSegment[],
+        videoId: string,
+        globalBefore: number,
+        globalAfter: number,
+        perClipPadKeys?: string[]
+    ): Promise<ShortSegment[]> => {
+        // Check if any adjustment is needed at all (positive = add words, negative = remove words)
+        const anyPad = globalBefore !== 0 || globalAfter !== 0 ||
+            (perClipPadKeys?.some(k => { const o = clipPadOverrides.get(k); return o && (o.before !== 0 || o.after !== 0); }) ?? false);
+        if (!anyPad) return segments;
+
+        // Fetch all word timings for this video
+        const allTranscriptSegs = await contentDB.getSegmentsByVideoId(videoId);
+        const allWords: Array<{ text: string; start: number; end: number }> = [];
+        for (const seg of allTranscriptSegs) {
+            if (seg.wordTimings) {
+                for (const wt of seg.wordTimings) {
+                    if (wt.text && wt.start != null && wt.end != null) {
+                        allWords.push({ text: wt.text, start: wt.start, end: wt.end });
+                    }
+                }
+            }
+        }
+        if (allWords.length === 0) return segments;
+        allWords.sort((a, b) => a.start - b.start);
+
+        return segments.map((clip, idx) => {
+            // Per-clip override takes precedence over global
+            const padKey = perClipPadKeys?.[idx];
+            const override = padKey ? clipPadOverrides.get(padKey) : undefined;
+            const padBefore = override ? override.before : globalBefore;
+            const padAfter = override ? override.after : globalAfter;
+            if (padBefore === 0 && padAfter === 0) return clip;
+
+            const firstIdx = allWords.findIndex(w => w.start >= clip.startTime - 0.05);
+            let lastIdx = -1;
+            for (let i = allWords.length - 1; i >= 0; i--) {
+                if (allWords[i].end <= clip.endTime + 0.05) { lastIdx = i; break; }
+            }
+            if (firstIdx < 0 || lastIdx < 0) return clip;
+
+            // Positive: expand outward. Negative: trim inward (clamp so start <= end).
+            const rawStartIdx = firstIdx - padBefore;  // negative padBefore moves start later (trim)
+            const rawEndIdx = lastIdx + padAfter;       // negative padAfter moves end earlier (trim)
+            const padStartIdx = Math.max(0, Math.min(rawStartIdx, lastIdx));
+            const padEndIdx = Math.min(allWords.length - 1, Math.max(rawEndIdx, firstIdx));
+
+            // Guard: if trimming crossed over, just return original
+            if (padStartIdx > padEndIdx) return clip;
+
+            const prependWords = padBefore > 0 ? allWords.slice(padStartIdx, firstIdx).map(w => w.text).join(' ') : '';
+            const appendWords = padAfter > 0 ? allWords.slice(lastIdx + 1, padEndIdx + 1).map(w => w.text).join(' ') : '';
+
+            // For trimming: rebuild text from the trimmed word range
+            let newText: string;
+            if (padBefore < 0 || padAfter < 0) {
+                const keptWords = allWords.slice(padStartIdx, padEndIdx + 1).map(w => w.text).join(' ');
+                newText = keptWords;
+            } else {
+                newText = [prependWords, clip.text, appendWords].filter(Boolean).join(' ');
+            }
+
+            const prependCount = prependWords ? prependWords.split(/\s+/).length : 0;
+
+            return {
+                ...clip,
+                startTime: allWords[padStartIdx].start,
+                endTime: allWords[padEndIdx].end,
+                text: newText,
+                keywords: clip.keywords?.map(kw => ({ ...kw, wordIndex: kw.wordIndex + prependCount })),
+            };
+        });
+    };
+
+    const buildExportShort = async (): Promise<GeneratedShort | null> => {
+        if (!generatedShortsPreview.length) return null;
+
+        let segments: ShortSegment[];
+        let perClipPadKeys: string[];
+        let title: string;
+        let hook: string;
+        let hookTitle: string;
+
+        if (clipBasket.length > 0) {
+            // Cart takes priority — export cart contents sorted chronologically
+            const sorted = [...clipBasket].sort((a, b) => a.segment.startTime - b.segment.startTime);
+            segments = sorted.map(c => ({ ...c.segment }));
+            perClipPadKeys = sorted.map(c => `${c.shortId}_${c.segmentIndex}`);
+            title = 'Custom Assembly';
+            hook = '';
+            hookTitle = 'Custom Assembly';
+        } else {
+            // Fall back to selected short with omissions applied
+            if (selectedShortIndex === null) return null;
+            const short = generatedShortsPreview[selectedShortIndex];
+            const omitted = omittedClips.get(short.id);
+            const filtered = short.segments.map((seg, i) => ({ seg, i })).filter(({ i }) => !omitted?.has(i));
+            if (filtered.length === 0) return null;
+            segments = filtered.map(({ seg }) => seg);
+            perClipPadKeys = filtered.map(({ i }) => `${short.id}_${i}`);
+            title = short.title;
+            hook = short.hook;
+            hookTitle = short.hookTitle;
+        }
+
+        const videoId = generatedShortsPreview[0].videoId;
+        segments = await applyWordPadding(segments, videoId, wordPadBefore, wordPadAfter, perClipPadKeys);
+
+        const baseShort = assemblyMode ? generatedShortsPreview[0] : generatedShortsPreview[selectedShortIndex!];
+        return {
+            ...baseShort,
+            id: `assembly_${Date.now()}`,
+            title,
+            hook,
+            hookTitle,
+            segments,
+            totalDuration: segments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0),
+            captionMode,
+        };
     };
 
     // ==================== Render ====================
@@ -1918,32 +2115,53 @@ export const ContentLibraryPage: React.FC<{
                                 <div className="flex items-center justify-between mb-4">
                                     <div>
                                         <h4 className="text-sm font-bold text-white">{generatedShortsPreview.length} Shorts Generated</h4>
-                                        <p className="text-xs text-gray-500">
-                                            {clipBasket.length > 0 ? `Cart: ${clipBasket.length} clip${clipBasket.length !== 1 ? 's' : ''}` : 'Select one to export'}
-                                        </p>
+                                        <p className="text-xs text-gray-500">Select one to export</p>
                                     </div>
-                                    <div className="flex gap-2 items-center">
-                                        {/* Global word pad controls */}
-                                        <div className="flex items-center gap-1 text-[10px] text-gray-400 border border-[#333] rounded px-2 py-1">
-                                            <span>±words</span>
-                                            <button onClick={() => setWordPadBefore(Math.max(-5, wordPadBefore - 1))} className="w-4 h-4 flex items-center justify-center bg-[#333] rounded hover:bg-[#444]">−</button>
-                                            <span className="w-5 text-center text-white">{wordPadBefore > 0 ? `+${wordPadBefore}` : wordPadBefore}</span>
-                                            <button onClick={() => setWordPadBefore(Math.min(5, wordPadBefore + 1))} className="w-4 h-4 flex items-center justify-center bg-[#333] rounded hover:bg-[#444]">+</button>
-                                            <span className="text-gray-600 mx-0.5">/</span>
-                                            <button onClick={() => setWordPadAfter(Math.max(-5, wordPadAfter - 1))} className="w-4 h-4 flex items-center justify-center bg-[#333] rounded hover:bg-[#444]">−</button>
-                                            <span className="w-5 text-center text-white">{wordPadAfter > 0 ? `+${wordPadAfter}` : wordPadAfter}</span>
-                                            <button onClick={() => setWordPadAfter(Math.min(5, wordPadAfter + 1))} className="w-4 h-4 flex items-center justify-center bg-[#333] rounded hover:bg-[#444]">+</button>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <button onClick={() => { setGeneratedShortsPreview([]); setGeneratedShort(null); setSelectedShortIndex(null); setOmittedClips(new Map()); setClipBasket([]); }} className="px-3 py-1.5 text-xs border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
+                                        {/* Caption mode selector */}
+                                        <div className="flex items-center gap-1 bg-[#222] border border-[#333] rounded overflow-hidden">
+                                            <button
+                                                onClick={() => setCaptionMode('sentences')}
+                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${captionMode === 'sentences' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                                                title="Display captions as groups of words (default)"
+                                            >
+                                                Sentences
+                                            </button>
+                                            <button
+                                                onClick={() => setCaptionMode('words')}
+                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${captionMode === 'words' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                                                title="Display one word at a time (TikTok-style)"
+                                            >
+                                                Word by Word
+                                            </button>
                                         </div>
-                                        <button onClick={() => { setGeneratedShortsPreview([]); setGeneratedShort(null); setSelectedShortIndex(null); setOmittedClips(new Map()); setClipBasket([]); setClipPadOverrides(new Map()); }} className="px-3 py-1.5 text-xs border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
+                                        {/* Word padding controls */}
+                                        <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                                            <span className="text-gray-500">Pad:</span>
+                                            <div className="flex items-center gap-0.5">
+                                                <button onClick={() => setWordPadBefore(Math.max(-5, wordPadBefore - 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">-</button>
+                                                <span className="w-3 text-center text-[10px]">{wordPadBefore}</span>
+                                                <button onClick={() => setWordPadBefore(Math.min(5, wordPadBefore + 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">+</button>
+                                                <span className="text-gray-600 text-[9px]">before</span>
+                                            </div>
+                                            <div className="flex items-center gap-0.5">
+                                                <button onClick={() => setWordPadAfter(Math.max(-5, wordPadAfter - 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">-</button>
+                                                <span className="w-3 text-center text-[10px]">{wordPadAfter}</span>
+                                                <button onClick={() => setWordPadAfter(Math.min(5, wordPadAfter + 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">+</button>
+                                                <span className="text-gray-600 text-[9px]">after</span>
+                                            </div>
+                                        </div>
+                                        {/* Export button — cart takes priority, falls back to selected short */}
                                         {onExportShort && (clipBasket.length > 0 || selectedShortIndex !== null) && (
                                             <button
                                                 onClick={async () => {
                                                     if (isExporting) return;
                                                     setIsExporting(true);
                                                     try {
-                                                        const exportShort = await buildExportShort();
-                                                        if (exportShort) {
-                                                            await onExportShort(exportShort);
+                                                        const syntheticShort = await buildExportShort();
+                                                        if (syntheticShort) {
+                                                            await onExportShort(syntheticShort);
                                                             setShowShortModal(false);
                                                         }
                                                     } finally {
@@ -1959,27 +2177,73 @@ export const ContentLibraryPage: React.FC<{
                                     </div>
                                 </div>
 
-                                {/* Cart panel */}
-                                {clipBasket.length > 0 && (
-                                    <div className="mb-4 bg-purple-900/20 border border-purple-500/30 rounded-lg p-3">
-                                        <div className="flex items-center justify-between mb-2">
-                                            <span className="text-xs font-bold text-purple-300">Cart — {clipBasket.length} clip{clipBasket.length !== 1 ? 's' : ''}</span>
-                                            <button onClick={() => setClipBasket([])} className="text-[10px] text-gray-500 hover:text-white">Clear all</button>
-                                        </div>
-                                        <div className="space-y-1 max-h-36 overflow-auto">
-                                            {[...clipBasket].sort((a, b) => a.segment.startTime - b.segment.startTime).map((ref, i) => (
-                                                <div key={i} className="flex items-center gap-2 text-[10px]">
-                                                    <span className="text-gray-500 font-mono w-4">{i + 1}.</span>
-                                                    <span className="text-purple-300">#{ref.shortIndex + 1}/C{ref.segmentIndex + 1}</span>
-                                                    <span className="text-gray-400 flex-1 truncate">{ref.segment.text.slice(0, 50)}</span>
-                                                    <span className="text-gray-600 font-mono">{formatDuration(ref.segment.startTime)}–{formatDuration(ref.segment.endTime)}</span>
-                                                    <button
-                                                        onClick={() => setClipBasket(prev => prev.filter(c => !(c.shortId === ref.shortId && c.segmentIndex === ref.segmentIndex)))}
-                                                        className="text-gray-500 hover:text-red-400"
-                                                    >×</button>
+                                {/* Expanded preview when a card is selected */}
+                                {selectedShortIndex !== null && generatedShortsPreview[selectedShortIndex] && (
+                                    <div className="mb-4">
+                                        {/* Export Cart — always visible when clips have been added */}
+                                        {clipBasket.length > 0 && (
+                                            <div className="mb-3 bg-[#1a1a1a] border border-purple-500/30 rounded-lg p-3">
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <h5 className="text-xs font-bold text-purple-300">
+                                                        🛒 Export Cart ({clipBasket.length} clip{clipBasket.length !== 1 ? 's' : ''} &middot; {formatDuration(clipBasket.reduce((s, c) => s + (c.segment.endTime - c.segment.startTime), 0))})
+                                                    </h5>
+                                                    <button onClick={() => setClipBasket([])} className="text-[9px] text-gray-500 hover:text-red-400 transition-colors">Clear All</button>
                                                 </div>
-                                            ))}
+                                                <div className="space-y-1 max-h-36 overflow-auto">
+                                                    {clipBasket.map((clip, ci) => (
+                                                        <div key={`${clip.shortId}_${clip.segmentIndex}`} className="flex items-center gap-2 text-[10px] bg-[#222] rounded px-2 py-1 border border-[#333]">
+                                                            <span className="text-gray-500 font-mono w-4">{ci + 1}.</span>
+                                                            <span className="text-purple-300 font-medium whitespace-nowrap">#{clip.shortIndex + 1}/C{clip.segmentIndex + 1}</span>
+                                                            <span className="text-gray-400 truncate flex-1" title={clip.segment.text}>{clip.segment.text}</span>
+                                                            <span className="text-gray-600 text-[9px] whitespace-nowrap">
+                                                                {Math.floor(clip.segment.startTime / 60)}:{Math.floor(clip.segment.startTime % 60).toString().padStart(2, '0')}&ndash;{Math.floor(clip.segment.endTime / 60)}:{Math.floor(clip.segment.endTime % 60).toString().padStart(2, '0')}
+                                                            </span>
+                                                            <button onClick={() => setClipBasket(prev => prev.filter((_, i) => i !== ci))} className="text-gray-500 hover:text-red-400 text-xs transition-colors">&times;</button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                        <div className="text-xs text-gray-500 mb-1 font-bold uppercase tracking-wide">
+                                            Preview — #{selectedShortIndex + 1} {generatedShortsPreview[selectedShortIndex].title}
                                         </div>
+                                        <ShortDetailPlayer
+                                            short={generatedShortsPreview[selectedShortIndex]}
+                                            videoId={generatedShortsPreview[selectedShortIndex].videoId}
+                                            omittedClips={omittedClips.get(generatedShortsPreview[selectedShortIndex].id)}
+                                            onToggleOmit={(si) => {
+                                                const short = generatedShortsPreview[selectedShortIndex];
+                                                setOmittedClips(prev => {
+                                                    const next = new Map(prev);
+                                                    const set = new Set(next.get(short.id) || []);
+                                                    if (set.has(si)) set.delete(si); else set.add(si);
+                                                    next.set(short.id, set);
+                                                    return next;
+                                                });
+                                            }}
+                                            clipPadOverrides={clipPadOverrides}
+                                            selectedClipForPad={selectedClipForPad}
+                                            onSelectClipForPad={(shortId, si) => {
+                                                setSelectedClipForPad(si === -1 ? null : { shortId, segmentIndex: si });
+                                            }}
+                                            onSetClipPad={(shortId, si, before, after) => {
+                                                setClipPadOverrides(prev => {
+                                                    const next = new Map(prev);
+                                                    next.set(`${shortId}_${si}`, { before, after });
+                                                    return next;
+                                                });
+                                            }}
+                                            clipBasket={clipBasket}
+                                            onToggleBasket={(si) => {
+                                                const short = generatedShortsPreview[selectedShortIndex];
+                                                const inBasket = clipBasket.some(c => c.shortId === short.id && c.segmentIndex === si);
+                                                if (inBasket) {
+                                                    setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
+                                                } else {
+                                                    setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: selectedShortIndex, segmentIndex: si, shortTitle: short.title, segment: short.segments[si] }]);
+                                                }
+                                            }}
+                                        />
                                     </div>
                                 )}
 
@@ -1996,51 +2260,106 @@ export const ContentLibraryPage: React.FC<{
                                                 <div className="flex items-center gap-2">
                                                     <span className="text-[10px] text-gray-500 font-mono">#{idx + 1}</span>
                                                     <h5 className="text-xs font-bold text-white truncate flex-1">{short.title}</h5>
-                                                    {omittedClips.get(short.id)?.size ? <span className="text-[9px] text-red-400">{omittedClips.get(short.id)!.size} omitted</span> : null}
-                                                    {clipBasket.filter(c => c.shortId === short.id).length > 0 && <span className="text-[9px] text-purple-400">{clipBasket.filter(c => c.shortId === short.id).length} in cart</span>}
                                                 </div>
                                                 <p className="text-[10px] text-gray-500 mt-0.5">{formatDuration(short.totalDuration)} &middot; {short.segments.length} clips</p>
                                             </div>
 
-                                            {/* Video thumbnail player with segmented timeline */}
+                                            {/* Video thumbnail player */}
                                             <ShortThumbnailPlayer
                                                 short={short}
                                                 videoId={short.videoId}
-                                                omittedClips={omittedClips.get(short.id)}
-                                                clipBasket={clipBasket}
-                                                shortIndex={idx}
-                                                onToggleOmit={(si) => {
-                                                    setOmittedClips(prev => {
-                                                        const next = new Map(prev);
-                                                        const set = new Set(next.get(short.id) || []);
-                                                        if (set.has(si)) set.delete(si); else set.add(si);
-                                                        next.set(short.id, set);
-                                                        return next;
-                                                    });
-                                                }}
-                                                onToggleBasket={(si) => {
-                                                    const inBasket = clipBasket.some(c => c.shortId === short.id && c.segmentIndex === si);
-                                                    if (inBasket) {
-                                                        setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
-                                                    } else {
-                                                        setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: short.segments[si] }]);
-                                                    }
-                                                }}
-                                                wordPadBefore={wordPadBefore}
-                                                wordPadAfter={wordPadAfter}
-                                                clipPadOverrides={clipPadOverrides}
-                                                onSetClipPad={(shortId, segIdx, before, after) => {
-                                                    setClipPadOverrides(prev => {
-                                                        const next = new Map(prev);
-                                                        next.set(`${shortId}_${segIdx}`, { before, after });
-                                                        return next;
-                                                    });
-                                                }}
                                             />
 
                                             {/* Clips summary */}
                                             <div className="px-3 py-1.5">
                                                 <p className="text-[10px] text-gray-400 line-clamp-2">{short.hook}</p>
+                                            </div>
+
+                                            {/* Clip strip — toggle omit / basket + per-clip pad */}
+                                            <div className="px-3 pb-1.5" onClick={e => e.stopPropagation()}>
+                                                <div className="flex flex-wrap gap-1">
+                                                    {short.segments.map((seg, si) => {
+                                                        const isOmitted = omittedClips.get(short.id)?.has(si) ?? false;
+                                                        const inBasket = clipBasket.some(c => c.shortId === short.id && c.segmentIndex === si);
+                                                        const padKey = `${short.id}_${si}`;
+                                                        const override = clipPadOverrides.get(padKey);
+                                                        const isSelectedForPad = selectedClipForPad?.shortId === short.id && selectedClipForPad?.segmentIndex === si;
+                                                        const hasPadOverride = override && (override.before > 0 || override.after > 0);
+
+                                                        return (
+                                                            <div key={si} className="flex flex-col gap-0.5">
+                                                                <div className="flex gap-0">
+                                                                    {/* Omit toggle */}
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setOmittedClips(prev => {
+                                                                                const next = new Map(prev);
+                                                                                const set = new Set(next.get(short.id) || []);
+                                                                                if (set.has(si)) set.delete(si); else set.add(si);
+                                                                                next.set(short.id, set);
+                                                                                return next;
+                                                                            });
+                                                                        }}
+                                                                        className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300 hover:border-gray-400'}`}
+                                                                        title={isOmitted ? 'Include this clip' : 'Omit this clip'}
+                                                                    >
+                                                                        C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
+                                                                    </button>
+                                                                    {/* Cart button — always shown */}
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            if (inBasket) {
+                                                                                setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
+                                                                            } else {
+                                                                                setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }]);
+                                                                            }
+                                                                        }}
+                                                                        className={`px-1.5 py-0.5 text-[9px] border-t border-b transition-colors ${inBasket ? 'bg-purple-600/30 border-purple-500/50 text-purple-300' : 'bg-[#222] border-[#444] text-gray-500 hover:text-purple-400 hover:border-purple-500/40'}`}
+                                                                        title={inBasket ? 'Remove from cart' : 'Add to export cart'}
+                                                                    >
+                                                                        {inBasket ? '\u{1F6D2}' : '+\u{1F6D2}'}
+                                                                    </button>
+                                                                    {/* Per-clip pad selector */}
+                                                                    <button
+                                                                        onClick={() => setSelectedClipForPad(isSelectedForPad ? null : { shortId: short.id, segmentIndex: si })}
+                                                                        className={`px-1 py-0.5 text-[9px] rounded-r border-t border-r border-b transition-colors ${isSelectedForPad ? 'bg-yellow-600/30 border-yellow-500/50 text-yellow-300' : hasPadOverride ? 'bg-yellow-900/20 border-yellow-700/40 text-yellow-500' : 'bg-[#222] border-[#444] text-gray-500 hover:text-yellow-400 hover:border-yellow-600/40'}`}
+                                                                        title="Set word padding for this clip"
+                                                                    >
+                                                                        {hasPadOverride ? `±${(override!.before || 0) + (override!.after || 0)}` : '±'}
+                                                                    </button>
+                                                                </div>
+                                                                {/* Inline pad editor */}
+                                                                {isSelectedForPad && (
+                                                                    <div className="flex items-center gap-1 bg-yellow-950/40 border border-yellow-700/30 rounded px-1.5 py-1 text-[9px]">
+                                                                        <span className="text-yellow-500/70">bef</span>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: Math.max(-5, (override?.before ?? 0) - 1), after: override?.after ?? 0 }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                                                        <span className="w-3 text-center text-yellow-200">{override?.before ?? 0}</span>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: Math.min(5, (override?.before ?? 0) + 1), after: override?.after ?? 0 }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
+                                                                        <span className="text-yellow-500/70 ml-1">aft</span>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: override?.before ?? 0, after: Math.max(-5, (override?.after ?? 0) - 1) }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                                                        <span className="w-3 text-center text-yellow-200">{override?.after ?? 0}</span>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: override?.before ?? 0, after: Math.min(5, (override?.after ?? 0) + 1) }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
+                                                                        {(override?.before || override?.after) ? (
+                                                                            <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: 0, after: 0 }); return n; })} className="ml-1 text-[8px] text-red-400 hover:text-red-300">clr</button>
+                                                                        ) : null}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                    <button
+                                                        onClick={() => {
+                                                            const newClips = short.segments
+                                                                .map((seg, si) => ({ shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }))
+                                                                .filter(c => !clipBasket.some(b => b.shortId === c.shortId && b.segmentIndex === c.segmentIndex));
+                                                            if (newClips.length > 0) setClipBasket(prev => [...prev, ...newClips]);
+                                                        }}
+                                                        className="px-1.5 py-0.5 text-[9px] rounded border border-dashed border-[#555] text-gray-500 hover:text-purple-400 hover:border-purple-500/40 transition-colors self-start"
+                                                        title="Add all clips to cart"
+                                                    >
+                                                        All 🛒
+                                                    </button>
+                                                </div>
                                             </div>
 
                                             {/* Collapsible B-Roll */}

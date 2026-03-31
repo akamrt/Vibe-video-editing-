@@ -3678,34 +3678,91 @@ function App() {
       // Sort by time just in case
       rawClipEvents.sort((a, b) => a.start - b.start);
 
-      // Apply Slide Grouping Logic (Same as Import)
+      // Apply caption grouping based on captionMode
       if (rawClipEvents.length > 0) {
-        let buffer: any[] = [rawClipEvents[0]];
+        if (short.captionMode === 'words') {
+          // Word-by-word mode: one AnalysisEvent per granular segment (word/short phrase)
+          for (const seg of rawClipEvents) {
+            const wordTimings = (seg.wordTimings || []).filter((wt: any) => wt && wt.text);
+            if (wordTimings.length > 0) {
+              // Split into one event per word using AssemblyAI word timings
+              for (const wt of wordTimings) {
+                const word = wt.text.trim();
+                if (!word) continue;
+                analysisEvents.push({
+                  type: 'dialogue',
+                  startTime: wt.start,
+                  endTime: wt.end,
+                  label: 'speech',
+                  details: word,
+                  wordEmphases: resolveKeywordsForEvent(word, cleanedSegments, wt.start, wt.end),
+                });
+              }
+            } else {
+              // No word timings — fall back to one event per segment
+              analysisEvents.push({
+                type: 'dialogue',
+                startTime: seg.start,
+                endTime: seg.start + seg.duration,
+                label: 'speech',
+                details: seg.text,
+                wordEmphases: resolveKeywordsForEvent(seg.text, cleanedSegments, seg.start, seg.start + seg.duration),
+              });
+            }
+          }
+        } else {
+          // Sentences mode (default): Slide Grouping Logic
+          let buffer: any[] = [rawClipEvents[0]];
 
-        for (let i = 1; i < rawClipEvents.length; i++) {
-          const current = rawClipEvents[i];
-          const prev = buffer[buffer.length - 1];
+          for (let i = 1; i < rawClipEvents.length; i++) {
+            const current = rawClipEvents[i];
+            const prev = buffer[buffer.length - 1];
 
-          // Check continuity (gap < 0.2s) - slightly looser for shorts
-          const isContiguous = (current.start - (prev.start + prev.duration)) < 0.2;
+            // Check continuity (gap < 0.2s) - slightly looser for shorts
+            const isContiguous = (current.start - (prev.start + prev.duration)) < 0.2;
 
-          const bufferDuration = (prev.start + prev.duration) - buffer[0].start;
-          const combinedDuration = (current.start + current.duration) - buffer[0].start;
-          const wordCount = buffer.length;
+            const bufferDuration = (prev.start + prev.duration) - buffer[0].start;
+            const combinedDuration = (current.start + current.duration) - buffer[0].start;
+            const wordCount = buffer.length;
 
-          // Merge if:
-          // 1. Gap is small
-          // 2. AND (Buffer is very short (<0.5s) OR Words < 3)
-          // 3. AND Combined duration < 1.5s
-          if (isContiguous && (bufferDuration < 0.5 || wordCount < 3) && combinedDuration < 1.5) {
-            buffer.push(current);
-          } else {
-            // Flush buffer
+            // Merge if:
+            // 1. Gap is small
+            // 2. AND (Buffer is very short (<0.5s) OR Words < 3)
+            // 3. AND Combined duration < 1.5s
+            if (isContiguous && (bufferDuration < 0.5 || wordCount < 3) && combinedDuration < 1.5) {
+              buffer.push(current);
+            } else {
+              // Flush buffer
+              const start = buffer[0].start;
+              const end = buffer[buffer.length - 1].start + buffer[buffer.length - 1].duration;
+              const text = buffer.map(e => e.text).join(' ');
+
+              // Collect wordTimings from buffered segments (AssemblyAI data)
+              const collectedWordTimings = buffer
+                .flatMap(seg => seg.wordTimings || [])
+                .filter((wt: any) => wt && wt.text);
+
+              analysisEvents.push({
+                type: 'dialogue',
+                startTime: start,
+                endTime: end,
+                label: 'speech',
+                details: text,
+                wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end),
+                ...(collectedWordTimings.length > 0 ? { wordTimings: collectedWordTimings } : {})
+              });
+
+              // Start new buffer
+              buffer = [current];
+            }
+          }
+
+          // Flush remaining
+          if (buffer.length > 0) {
             const start = buffer[0].start;
             const end = buffer[buffer.length - 1].start + buffer[buffer.length - 1].duration;
             const text = buffer.map(e => e.text).join(' ');
 
-            // Collect wordTimings from buffered segments (AssemblyAI data)
             const collectedWordTimings = buffer
               .flatMap(seg => seg.wordTimings || [])
               .filter((wt: any) => wt && wt.text);
@@ -3719,31 +3776,7 @@ function App() {
               wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end),
               ...(collectedWordTimings.length > 0 ? { wordTimings: collectedWordTimings } : {})
             });
-
-            // Start new buffer
-            buffer = [current];
           }
-        }
-
-        // Flush remaining
-        if (buffer.length > 0) {
-          const start = buffer[0].start;
-          const end = buffer[buffer.length - 1].start + buffer[buffer.length - 1].duration;
-          const text = buffer.map(e => e.text).join(' ');
-
-          const collectedWordTimings = buffer
-            .flatMap(seg => seg.wordTimings || [])
-            .filter((wt: any) => wt && wt.text);
-
-          analysisEvents.push({
-            type: 'dialogue',
-            startTime: start,
-            endTime: end,
-            label: 'speech',
-            details: text,
-            wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end),
-            ...(collectedWordTimings.length > 0 ? { wordTimings: collectedWordTimings } : {})
-          });
         }
       }
 
