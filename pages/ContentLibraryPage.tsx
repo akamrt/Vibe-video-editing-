@@ -20,12 +20,41 @@ interface ImportingVideo {
     error?: string;
 }
 
+// ==================== Shared hook: check local video cache ====================
+
+function useLocalVideoSrc(videoId: string) {
+    const [src, setSrc] = useState<string | null>(null);        // null = checking, '' = not cached
+    const [thumbnailUrl, setThumbnailUrl] = useState<string>('');
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                // Look up thumbnail from content DB
+                const record = await contentDB.getVideo(videoId);
+                if (!cancelled && record?.thumbnailUrl) setThumbnailUrl(record.thumbnailUrl);
+
+                // Check if video is locally cached
+                const res = await fetch(`/api/local-cache?videoId=${videoId}`);
+                const data = await res.json();
+                if (!cancelled) setSrc(data.hasVideo ? `/api/local-video?videoId=${videoId}` : '');
+            } catch {
+                if (!cancelled) setSrc('');
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [videoId]);
+
+    return { src, thumbnailUrl };
+}
+
 // ==================== Short Detail Player (expanded preview) ====================
 
 const ShortDetailPlayer: React.FC<{
     short: GeneratedShort;
     videoId: string;
 }> = ({ short, videoId }) => {
+    const { src, thumbnailUrl } = useLocalVideoSrc(videoId);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentClipIdx, setCurrentClipIdx] = useState(0);
@@ -35,6 +64,7 @@ const ShortDetailPlayer: React.FC<{
     const isDraggingRef = useRef(false);
 
     const totalDuration = short.segments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0);
+    const hasVideo = !!src;
 
     const formatSecs = (s: number) => {
         const m = Math.floor(s / 60);
@@ -90,11 +120,8 @@ const ShortDetailPlayer: React.FC<{
             if (video.currentTime >= seg.endTime) {
                 clipIdx++;
                 if (clipIdx >= short.segments.length) {
-                    video.pause();
-                    setIsPlaying(false);
-                    setScrubProgress(0);
-                    setCurrentTime(0);
-                    setCurrentClipIdx(0);
+                    video.pause(); setIsPlaying(false);
+                    setScrubProgress(0); setCurrentTime(0); setCurrentClipIdx(0);
                     return;
                 }
                 setCurrentClipIdx(clipIdx);
@@ -104,8 +131,7 @@ const ShortDetailPlayer: React.FC<{
             let elapsed = 0;
             for (let i = 0; i < clipIdx; i++) elapsed += short.segments[i].endTime - short.segments[i].startTime;
             elapsed += video.currentTime - short.segments[clipIdx].startTime;
-            const pct = totalDuration > 0 ? elapsed / totalDuration : 0;
-            setScrubProgress(pct);
+            setScrubProgress(totalDuration > 0 ? elapsed / totalDuration : 0);
             setCurrentTime(elapsed);
             animFrameRef.current = requestAnimationFrame(tick);
         };
@@ -114,26 +140,17 @@ const ShortDetailPlayer: React.FC<{
         return () => cancelAnimationFrame(animFrameRef.current);
     }, [isPlaying, currentClipIdx, short.segments, totalDuration]);
 
-    const handleScrubBar = (e: React.MouseEvent<HTMLDivElement>) => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-        seekToProgress(pct);
-    };
-
     const handleScrubMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+        e.stopPropagation();
         isDraggingRef.current = true;
-        handleScrubBar(e);
-
-        const onMove = (me: MouseEvent) => {
-            const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (me.clientX - rect.left) / rect.width));
+        const getRect = () => e.currentTarget.getBoundingClientRect();
+        const apply = (clientX: number) => {
+            const pct = Math.max(0, Math.min(1, (clientX - getRect().left) / getRect().width));
             seekToProgress(pct);
         };
-        const onUp = () => {
-            isDraggingRef.current = false;
-            window.removeEventListener('mousemove', onMove);
-            window.removeEventListener('mouseup', onUp);
-        };
+        apply(e.clientX);
+        const onMove = (me: MouseEvent) => apply(me.clientX);
+        const onUp = () => { isDraggingRef.current = false; window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
     };
@@ -142,46 +159,43 @@ const ShortDetailPlayer: React.FC<{
 
     return (
         <div className="bg-[#111] rounded-lg overflow-hidden border border-[#333]">
-            {/* Video */}
             <div className="relative bg-black" style={{ aspectRatio: '16/9' }}>
-                <video
-                    ref={videoRef}
-                    src={`/api/local-video?videoId=${videoId}`}
-                    className="w-full h-full object-contain"
-                    muted
-                    playsInline
-                    preload="auto"
-                />
-                {/* Play/pause overlay */}
-                <button
-                    onClick={handlePlayPause}
-                    className="absolute inset-0 flex items-center justify-center group"
-                >
-                    {!isPlaying && (
-                        <div className="w-14 h-14 rounded-full bg-black/60 group-hover:bg-black/80 flex items-center justify-center shadow-xl transition-colors">
-                            <span className="text-white text-2xl ml-1">&#9654;</span>
+                {src === null && (
+                    <div className="absolute inset-0 flex items-center justify-center text-gray-600 text-xs">Checking cache...</div>
+                )}
+                {src === '' && (
+                    <>
+                        {thumbnailUrl && <img src={thumbnailUrl} className="w-full h-full object-cover opacity-40" alt="" />}
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
+                            <span className="text-gray-400 text-xs">Video not cached locally</span>
+                            <span className="text-gray-600 text-[10px]">Will download on export</span>
                         </div>
-                    )}
-                </button>
-                {/* Clip badge */}
+                    </>
+                )}
+                {hasVideo && (
+                    <>
+                        <video ref={videoRef} src={src} className="w-full h-full object-contain" muted playsInline preload="auto" />
+                        <button onClick={handlePlayPause} className="absolute inset-0 flex items-center justify-center group">
+                            {!isPlaying && (
+                                <div className="w-14 h-14 rounded-full bg-black/60 group-hover:bg-black/80 flex items-center justify-center shadow-xl transition-colors">
+                                    <span className="text-white text-2xl ml-1">&#9654;</span>
+                                </div>
+                            )}
+                        </button>
+                    </>
+                )}
                 <div className="absolute top-2 left-2 bg-black/70 text-[10px] text-white px-2 py-0.5 rounded">
                     Clip {currentClipIdx + 1} / {short.segments.length}
                 </div>
             </div>
 
-            {/* Scrub bar + time */}
+            {/* Scrub bar + time — always visible */}
             <div className="px-3 pt-2 pb-1">
                 <div
-                    className="relative h-3 bg-[#333] rounded-full cursor-pointer group"
-                    onMouseDown={handleScrubMouseDown}
-                    onClick={handleScrubBar}
+                    className={`relative h-3 bg-[#333] rounded-full group ${hasVideo ? 'cursor-pointer' : 'opacity-40'}`}
+                    onMouseDown={hasVideo ? handleScrubMouseDown : undefined}
                 >
-                    {/* Fill */}
-                    <div
-                        className="absolute top-0 left-0 h-full bg-purple-500 rounded-full"
-                        style={{ width: `${scrubProgress * 100}%` }}
-                    />
-                    {/* Clip markers */}
+                    <div className="absolute top-0 left-0 h-full bg-purple-500 rounded-full" style={{ width: `${scrubProgress * 100}%` }} />
                     {(() => {
                         let acc = 0;
                         return short.segments.slice(0, -1).map((seg, i) => {
@@ -190,11 +204,7 @@ const ShortDetailPlayer: React.FC<{
                             return <div key={i} className="absolute top-0 bottom-0 w-0.5 bg-white/30" style={{ left: `${pct}%` }} />;
                         });
                     })()}
-                    {/* Thumb */}
-                    <div
-                        className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity"
-                        style={{ left: `calc(${scrubProgress * 100}% - 6px)` }}
-                    />
+                    <div className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity" style={{ left: `calc(${scrubProgress * 100}% - 6px)` }} />
                 </div>
                 <div className="flex justify-between text-[10px] text-gray-500 mt-1">
                     <span>{formatSecs(currentTime)}</span>
@@ -202,7 +212,6 @@ const ShortDetailPlayer: React.FC<{
                 </div>
             </div>
 
-            {/* Current clip text */}
             {currentSeg && (
                 <div className="px-3 pb-2">
                     <p className="text-[11px] text-gray-400 line-clamp-2">{currentSeg.text}</p>
@@ -218,37 +227,34 @@ const ShortThumbnailPlayer: React.FC<{
     short: GeneratedShort;
     videoId: string;
 }> = ({ short, videoId }) => {
+    const { src, thumbnailUrl } = useLocalVideoSrc(videoId);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentClipIdx, setCurrentClipIdx] = useState(0);
     const [scrubProgress, setScrubProgress] = useState(0);
-    const [canPlay, setCanPlay] = useState(false);
     const animFrameRef = useRef<number>(0);
 
     const totalDuration = short.segments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0);
+    const hasVideo = !!src;
 
     const handlePlayPause = (e: React.MouseEvent) => {
         e.stopPropagation();
         const video = videoRef.current;
         if (!video) return;
-
         if (isPlaying) {
             video.pause();
             cancelAnimationFrame(animFrameRef.current);
             setIsPlaying(false);
         } else {
-            // Start at first clip
             setCurrentClipIdx(0);
             video.currentTime = short.segments[0].startTime;
             video.play().then(() => setIsPlaying(true)).catch(() => {});
         }
     };
 
-    // Monitor playback — advance through clips
     useEffect(() => {
         const video = videoRef.current;
         if (!video || !isPlaying) return;
-
         let clipIdx = currentClipIdx;
 
         const tick = () => {
@@ -259,24 +265,16 @@ const ShortThumbnailPlayer: React.FC<{
             if (video.currentTime >= seg.endTime) {
                 clipIdx++;
                 if (clipIdx >= short.segments.length) {
-                    video.pause();
-                    setIsPlaying(false);
-                    setScrubProgress(0);
-                    setCurrentClipIdx(0);
-                    return;
+                    video.pause(); setIsPlaying(false); setScrubProgress(0); setCurrentClipIdx(0); return;
                 }
                 setCurrentClipIdx(clipIdx);
                 video.currentTime = short.segments[clipIdx].startTime;
             }
 
-            // Calculate overall progress
             let elapsed = 0;
-            for (let i = 0; i < clipIdx; i++) {
-                elapsed += short.segments[i].endTime - short.segments[i].startTime;
-            }
+            for (let i = 0; i < clipIdx; i++) elapsed += short.segments[i].endTime - short.segments[i].startTime;
             elapsed += video.currentTime - short.segments[clipIdx].startTime;
             setScrubProgress(totalDuration > 0 ? elapsed / totalDuration : 0);
-
             animFrameRef.current = requestAnimationFrame(tick);
         };
 
@@ -284,23 +282,18 @@ const ShortThumbnailPlayer: React.FC<{
         return () => cancelAnimationFrame(animFrameRef.current);
     }, [isPlaying, currentClipIdx, short.segments, totalDuration]);
 
-    // Scrub handler
     const handleScrub = (e: React.MouseEvent<HTMLDivElement>) => {
         e.stopPropagation();
         const video = videoRef.current;
         if (!video) return;
-
         const rect = e.currentTarget.getBoundingClientRect();
         const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
         const targetTime = pct * totalDuration;
-
-        // Find which clip this falls in
         let accumulated = 0;
         for (let i = 0; i < short.segments.length; i++) {
             const clipDur = short.segments[i].endTime - short.segments[i].startTime;
             if (accumulated + clipDur > targetTime) {
-                const offset = targetTime - accumulated;
-                video.currentTime = short.segments[i].startTime + offset;
+                video.currentTime = short.segments[i].startTime + (targetTime - accumulated);
                 setCurrentClipIdx(i);
                 setScrubProgress(pct);
                 break;
@@ -311,57 +304,52 @@ const ShortThumbnailPlayer: React.FC<{
 
     return (
         <div className="relative bg-black" style={{ aspectRatio: '16/9' }}>
-            <video
-                ref={videoRef}
-                src={`/api/local-video?videoId=${videoId}`}
-                className="w-full h-full object-cover"
-                muted
-                playsInline
-                preload="metadata"
-                onCanPlay={() => setCanPlay(true)}
-            />
+            {/* Thumbnail fallback always rendered as background */}
+            {thumbnailUrl && <img src={thumbnailUrl} className="absolute inset-0 w-full h-full object-cover" alt="" />}
 
-            {/* Play overlay */}
-            {!isPlaying && (
-                <button
-                    onClick={handlePlayPause}
-                    className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/10 transition-colors group"
-                >
+            {/* Video on top when cached */}
+            {hasVideo && (
+                <video
+                    ref={videoRef}
+                    src={src}
+                    className="absolute inset-0 w-full h-full object-cover"
+                    muted playsInline preload="metadata"
+                />
+            )}
+
+            {/* Not-cached overlay */}
+            {src === '' && (
+                <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                    <span className="text-[9px] text-gray-300 bg-black/60 px-1.5 py-0.5 rounded">Not cached — exports fine</span>
+                </div>
+            )}
+
+            {/* Play/pause */}
+            {hasVideo && !isPlaying && (
+                <button onClick={handlePlayPause} className="absolute inset-0 flex items-center justify-center bg-black/20 hover:bg-black/10 transition-colors group">
                     <div className="w-8 h-8 rounded-full bg-white/90 group-hover:bg-white flex items-center justify-center shadow">
                         <span className="text-black text-sm ml-0.5">&#9654;</span>
                     </div>
                 </button>
             )}
-
-            {/* Pause overlay when playing */}
-            {isPlaying && (
-                <button
-                    onClick={handlePlayPause}
-                    className="absolute inset-0"
-                />
-            )}
+            {isPlaying && <button onClick={handlePlayPause} className="absolute inset-0" />}
 
             {/* Scrub bar */}
             <div
-                className="absolute bottom-0 left-0 right-0 h-2 bg-black/50 cursor-pointer"
-                onClick={handleScrub}
+                className={`absolute bottom-0 left-0 right-0 h-2 bg-black/50 ${hasVideo ? 'cursor-pointer' : ''}`}
+                onClick={hasVideo ? handleScrub : undefined}
             >
-                <div
-                    className="h-full bg-purple-500 transition-none"
-                    style={{ width: `${scrubProgress * 100}%` }}
-                />
-                {/* Clip markers */}
+                <div className="h-full bg-purple-500 transition-none" style={{ width: `${scrubProgress * 100}%` }} />
                 {(() => {
                     let acc = 0;
                     return short.segments.slice(0, -1).map((seg, i) => {
-                        acc += (seg.endTime - seg.startTime);
+                        acc += seg.endTime - seg.startTime;
                         const pct = totalDuration > 0 ? (acc / totalDuration) * 100 : 0;
                         return <div key={i} className="absolute top-0 bottom-0 w-px bg-white/40" style={{ left: `${pct}%` }} />;
                     });
                 })()}
             </div>
 
-            {/* Duration badge */}
             <div className="absolute top-1 right-1 bg-black/70 text-[9px] text-white px-1 py-0.5 rounded">
                 {Math.round(totalDuration)}s
             </div>
