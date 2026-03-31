@@ -20,6 +20,163 @@ interface ImportingVideo {
     error?: string;
 }
 
+// ==================== Short Thumbnail Player ====================
+
+const ShortThumbnailPlayer: React.FC<{
+    short: GeneratedShort;
+    videoId: string;
+}> = ({ short, videoId }) => {
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [currentClipIdx, setCurrentClipIdx] = useState(0);
+    const [scrubProgress, setScrubProgress] = useState(0);
+    const [canPlay, setCanPlay] = useState(false);
+    const animFrameRef = useRef<number>(0);
+
+    const totalDuration = short.segments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0);
+
+    const handlePlayPause = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        const video = videoRef.current;
+        if (!video) return;
+
+        if (isPlaying) {
+            video.pause();
+            cancelAnimationFrame(animFrameRef.current);
+            setIsPlaying(false);
+        } else {
+            // Start at first clip
+            setCurrentClipIdx(0);
+            video.currentTime = short.segments[0].startTime;
+            video.play().then(() => setIsPlaying(true)).catch(() => {});
+        }
+    };
+
+    // Monitor playback — advance through clips
+    useEffect(() => {
+        const video = videoRef.current;
+        if (!video || !isPlaying) return;
+
+        let clipIdx = currentClipIdx;
+
+        const tick = () => {
+            if (!video || video.paused) return;
+            const seg = short.segments[clipIdx];
+            if (!seg) { video.pause(); setIsPlaying(false); return; }
+
+            if (video.currentTime >= seg.endTime) {
+                clipIdx++;
+                if (clipIdx >= short.segments.length) {
+                    video.pause();
+                    setIsPlaying(false);
+                    setScrubProgress(0);
+                    setCurrentClipIdx(0);
+                    return;
+                }
+                setCurrentClipIdx(clipIdx);
+                video.currentTime = short.segments[clipIdx].startTime;
+            }
+
+            // Calculate overall progress
+            let elapsed = 0;
+            for (let i = 0; i < clipIdx; i++) {
+                elapsed += short.segments[i].endTime - short.segments[i].startTime;
+            }
+            elapsed += video.currentTime - short.segments[clipIdx].startTime;
+            setScrubProgress(totalDuration > 0 ? elapsed / totalDuration : 0);
+
+            animFrameRef.current = requestAnimationFrame(tick);
+        };
+
+        animFrameRef.current = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(animFrameRef.current);
+    }, [isPlaying, currentClipIdx, short.segments, totalDuration]);
+
+    // Scrub handler
+    const handleScrub = (e: React.MouseEvent<HTMLDivElement>) => {
+        e.stopPropagation();
+        const video = videoRef.current;
+        if (!video) return;
+
+        const rect = e.currentTarget.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const targetTime = pct * totalDuration;
+
+        // Find which clip this falls in
+        let accumulated = 0;
+        for (let i = 0; i < short.segments.length; i++) {
+            const clipDur = short.segments[i].endTime - short.segments[i].startTime;
+            if (accumulated + clipDur > targetTime) {
+                const offset = targetTime - accumulated;
+                video.currentTime = short.segments[i].startTime + offset;
+                setCurrentClipIdx(i);
+                setScrubProgress(pct);
+                break;
+            }
+            accumulated += clipDur;
+        }
+    };
+
+    return (
+        <div className="relative bg-black" style={{ aspectRatio: '16/9' }}>
+            <video
+                ref={videoRef}
+                src={`/api/local-video?videoId=${videoId}`}
+                className="w-full h-full object-cover"
+                muted
+                playsInline
+                preload="metadata"
+                onCanPlay={() => setCanPlay(true)}
+            />
+
+            {/* Play overlay */}
+            {!isPlaying && (
+                <button
+                    onClick={handlePlayPause}
+                    className="absolute inset-0 flex items-center justify-center bg-black/30 hover:bg-black/10 transition-colors group"
+                >
+                    <div className="w-8 h-8 rounded-full bg-white/90 group-hover:bg-white flex items-center justify-center shadow">
+                        <span className="text-black text-sm ml-0.5">&#9654;</span>
+                    </div>
+                </button>
+            )}
+
+            {/* Pause overlay when playing */}
+            {isPlaying && (
+                <button
+                    onClick={handlePlayPause}
+                    className="absolute inset-0"
+                />
+            )}
+
+            {/* Scrub bar */}
+            <div
+                className="absolute bottom-0 left-0 right-0 h-2 bg-black/50 cursor-pointer"
+                onClick={handleScrub}
+            >
+                <div
+                    className="h-full bg-purple-500 transition-none"
+                    style={{ width: `${scrubProgress * 100}%` }}
+                />
+                {/* Clip markers */}
+                {(() => {
+                    let acc = 0;
+                    return short.segments.slice(0, -1).map((seg, i) => {
+                        acc += (seg.endTime - seg.startTime);
+                        const pct = totalDuration > 0 ? (acc / totalDuration) * 100 : 0;
+                        return <div key={i} className="absolute top-0 bottom-0 w-px bg-white/40" style={{ left: `${pct}%` }} />;
+                    });
+                })()}
+            </div>
+
+            {/* Duration badge */}
+            <div className="absolute top-1 right-1 bg-black/70 text-[9px] text-white px-1 py-0.5 rounded">
+                {Math.round(totalDuration)}s
+            </div>
+        </div>
+    );
+};
+
 // ==================== Main Component ====================
 
 export const ContentLibraryPage: React.FC<{
@@ -72,6 +229,10 @@ export const ContentLibraryPage: React.FC<{
     const [shortDuration, setShortDuration] = useState(60);
     const [isGeneratingShort, setIsGeneratingShort] = useState(false);
     const [generatedShort, setGeneratedShort] = useState<GeneratedShort | null>(null);
+    const [generatedShortsPreview, setGeneratedShortsPreview] = useState<GeneratedShort[]>([]);
+    const [selectedShortIndex, setSelectedShortIndex] = useState<number | null>(null);
+    const [expandedBRoll, setExpandedBRoll] = useState<Record<number, boolean>>({});
+    const [expandedKeywords, setExpandedKeywords] = useState<Record<number, boolean>>({});
     const [refinementPrompt, setRefinementPrompt] = useState('');
     const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
 
@@ -83,7 +244,7 @@ export const ContentLibraryPage: React.FC<{
     const [savedShortsFileList, setSavedShortsFileList] = useState<SavedShortsInfo[]>([]);
     const [shortsSource, setShortsSource] = useState<'indexeddb' | string>('indexeddb');
 
-    // Filler detection
+    // Filler detection (kept for legacy compatibility)
     const [isDetectingFillers, setIsDetectingFillers] = useState(false);
     const [fillerStatus, setFillerStatus] = useState('');
 
@@ -226,6 +387,10 @@ export const ContentLibraryPage: React.FC<{
 
         setIsGeneratingShort(true);
         setGeneratedShort(null);
+        setGeneratedShortsPreview([]);
+        setSelectedShortIndex(null);
+        setExpandedBRoll({});
+        setExpandedKeywords({});
 
         try {
             // Find existing shorts for this video to avoid duplication
@@ -237,17 +402,22 @@ export const ContentLibraryPage: React.FC<{
                     endTime: s.segments[s.segments.length - 1]?.endTime || 0
                 }));
 
-            const result = await generateShort(shortTargetVideo, shortPrompt, shortDuration, refinementPrompt, existingShorts, selectedModel);
-            if (result.success && result.short) {
-                setGeneratedShort(result.short);
-                setRefinementPrompt(''); // Clear refinement after success
-                loadData(); // Refresh shorts list
-                // Auto-save shorts to file
-                const videoRecord = videos.find(v => v.id === shortTargetVideo);
-                contentDB.getAllShorts().then(allShorts => {
-                    const videoShorts = allShorts.filter(s => s.videoId === shortTargetVideo);
-                    saveShortsToFile(shortTargetVideo, videoRecord?.title || shortTargetVideo, videoShorts).catch(e => console.warn('Shorts file save failed:', e));
-                });
+            const result = await generateShort(shortTargetVideo, shortPrompt, shortDuration, undefined, existingShorts, selectedModel);
+            if (result.success) {
+                const allGenerated = result.shorts || (result.short ? [result.short] : []);
+                if (allGenerated.length > 0) {
+                    setGeneratedShortsPreview(allGenerated);
+                    setGeneratedShort(allGenerated[0]); // Keep first as fallback
+                    loadData(); // Refresh shorts list
+                    // Auto-save shorts to file
+                    const videoRecord = videos.find(v => v.id === shortTargetVideo);
+                    contentDB.getAllShorts().then(allShorts => {
+                        const videoShorts = allShorts.filter(s => s.videoId === shortTargetVideo);
+                        saveShortsToFile(shortTargetVideo, videoRecord?.title || shortTargetVideo, videoShorts).catch(e => console.warn('Shorts file save failed:', e));
+                    });
+                } else {
+                    alert('No shorts generated');
+                }
             } else {
                 alert('Failed to generate short: ' + (result.error || 'Unknown error'));
             }
@@ -309,18 +479,19 @@ export const ContentLibraryPage: React.FC<{
         if (!shortTargetVideo || !externalAiJson.trim()) return;
         try {
             const result = await importManualShort(shortTargetVideo, externalAiJson, shortPrompt || "External AI (Manual Import)");
-            if (result.success && result.short) {
-                setGeneratedShort(result.short);
-                setExternalAiJson(''); // Clear input after success
-                loadData(); // Refresh shorts list
-                // Auto-save shorts to file
-                const videoRecord = videos.find(v => v.id === shortTargetVideo);
-                contentDB.getAllShorts().then(allShorts => {
-                    const videoShorts = allShorts.filter(s => s.videoId === shortTargetVideo);
-                    saveShortsToFile(shortTargetVideo, videoRecord?.title || shortTargetVideo, videoShorts).catch(e => console.warn('Shorts file save failed:', e));
-                });
-                if (result.shorts && result.shorts.length > 1) {
-                    alert(`Successfully imported ${result.shorts.length} shorts! Showing preview for the first one. Close this modal to see all generated shorts in the library.`);
+            if (result.success) {
+                const allImported = result.shorts || (result.short ? [result.short] : []);
+                if (allImported.length > 0) {
+                    setGeneratedShortsPreview(allImported);
+                    setGeneratedShort(allImported[0]);
+                    setSelectedShortIndex(null);
+                    setExternalAiJson('');
+                    loadData();
+                    const videoRecord = videos.find(v => v.id === shortTargetVideo);
+                    contentDB.getAllShorts().then(allShorts => {
+                        const videoShorts = allShorts.filter(s => s.videoId === shortTargetVideo);
+                        saveShortsToFile(shortTargetVideo, videoRecord?.title || shortTargetVideo, videoShorts).catch(e => console.warn('Shorts file save failed:', e));
+                    });
                 }
             } else {
                 alert('Failed to import JSON: ' + (result.error || 'Unknown error'));
@@ -1402,7 +1573,7 @@ export const ContentLibraryPage: React.FC<{
                                                         <div className="flex items-center justify-between mt-auto">
                                                             <span className="text-xs text-indigo-400 font-mono">{formatDuration(short.totalDuration)} • {short.segments.length} clips</span>
                                                             <div className="flex gap-2">
-                                                                <button onClick={() => { setGeneratedShort(short); setShowShortModal(true); }} className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded transition-colors">Preview</button>
+                                                                <button onClick={() => { setGeneratedShortsPreview([short]); setGeneratedShort(short); setSelectedShortIndex(0); setShowShortModal(true); }} className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded transition-colors">Preview</button>
                                                                 {onExportShort && (
                                                                     <button
                                                                         onClick={async () => {
@@ -1457,26 +1628,25 @@ export const ContentLibraryPage: React.FC<{
             {/* Short Generation Modal */}
             {showShortModal && (
                 <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-                    <div className="bg-[#1a1a1a] rounded-xl w-full max-w-3xl max-h-[90vh] overflow-hidden border border-[#333] flex flex-col">
+                    <div className={`bg-[#1a1a1a] rounded-xl w-full ${generatedShortsPreview.length > 0 || generatedShort ? 'max-w-5xl' : 'max-w-3xl'} max-h-[90vh] overflow-hidden border border-[#333] flex flex-col transition-all`}>
                         <div className="p-4 border-b border-[#333] flex items-center justify-between">
                             <h3 className="text-lg font-bold">⚡ Generate Short</h3>
                             <button onClick={() => setShowShortModal(false)} className="text-gray-400 hover:text-white text-xl">×</button>
                         </div>
 
-                        {!generatedShort ? (
+                        {generatedShortsPreview.length === 0 && !generatedShort ? (
                             <div className="flex-1 overflow-auto p-6">
-                                <p className="text-sm text-gray-400 mb-4">Generate a viral short from: <span className="text-white font-medium">{videos.find(v => v.id === shortTargetVideo)?.title}</span></p>
+                                <p className="text-sm text-gray-400 mb-4">Generate 10 viral shorts from: <span className="text-white font-medium">{videos.find(v => v.id === shortTargetVideo)?.title}</span></p>
                                 <div className="space-y-4">
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">What content to find? <span className="text-gray-600">(optional)</span></label>
                                         <input type="text" value={shortPrompt} onChange={e => setShortPrompt(e.target.value)} placeholder="Leave empty for AI to find the most viral moments..." className="w-full bg-[#222] border border-[#333] rounded px-3 py-2 focus:border-indigo-500 outline-none" />
-                                        <p className="text-xs text-gray-600 mt-1">💡 If empty, AI will auto-detect: powerful stories, quotable moments, emotional testimonies</p>
+                                        <p className="text-xs text-gray-600 mt-1">AI will generate 10 different options ranked by viral potential</p>
                                     </div>
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">Target Duration</label>
                                         <select value={shortDuration} onChange={e => setShortDuration(Number(e.target.value))} className="w-full bg-[#222] border border-[#333] rounded px-3 py-2">
                                             <option value={30}>30 seconds</option>
-                                            <option value={60}>60 seconds (recommended)</option>
                                             <option value={60}>60 seconds (recommended)</option>
                                             <option value={90}>90 seconds</option>
                                         </select>
@@ -1509,18 +1679,17 @@ export const ContentLibraryPage: React.FC<{
                                             </optgroup>
                                         </select>
                                         <p className="text-xs text-gray-600 mt-1">OpenAI and Gemini Pro/3 require paid API keys.</p>
-
                                     </div>
 
                                     <button onClick={handleGenerateShort} disabled={isGeneratingShort} className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg font-bold">
-                                        {isGeneratingShort ? '🔄 Generating...' : shortPrompt.trim() ? '⚡ Generate Short' : '✨ Auto-Generate Best Moments'}
+                                        {isGeneratingShort ? '🔄 Generating 10 shorts...' : shortPrompt.trim() ? '⚡ Generate 10 Shorts' : '✨ Auto-Generate 10 Best Moments'}
                                     </button>
                                 </div>
 
                                 <div className="mt-8 pt-6 border-t border-[#333]">
-                                    <h4 className="text-sm font-bold text-gray-300 mb-2">🤖 Use External AI (ChatGPT / Claude)</h4>
+                                    <h4 className="text-sm font-bold text-gray-300 mb-2">Use External AI (ChatGPT / Claude)</h4>
                                     <p className="text-xs text-gray-500 mb-4">
-                                        Want to use your own ChatGPT or Claude Plus subscription? Copy the prompt below, generate the JSON on their website, and paste it back here to preview and export!
+                                        Copy the prompt, generate JSON externally, and paste it back here.
                                     </p>
                                     <div className="space-y-3">
                                         <button
@@ -1528,333 +1697,132 @@ export const ContentLibraryPage: React.FC<{
                                             disabled={isGeneratingPrompt}
                                             className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-indigo-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
                                         >
-                                            {isGeneratingPrompt ? '⏳ Formatting Prompt...' : '📋 1. Copy Prompt to Clipboard'}
+                                            {isGeneratingPrompt ? 'Formatting Prompt...' : '1. Copy Prompt to Clipboard'}
                                         </button>
 
-                                        <div className="relative">
-                                            <textarea
-                                                value={externalAiJson}
-                                                onChange={e => setExternalAiJson(e.target.value)}
-                                                placeholder="2. Paste the JSON result here from ChatGPT or Claude..."
-                                                className="w-full bg-[#1a1a1a] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-green-400 focus:border-indigo-500 outline-none h-24 resize-none"
-                                            />
-                                        </div>
+                                        <textarea
+                                            value={externalAiJson}
+                                            onChange={e => setExternalAiJson(e.target.value)}
+                                            placeholder="2. Paste the JSON result here..."
+                                            className="w-full bg-[#1a1a1a] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-green-400 focus:border-indigo-500 outline-none h-24 resize-none"
+                                        />
 
                                         <button
                                             onClick={handleImportJson}
                                             disabled={!externalAiJson.trim()}
                                             className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-sm font-bold"
                                         >
-                                            📥 3. Import & Preview Short
+                                            3. Import & Preview
                                         </button>
                                     </div>
                                 </div>
                             </div>
                         ) : (
-                            <div className="flex-1 overflow-auto p-6">
-                                {/* Hook Title Editor */}
-                                <div className="mb-4 bg-[#222] rounded-lg p-3 border border-[#333]">
-                                    <label className="block text-xs text-gray-500 mb-1">🎯 HOOK TITLE (appears on first clip)</label>
-                                    <input
-                                        type="text"
-                                        value={generatedShort.hookTitle || ''}
-                                        onChange={(e) => setGeneratedShort({ ...generatedShort, hookTitle: e.target.value })}
-                                        placeholder="Enter hook title..."
-                                        className="w-full bg-[#1a1a1a] border border-[#444] rounded px-3 py-2 text-white font-bold focus:border-purple-500 outline-none"
-                                        maxLength={50}
-                                    />
-                                    <p className="text-xs text-gray-600 mt-1">Max 5 words recommended for impact</p>
-                                </div>
-
-                                {/* Preview Player Area */}
-                                <div className="bg-black rounded-xl mb-4 relative overflow-hidden" style={{ aspectRatio: '9/16', maxHeight: '280px', margin: '0 auto', width: 'fit-content' }}>
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-b from-purple-900/30 to-black/80">
-                                        {/* Hook Title Display - appears at top during preview */}
-                                        {(previewClipIndex === 0 || !isPreviewPlaying) && generatedShort.hookTitle && (
-                                            <div
-                                                className="absolute top-12 left-4 right-4 transition-opacity duration-700"
-                                                style={{ opacity: isPreviewPlaying ? 1 : 0.7 }}
+                            /* ===== Multi-Short Preview Grid ===== */
+                            <div className="flex-1 overflow-auto p-4">
+                                <div className="flex items-center justify-between mb-4">
+                                    <div>
+                                        <h4 className="text-sm font-bold text-white">{generatedShortsPreview.length} Shorts Generated</h4>
+                                        <p className="text-xs text-gray-500">Select one to export</p>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => { setGeneratedShortsPreview([]); setGeneratedShort(null); setSelectedShortIndex(null); }} className="px-3 py-1.5 text-xs border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
+                                        {onExportShort && selectedShortIndex !== null && (
+                                            <button
+                                                onClick={async () => {
+                                                    if (isExporting || selectedShortIndex === null) return;
+                                                    setIsExporting(true);
+                                                    try {
+                                                        await onExportShort(generatedShortsPreview[selectedShortIndex]);
+                                                        setShowShortModal(false);
+                                                    } finally {
+                                                        setIsExporting(false);
+                                                    }
+                                                }}
+                                                disabled={isExporting}
+                                                className="px-4 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded font-medium"
                                             >
-                                                <div className="bg-gradient-to-r from-purple-600/90 to-pink-600/90 rounded-lg p-3 text-center shadow-xl border border-purple-400/30">
-                                                    <p className="text-white text-lg font-bold tracking-wide drop-shadow-lg">{generatedShort.hookTitle}</p>
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* Caption display */}
-                                        {isPreviewPlaying && previewCaption ? (
-                                            <div className="absolute bottom-8 left-4 right-4">
-                                                <div className="bg-black/80 rounded-lg p-4 text-center">
-                                                    <p className="text-white text-lg font-medium leading-relaxed">{(() => {
-                                                        if (!previewKeywords || previewKeywords.length === 0) return previewCaption;
-                                                        const words = previewCaption.split(/(\s+)/);
-                                                        let wIdx = 0;
-                                                        return words.map((tok: string, ti: number) => {
-                                                            if (/^\s+$/.test(tok)) return <span key={ti}>{tok}</span>;
-                                                            const kw = previewKeywords.find((k: any) => k.wordIndex === wIdx && k.enabled);
-                                                            const el = kw ? <span key={ti} className="font-bold" style={{ color: kw.color || '#FFD700' }}>{tok}</span> : <span key={ti}>{tok}</span>;
-                                                            wIdx++;
-                                                            return el;
-                                                        });
-                                                    })()}</p>
-                                                </div>
-                                            </div>
-                                        ) : (
-                                            <div className="text-center px-8">
-                                                <div className="text-6xl mb-4">🎬</div>
-                                                <h4 className="text-xl font-bold mb-2">{generatedShort.title}</h4>
-                                                <p className="text-gray-400 text-sm">{formatDuration(generatedShort.totalDuration)} • {generatedShort.segments.length} clips</p>
-                                            </div>
-                                        )}
-
-                                        {/* Progress indicator */}
-                                        {isPreviewPlaying && (
-                                            <div className="absolute top-4 left-4 right-4">
-                                                <div className="flex gap-1">
-                                                    {generatedShort.segments.map((_, i) => (
-                                                        <div key={i} className={`flex-1 h-1 rounded-full ${i === previewClipIndex ? 'bg-purple-500' : i < previewClipIndex ? 'bg-purple-300' : 'bg-gray-600'}`} />
-                                                    ))}
-                                                </div>
-                                                <p className="text-xs text-gray-400 mt-2 text-center">Clip {previewClipIndex + 1} of {generatedShort.segments.length}</p>
-                                            </div>
+                                                {isExporting ? 'Exporting...' : 'Export Selected'}
+                                            </button>
                                         )}
                                     </div>
-
-                                    {/* Play/Stop overlay button */}
-                                    <button
-                                        onClick={() => isPreviewPlaying ? stopPreview() : playPreview(generatedShort)}
-                                        className="absolute inset-0 flex items-center justify-center hover:bg-black/20 transition-colors group"
-                                    >
-                                        {!isPreviewPlaying && (
-                                            <div className="w-20 h-20 rounded-full bg-purple-600 group-hover:bg-purple-500 flex items-center justify-center shadow-xl">
-                                                <span className="text-4xl ml-1">▶</span>
-                                            </div>
-                                        )}
-                                    </button>
                                 </div>
 
-                                {/* TTS Preview Controls + Filler Removal */}
-                                <div className="flex justify-center gap-4 mb-4">
-                                    <button
-                                        onClick={() => isPreviewPlaying ? stopPreview() : playPreview(generatedShort)}
-                                        className={`px-6 py-2 rounded-lg font-medium flex items-center gap-2 ${isPreviewPlaying ? 'bg-red-600 hover:bg-red-500' : 'bg-purple-600 hover:bg-purple-500'}`}
-                                    >
-                                        {isPreviewPlaying ? '⏹ Stop Preview' : '🔊 Play with TTS'}
-                                    </button>
-                                    <button
-                                        onClick={handleRemoveFillers}
-                                        disabled={isDetectingFillers}
-                                        className="px-4 py-2 rounded-lg font-medium bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-sm"
-                                        title="AI-detect filler words in transcript and mark them for removal (text-only, low cost)"
-                                    >
-                                        {isDetectingFillers ? fillerStatus || 'Detecting...' : 'Clean Fillers'}
-                                    </button>
-                                </div>
-                                {fillerStatus && !isDetectingFillers && (
-                                    <div className="text-center text-xs text-amber-400 mb-2">{fillerStatus}</div>
-                                )}
-
-                                {/* Clips breakdown */}
-                                <div className="mb-4">
-                                    <div className="text-xs text-gray-500 mb-1">📋 CLIPS BREAKDOWN</div>
-                                    <div className="text-[9px] text-gray-600 mb-2">Click word: toggle keyword | Right-click: strike out (removed on export)</div>
-                                    <div className="space-y-2 max-h-48 overflow-auto">
-                                        {generatedShort.segments.map((seg, i) => (
-                                            <div key={i} className={`rounded p-3 border ${isPreviewPlaying && i === previewClipIndex ? 'bg-purple-600/20 border-purple-500' : 'bg-[#222] border-transparent'}`}>
-                                                <div className="flex items-center gap-2 mb-1">
-                                                    <span className={`text-xs px-2 py-0.5 rounded ${i === 0 ? 'bg-green-600' : i === generatedShort.segments.length - 1 ? 'bg-blue-600' : 'bg-indigo-600'}`}>
-                                                        {i === 0 ? '🪝 Hook' : i === generatedShort.segments.length - 1 ? '✨ End' : `Clip ${i + 1}`}
-                                                    </span>
-                                                    <span className="text-xs text-gray-500">{formatTime(seg.startTime)} - {formatTime(seg.endTime)}</span>
+                                {/* Grid of short previews */}
+                                <div className="grid grid-cols-2 gap-3">
+                                    {generatedShortsPreview.map((short, idx) => (
+                                        <div
+                                            key={short.id}
+                                            onClick={() => setSelectedShortIndex(selectedShortIndex === idx ? null : idx)}
+                                            className={`rounded-lg border cursor-pointer transition-all ${selectedShortIndex === idx ? 'border-blue-500 bg-blue-500/10 ring-1 ring-blue-500/50' : 'border-[#333] bg-[#1a1a1a] hover:border-[#555]'}`}
+                                        >
+                                            {/* Title */}
+                                            <div className="px-3 py-2 border-b border-[#333]">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-[10px] text-gray-500 font-mono">#{idx + 1}</span>
+                                                    <h5 className="text-xs font-bold text-white truncate flex-1">{short.title}</h5>
                                                 </div>
-                                                <p className="text-sm text-gray-300">{renderInteractiveText(seg.text, i, seg.keywords, seg.removedWordIndices)}</p>
+                                                <p className="text-[10px] text-gray-500 mt-0.5">{formatDuration(short.totalDuration)} &middot; {short.segments.length} clips</p>
                                             </div>
-                                        ))}
-                                    </div>
-                                </div>
 
-                                {/* B-Roll Suggestions */}
-                                {generatedShort.bRollSuggestions && generatedShort.bRollSuggestions.length > 0 && (
-                                    <div className="mb-4 p-3 bg-[#1a1a2e] rounded-lg border border-indigo-500/30">
-                                        <div className="text-xs text-indigo-400 font-bold mb-2">🎬 B-ROLL SUGGESTIONS ({generatedShort.bRollSuggestions.length})</div>
-                                        <div className="space-y-3">
-                                            {generatedShort.bRollSuggestions.map((broll, bIdx) => {
-                                                const selectedType = broll.selectedType ?? 'video';
-                                                const hasVideos = broll.pexelsResults && broll.pexelsResults.length > 0;
-                                                const hasPhotos = broll.pexelsPhotos && broll.pexelsPhotos.length > 0;
-                                                return (
-                                                <div key={broll.id} className={`p-2 rounded border ${broll.approved ? 'border-green-500/40 bg-green-900/10' : 'border-red-500/30 bg-red-900/10 opacity-60'}`}>
-                                                    <div className="flex items-center justify-between mb-1">
-                                                        <span className="text-xs text-gray-400">
-                                                            Clip {broll.clipIndex + 1} @ +{broll.offsetInClip.toFixed(1)}s — {broll.duration}s
-                                                        </span>
-                                                        <button
-                                                            onClick={() => {
-                                                                const updated = { ...generatedShort };
-                                                                updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
-                                                                    i === bIdx ? { ...s, approved: !s.approved } : s
-                                                                );
-                                                                setGeneratedShort(updated);
-                                                            }}
-                                                            className={`text-xs px-2 py-0.5 rounded ${broll.approved ? 'bg-green-600/30 text-green-300 hover:bg-red-600/30 hover:text-red-300' : 'bg-red-600/30 text-red-300 hover:bg-green-600/30 hover:text-green-300'}`}
-                                                        >
-                                                            {broll.approved ? '✓ Approved' : '✗ Rejected'}
-                                                        </button>
-                                                    </div>
-                                                    <div className="text-xs text-gray-300 mb-1">🔍 "{broll.searchQuery}"</div>
-                                                    <div className="text-[10px] text-gray-500 mb-2">{broll.rationale}</div>
+                                            {/* Video thumbnail player */}
+                                            <ShortThumbnailPlayer
+                                                short={short}
+                                                videoId={short.videoId}
+                                            />
 
-                                                    {/* Video / Photo tab switcher */}
-                                                    {(hasVideos || hasPhotos) && (
-                                                        <div className="flex gap-1 mb-1.5">
-                                                            {hasVideos && (
-                                                                <button
-                                                                    onClick={() => {
-                                                                        const updated = { ...generatedShort };
-                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
-                                                                            i === bIdx ? { ...s, selectedType: 'video' } : s
-                                                                        );
-                                                                        setGeneratedShort(updated);
-                                                                    }}
-                                                                    className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 ${selectedType === 'video' ? 'bg-indigo-600 text-white' : 'bg-[#222] text-gray-400 hover:text-white'}`}
-                                                                >
-                                                                    🎬 Video
-                                                                </button>
-                                                            )}
-                                                            {hasPhotos && (
-                                                                <button
-                                                                    onClick={() => {
-                                                                        const updated = { ...generatedShort };
-                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
-                                                                            i === bIdx ? { ...s, selectedType: 'photo' } : s
-                                                                        );
-                                                                        setGeneratedShort(updated);
-                                                                    }}
-                                                                    className={`text-[9px] px-1.5 py-0.5 rounded flex items-center gap-0.5 ${selectedType === 'photo' ? 'bg-indigo-600 text-white' : 'bg-[#222] text-gray-400 hover:text-white'}`}
-                                                                >
-                                                                    🖼 Photo
-                                                                </button>
-                                                            )}
-                                                        </div>
-                                                    )}
+                                            {/* Clips summary */}
+                                            <div className="px-3 py-1.5">
+                                                <p className="text-[10px] text-gray-400 line-clamp-2">{short.hook}</p>
+                                            </div>
 
-                                                    {/* Video thumbnails */}
-                                                    {selectedType === 'video' && hasVideos && (
-                                                        <div className="flex gap-1.5 overflow-x-auto pb-1">
-                                                            {broll.pexelsResults!.map((vid, vIdx) => (
-                                                                <div
-                                                                    key={vid.id}
-                                                                    onClick={() => {
-                                                                        const updated = { ...generatedShort };
-                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
-                                                                            i === bIdx ? { ...s, selectedVideoIndex: vIdx, selectedType: 'video' } : s
-                                                                        );
-                                                                        setGeneratedShort(updated);
-                                                                    }}
-                                                                    className={`flex-shrink-0 cursor-pointer rounded overflow-hidden border-2 transition-all ${selectedType === 'video' && (broll.selectedVideoIndex ?? 0) === vIdx ? 'border-indigo-400 shadow-lg shadow-indigo-500/20' : 'border-transparent opacity-60 hover:opacity-90'}`}
-                                                                >
-                                                                    <img src={vid.thumbnailUrl} alt={`Video ${vIdx + 1}`} className="w-20 h-14 object-cover" />
-                                                                    <div className="text-[9px] text-center text-gray-400 py-0.5">{vid.duration}s</div>
+                                            {/* Collapsible B-Roll */}
+                                            {short.bRollSuggestions && short.bRollSuggestions.length > 0 && (
+                                                <div className="px-3 pb-1">
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); setExpandedBRoll(prev => ({ ...prev, [idx]: !prev[idx] })); }}
+                                                        className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-indigo-300 w-full"
+                                                    >
+                                                        <span className={`transition-transform ${expandedBRoll[idx] ? 'rotate-90' : ''}`}>&#9656;</span>
+                                                        B-Roll ({short.bRollSuggestions.length})
+                                                    </button>
+                                                    {expandedBRoll[idx] && (
+                                                        <div className="mt-1 space-y-1 max-h-32 overflow-auto">
+                                                            {short.bRollSuggestions.map((broll) => (
+                                                                <div key={broll.id} className="text-[9px] text-gray-500 pl-3 border-l border-indigo-500/30">
+                                                                    <span className="text-gray-400">{broll.searchQuery}</span> — {broll.rationale}
                                                                 </div>
                                                             ))}
                                                         </div>
                                                     )}
+                                                </div>
+                                            )}
 
-                                                    {/* Photo thumbnails */}
-                                                    {selectedType === 'photo' && hasPhotos && (
-                                                        <div className="flex gap-1.5 overflow-x-auto pb-1">
-                                                            {broll.pexelsPhotos!.map((photo, pIdx) => (
-                                                                <div
-                                                                    key={photo.id}
-                                                                    onClick={() => {
-                                                                        const updated = { ...generatedShort };
-                                                                        updated.bRollSuggestions = updated.bRollSuggestions!.map((s, i) =>
-                                                                            i === bIdx ? { ...s, selectedPhotoIndex: pIdx, selectedType: 'photo' } : s
-                                                                        );
-                                                                        setGeneratedShort(updated);
-                                                                    }}
-                                                                    className={`flex-shrink-0 cursor-pointer rounded overflow-hidden border-2 transition-all ${selectedType === 'photo' && (broll.selectedPhotoIndex ?? 0) === pIdx ? 'border-indigo-400 shadow-lg shadow-indigo-500/20' : 'border-transparent opacity-60 hover:opacity-90'}`}
-                                                                >
-                                                                    <img src={photo.thumbnailUrl} alt={`Photo ${pIdx + 1}`} className="w-20 h-14 object-cover" />
-                                                                    <div className="text-[9px] text-center text-gray-400 py-0.5">📷</div>
-                                                                </div>
-                                                            ))}
+                                            {/* Collapsible Keywords */}
+                                            {short.segments.some(s => s.keywords && s.keywords.length > 0) && (
+                                                <div className="px-3 pb-2">
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); setExpandedKeywords(prev => ({ ...prev, [idx]: !prev[idx] })); }}
+                                                        className="flex items-center gap-1 text-[10px] text-yellow-400 hover:text-yellow-300 w-full"
+                                                    >
+                                                        <span className={`transition-transform ${expandedKeywords[idx] ? 'rotate-90' : ''}`}>&#9656;</span>
+                                                        Keywords ({short.segments.reduce((n, s) => n + (s.keywords?.length || 0), 0)})
+                                                    </button>
+                                                    {expandedKeywords[idx] && (
+                                                        <div className="mt-1 flex flex-wrap gap-1">
+                                                            {short.segments.flatMap(seg =>
+                                                                (seg.keywords || []).map((kw, ki) => (
+                                                                    <span key={ki} className="text-[9px] px-1.5 py-0.5 rounded bg-yellow-600/20 text-yellow-300 border border-yellow-500/30">
+                                                                        {kw.word}
+                                                                    </span>
+                                                                ))
+                                                            )}
                                                         </div>
                                                     )}
-
-                                                    {!hasVideos && !hasPhotos && (
-                                                        <div className="text-[10px] text-gray-500 italic">No stock footage found for this query</div>
-                                                    )}
                                                 </div>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {generatedShort.segments.some(s => s.keywords && s.keywords.length > 0) && (
-                                    <div className="mb-4">
-                                        <div className="text-xs text-gray-500 mb-2">KEYWORD EMPHASIS</div>
-                                        <div className="flex flex-wrap gap-2">
-                                            {generatedShort.segments.flatMap((seg, segIdx) =>
-                                                (seg.keywords || []).map((kw, kwIdx) => (
-                                                    <label key={`${segIdx}-${kwIdx}`}
-                                                        className={`flex items-center gap-1.5 px-2 py-1 rounded border text-xs cursor-pointer ${kw.enabled ? 'bg-yellow-600/20 border-yellow-500/50 text-yellow-300' : 'bg-[#222] border-[#444] text-gray-500 line-through'}`}>
-                                                        <input type="checkbox" checked={kw.enabled}
-                                                            onChange={() => toggleKeyword(segIdx, kwIdx)}
-                                                            className="accent-yellow-500" />
-                                                        {kw.word}
-                                                    </label>
-                                                ))
                                             )}
                                         </div>
-                                    </div>
-                                )}
-
-                                {/* Refinement UI */}
-                                <div className="mb-4 pt-4 border-t border-[#333]">
-                                    <label className="block text-xs text-indigo-400 font-bold mb-2">✨ REFINE THIS RESULT</label>
-                                    <div className="flex gap-2">
-                                        <input
-                                            type="text"
-                                            value={refinementPrompt}
-                                            onChange={e => setRefinementPrompt(e.target.value)}
-                                            placeholder="e.g. 'Make the ending punchier', 'Find a better hook'..."
-                                            className="flex-1 bg-[#222] border border-[#333] rounded px-3 py-2 text-sm focus:border-indigo-500 outline-none"
-                                            onKeyDown={e => e.key === 'Enter' && handleGenerateShort()}
-                                        />
-                                        <button
-                                            onClick={handleGenerateShort}
-                                            disabled={isGeneratingShort}
-                                            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-4 py-2 rounded text-sm font-medium whitespace-nowrap"
-                                        >
-                                            {isGeneratingShort ? '🔄 Refining...' : '✨ Refine'}
-                                        </button>
-                                    </div>
-                                    <p className="text-[10px] text-gray-500 mt-1">AI will research the transcript again to match your instructions.</p>
-                                </div>
-
-                                <div className="flex gap-2">
-                                    <button onClick={() => { stopPreview(); setGeneratedShort(null); setRefinementPrompt(''); }} className="flex-1 py-2 border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
-                                    {onExportShort && (
-                                        <button
-                                            onClick={async () => {
-                                                if (isExporting) return;
-                                                stopPreview();
-                                                setIsExporting(true);
-                                                try {
-                                                    await onExportShort(generatedShort);
-                                                    setShowShortModal(false);
-                                                } finally {
-                                                    setIsExporting(false);
-                                                }
-                                            }}
-                                            disabled={isExporting}
-                                            className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded font-medium"
-                                        >
-                                            {isExporting ? 'Exporting...' : 'Export to Editor'}
-                                        </button>
-                                    )}
+                                    ))}
                                 </div>
                             </div>
                         )}

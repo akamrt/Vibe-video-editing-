@@ -1014,7 +1014,7 @@ app.post('/api/ai/generate-short', async (req, res) => {
 
         const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
 
-Create a ${duration}-second short from this content.
+Create 10 different ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
 
 ${userPromptSection}${refinementSection}${existingShortsSection}
 
@@ -1023,7 +1023,7 @@ ${userPromptSection}${refinementSection}${existingShortsSection}
 TRANSCRIPT (with timestamps):
 ${groupedTranscript.substring(0, 15000)}
 
-EDITING RULES:
+EDITING RULES (apply to EACH of the 10 shorts):
 1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
 2. BUILD (middle) — Context and rising tension. Let the speaker develop the idea. Maintain momentum — no tangents, no repeated points, no filler.
 3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
@@ -1034,19 +1034,16 @@ EDITING RULES:
    When in doubt, shorter and punchier beats longer and complete.
 5. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
 6. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds.
-7. CHRONOLOGICAL — Clips must appear in the order they occur in the source.
-8. TOTAL DURATION — All clips combined ≈ ${duration} seconds.
+7. CHRONOLOGICAL — Clips within each short must appear in the order they occur in the source.
+8. TOTAL DURATION — All clips in each short combined ≈ ${duration} seconds.
 9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
 10. KEYWORDS — For each clip, identify 2-4 words PIVOTAL to the narrative arc.
     These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — Identify 10-20 moments where stock footage or still images would enhance the visual storytelling.
-    Be very generous — suggest B-roll for any concrete noun, action, place, emotion, or concept the speaker references.
-    Aim for at least one suggestion per clip. Cover both action moments (video) and contemplative moments (stills work great).
-    Do NOT suggest B-roll only when the speaker's raw personal emotion or delivery IS the content.
-    For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
+12. B-ROLL SUGGESTIONS — For each short, identify 2-4 moments where stock footage or still images would enhance the visual storytelling.
+    For each suggestion provide: clipIndex (0-based within that short), offsetInClip (seconds into that clip),
     duration (2-5s), searchQuery (concise Pexels search term, e.g. "sunset ocean waves" or "person praying hands"),
     and rationale (one sentence why this helps).
 
@@ -1060,19 +1057,23 @@ GENRE-SPECIFIC STRATEGY:
 - Motivational: universal truths, emotional breakthroughs, call-to-action moments
 - General: emotional peaks, humor, controversy, vulnerability, universal relatability
 
-Return JSON only:
+Return JSON only — an object with a "shorts" array containing exactly 10 shorts:
 {
-  "title": "engaging title, max 60 chars",
-  "hookTitle": "MAX 5 WORDS, dramatic and attention-grabbing",
-  "hook": "the opening hook line that grabs attention",
-  "resolution": "the closing payoff line",
-  "clips": [
-    { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
-  ],
-  "bRollSuggestions": [
-    { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "descriptive stock footage query", "rationale": "why this helps" }
-  ],
-  "totalDuration": number
+  "shorts": [
+    {
+      "title": "engaging title, max 60 chars",
+      "hookTitle": "MAX 5 WORDS, dramatic and attention-grabbing",
+      "hook": "the opening hook line that grabs attention",
+      "resolution": "the closing payoff line",
+      "clips": [
+        { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
+      ],
+      "bRollSuggestions": [
+        { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "descriptive stock footage query", "rationale": "why this helps" }
+      ],
+      "totalDuration": number
+    }
+  ]
 }`;
 
         // Use a stronger model for creative editorial decisions
@@ -1092,10 +1093,9 @@ Return JSON only:
             result = await callGemini(aiPrompt, effectiveModel);
         }
 
-        // Fill in clip text from transcript (AI only returns time ranges)
-        if (result.clips && Array.isArray(result.clips)) {
-            for (const clip of result.clips) {
-                // Step 1: Phrase-based matching (most accurate — uses AI's text selection)
+        // Helper to process clips for a single short
+        function processClips(clips) {
+            for (const clip of clips) {
                 let phraseMatchedStart = false;
                 let phraseMatchedEnd = false;
 
@@ -1114,7 +1114,6 @@ Return JSON only:
                     }
                 }
 
-                // Step 2: Fall back to word-boundary snap if phrase matching didn't work
                 if (!phraseMatchedStart) {
                     clip.startTime = snapClipStartTime(transcriptLines, clip.startTime);
                 }
@@ -1122,17 +1121,12 @@ Return JSON only:
                     clip.endTime = snapClipEndTime(transcriptLines, clip.endTime);
                 }
 
-                // Step 2.5: Safety padding for transcript timestamp imprecision (~100ms).
-                // YouTube word timestamps can lag the actual phoneme onset by 50-100ms.
-                // This ensures we don't lose word edges. Client-side audio snap refines later.
                 clip.startTime = Math.max(0, clip.startTime - 0.08);
                 clip.endTime = clip.endTime + 0.08;
 
-                // Step 3: Trim preamble/trailer filler words
                 clip.startTime = trimPreambleWords(transcriptLines, clip.startTime, clip.endTime);
                 clip.endTime = trimTrailerWords(transcriptLines, clip.startTime, clip.endTime);
 
-                // Fill text from the refined time range
                 clip.text = getTextForTimeRange(transcriptLines, clip.startTime, clip.endTime);
                 if (clip.keywords && Array.isArray(clip.keywords) && clip.text) {
                     const words = clip.text.split(/\s+/);
@@ -1155,8 +1149,28 @@ Return JSON only:
                     clip.keywords = [];
                 }
             }
-            // Recalculate totalDuration from actual clips
-            result.totalDuration = result.clips.reduce((sum, c) => sum + (c.endTime - c.startTime), 0);
+            return clips.reduce((sum, c) => sum + (c.endTime - c.startTime), 0);
+        }
+
+        // Handle both multi-short (shorts array) and legacy single-short (clips array) responses
+        if (result.shorts && Array.isArray(result.shorts)) {
+            for (const short of result.shorts) {
+                if (short.clips && Array.isArray(short.clips)) {
+                    short.totalDuration = processClips(short.clips);
+                }
+            }
+        } else if (result.clips && Array.isArray(result.clips)) {
+            // Legacy single-short response — wrap into shorts array
+            result.totalDuration = processClips(result.clips);
+            result.shorts = [{
+                title: result.title,
+                hookTitle: result.hookTitle,
+                hook: result.hook,
+                resolution: result.resolution,
+                clips: result.clips,
+                bRollSuggestions: result.bRollSuggestions,
+                totalDuration: result.totalDuration
+            }];
         }
 
         res.json(result);
@@ -1201,7 +1215,7 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
 
         const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
 
-Create a ${duration}-second short from this content.
+Create 10 different ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
 
 ${userPromptSection}${refinementSection}${existingShortsSection}
 
@@ -1210,7 +1224,7 @@ ${userPromptSection}${refinementSection}${existingShortsSection}
 TRANSCRIPT (with precise timestamps):
 ${rawTranscript.substring(0, 50000)}
 
-EDITING RULES:
+EDITING RULES (apply to EACH of the 10 shorts):
 1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
 2. BUILD (middle) — Context and rising tension. Let the speaker develop the idea. Maintain momentum — no tangents, no repeated points, no filler.
 3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
@@ -1221,19 +1235,16 @@ EDITING RULES:
    When in doubt, shorter and punchier beats longer and complete.
 5. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
 6. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds.
-7. CHRONOLOGICAL — Clips must appear in the order they occur in the source.
-8. TOTAL DURATION — All clips combined ≈ ${duration} seconds.
+7. CHRONOLOGICAL — Clips within each short must appear in the order they occur in the source.
+8. TOTAL DURATION — All clips in each short combined ≈ ${duration} seconds.
 9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
 10. KEYWORDS — For each clip, identify 2-4 words PIVOTAL to the narrative arc.
     These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — Identify 10-20 moments where stock footage or still images would enhance the visual storytelling.
-    Be very generous — suggest B-roll for any concrete noun, action, place, emotion, or concept the speaker references.
-    Aim for at least one suggestion per clip. Cover both action moments (video) and contemplative moments (stills work great).
-    Do NOT suggest B-roll only when the speaker's raw personal emotion or delivery IS the content.
-    For each suggestion provide: clipIndex (0-based), offsetInClip (seconds into that clip),
+12. B-ROLL SUGGESTIONS — For each short, identify 2-4 moments where stock footage or still images would enhance the visual storytelling.
+    For each suggestion provide: clipIndex (0-based within that short), offsetInClip (seconds into that clip),
     duration (2-5s), searchQuery (concise Pexels search term, e.g. "sunset ocean waves" or "person praying hands"),
     and rationale (one sentence why this helps).
 
@@ -1247,7 +1258,7 @@ GENRE-SPECIFIC STRATEGY:
 - Motivational: universal truths, emotional breakthroughs, call-to-action moments
 - General: emotional peaks, humor, controversy, vulnerability, universal relatability
 
-return JSON only:
+return JSON only — an object with a "shorts" array containing exactly 10 shorts:
 {
   "shorts": [
     {
