@@ -51,6 +51,7 @@ export interface GeneratedShort {
     createdAt: Date;
     trendingTopic?: string;
     bRollSuggestions?: BRollSuggestion[];
+    captionMode?: 'sentences' | 'words';
 }
 
 export interface ShortSegment {

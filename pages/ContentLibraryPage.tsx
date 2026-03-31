@@ -425,6 +425,7 @@ export const ContentLibraryPage: React.FC<{
     const [selectedShortIndex, setSelectedShortIndex] = useState<number | null>(null);
     const [expandedBRoll, setExpandedBRoll] = useState<Record<number, boolean>>({});
     const [expandedKeywords, setExpandedKeywords] = useState<Record<number, boolean>>({});
+    const [captionMode, setCaptionMode] = useState<'sentences' | 'words'>('sentences');
     const [refinementPrompt, setRefinementPrompt] = useState('');
     const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
 
@@ -1917,15 +1918,33 @@ export const ContentLibraryPage: React.FC<{
                                         <h4 className="text-sm font-bold text-white">{generatedShortsPreview.length} Shorts Generated</h4>
                                         <p className="text-xs text-gray-500">Select one to export</p>
                                     </div>
-                                    <div className="flex gap-2">
+                                    <div className="flex items-center gap-2">
                                         <button onClick={() => { setGeneratedShortsPreview([]); setGeneratedShort(null); setSelectedShortIndex(null); }} className="px-3 py-1.5 text-xs border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
+                                        {/* Caption mode selector */}
+                                        <div className="flex items-center gap-1 bg-[#222] border border-[#333] rounded overflow-hidden">
+                                            <button
+                                                onClick={() => setCaptionMode('sentences')}
+                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${captionMode === 'sentences' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                                                title="Display captions as groups of words (default)"
+                                            >
+                                                Sentences
+                                            </button>
+                                            <button
+                                                onClick={() => setCaptionMode('words')}
+                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${captionMode === 'words' ? 'bg-indigo-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                                                title="Display one word at a time (TikTok-style)"
+                                            >
+                                                Word by Word
+                                            </button>
+                                        </div>
                                         {onExportShort && selectedShortIndex !== null && (
                                             <button
                                                 onClick={async () => {
                                                     if (isExporting || selectedShortIndex === null) return;
                                                     setIsExporting(true);
                                                     try {
-                                                        await onExportShort(generatedShortsPreview[selectedShortIndex]);
+                                                        const shortToExport = { ...generatedShortsPreview[selectedShortIndex], captionMode };
+                                                        await onExportShort(shortToExport);
                                                         setShowShortModal(false);
                                                     } finally {
                                                         setIsExporting(false);
