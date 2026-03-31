@@ -53,7 +53,16 @@ function useLocalVideoSrc(videoId: string) {
 const ShortDetailPlayer: React.FC<{
     short: GeneratedShort;
     videoId: string;
-}> = ({ short, videoId }) => {
+    omittedClips?: Set<number>;
+    onToggleOmit?: (segIdx: number) => void;
+    clipPadOverrides?: Map<string, { before: number; after: number }>;
+    selectedClipForPad?: { shortId: string; segmentIndex: number } | null;
+    onSelectClipForPad?: (shortId: string, segIdx: number) => void;
+    onSetClipPad?: (shortId: string, segIdx: number, before: number, after: number) => void;
+    assemblyMode?: boolean;
+    clipBasket?: ClipReference[];
+    onToggleBasket?: (segIdx: number) => void;
+}> = ({ short, videoId, omittedClips, onToggleOmit, clipPadOverrides, selectedClipForPad, onSelectClipForPad, onSetClipPad, assemblyMode, clipBasket, onToggleBasket }) => {
     const { src, thumbnailUrl } = useLocalVideoSrc(videoId);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -213,8 +222,73 @@ const ShortDetailPlayer: React.FC<{
             </div>
 
             {currentSeg && (
-                <div className="px-3 pb-2">
+                <div className="px-3 pb-1">
                     <p className="text-[11px] text-gray-400 line-clamp-2">{currentSeg.text}</p>
+                </div>
+            )}
+
+            {/* Clip strip — omit toggles + per-clip pad selection */}
+            {(onToggleOmit || onToggleBasket) && (
+                <div className="px-3 pb-2 pt-1 border-t border-[#222] mt-1">
+                    <div className="flex flex-wrap gap-1">
+                        {short.segments.map((seg, si) => {
+                            const isOmitted = omittedClips?.has(si) ?? false;
+                            const inBasket = clipBasket?.some(c => c.shortId === short.id && c.segmentIndex === si) ?? false;
+                            const padKey = `${short.id}_${si}`;
+                            const override = clipPadOverrides?.get(padKey);
+                            const isSelectedForPad = selectedClipForPad?.shortId === short.id && selectedClipForPad?.segmentIndex === si;
+                            const hasPadOverride = override && (override.before > 0 || override.after > 0);
+
+                            return (
+                                <div key={si} className="flex flex-col gap-0.5">
+                                    <div className="flex gap-0.5">
+                                        {/* Omit/basket toggle */}
+                                        {assemblyMode ? (
+                                            <button
+                                                onClick={() => onToggleBasket?.(si)}
+                                                className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${inBasket ? 'bg-green-600/30 border-green-500/50 text-green-300' : 'bg-[#222] border-[#444] text-gray-400 hover:border-green-500/40 hover:text-green-400'}`}
+                                                title={inBasket ? 'Remove from assembly' : 'Add to assembly'}
+                                            >
+                                                C{si + 1} {inBasket ? '\u2713' : '+'}
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={() => onToggleOmit?.(si)}
+                                                className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300 hover:border-gray-400'}`}
+                                                title={isOmitted ? 'Include this clip' : 'Omit this clip'}
+                                            >
+                                                C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
+                                            </button>
+                                        )}
+                                        {/* Pad selector button */}
+                                        <button
+                                            onClick={() => onSelectClipForPad?.(short.id, isSelectedForPad ? -1 : si)}
+                                            className={`px-1 py-0.5 text-[9px] rounded-r border-t border-r border-b transition-colors ${isSelectedForPad ? 'bg-yellow-600/30 border-yellow-500/50 text-yellow-300' : hasPadOverride ? 'bg-yellow-900/20 border-yellow-700/40 text-yellow-500' : 'bg-[#222] border-[#444] text-gray-500 hover:text-yellow-400 hover:border-yellow-600/40'}`}
+                                            title="Set word padding for this clip"
+                                        >
+                                            {hasPadOverride ? `±${(override!.before || 0) + (override!.after || 0)}` : '±'}
+                                        </button>
+                                    </div>
+                                    {/* Inline pad editor for selected clip */}
+                                    {isSelectedForPad && onSetClipPad && (
+                                        <div className="flex items-center gap-1 bg-yellow-950/40 border border-yellow-700/30 rounded px-1.5 py-1 text-[9px]">
+                                            <span className="text-yellow-500/70">before</span>
+                                            <button onClick={() => onSetClipPad(short.id, si, Math.max(0, (override?.before ?? 0) - 1), override?.after ?? 0)} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                            <span className="w-3 text-center text-yellow-200">{override?.before ?? 0}</span>
+                                            <button onClick={() => onSetClipPad(short.id, si, Math.min(5, (override?.before ?? 0) + 1), override?.after ?? 0)} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
+                                            <span className="text-yellow-500/70 ml-1">after</span>
+                                            <button onClick={() => onSetClipPad(short.id, si, override?.before ?? 0, Math.max(0, (override?.after ?? 0) - 1))} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                            <span className="w-3 text-center text-yellow-200">{override?.after ?? 0}</span>
+                                            <button onClick={() => onSetClipPad(short.id, si, override?.before ?? 0, Math.min(5, (override?.after ?? 0) + 1))} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
+                                            {(override?.before || override?.after) ? (
+                                                <button onClick={() => onSetClipPad(short.id, si, 0, 0)} className="ml-1 text-[8px] text-red-400 hover:text-red-300">clr</button>
+                                            ) : null}
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
                 </div>
             )}
         </div>
@@ -423,6 +497,10 @@ export const ContentLibraryPage: React.FC<{
     const [wordPadBefore, setWordPadBefore] = useState(0);
     const [wordPadAfter, setWordPadAfter] = useState(0);
     const [assemblyMode, setAssemblyMode] = useState(false);
+    // Per-clip padding overrides: key = `${shortId}_${segIdx}`, value = {before, after}
+    const [clipPadOverrides, setClipPadOverrides] = useState<Map<string, { before: number; after: number }>>(new Map());
+    // Selected clip for per-clip padding editor: {shortId, segmentIndex}
+    const [selectedClipForPad, setSelectedClipForPad] = useState<{ shortId: string; segmentIndex: number } | null>(null);
 
     // External AI Input
     const [externalAiJson, setExternalAiJson] = useState('');
@@ -1139,8 +1217,18 @@ export const ContentLibraryPage: React.FC<{
 
     // ==================== Clip Assembly ====================
 
-    const applyWordPadding = async (segments: ShortSegment[], videoId: string, padBefore: number, padAfter: number): Promise<ShortSegment[]> => {
-        if (padBefore === 0 && padAfter === 0) return segments;
+    // perClipPadKeys: parallel array of pad-override map keys (e.g. "shortId_segIdx") for each segment
+    const applyWordPadding = async (
+        segments: ShortSegment[],
+        videoId: string,
+        globalBefore: number,
+        globalAfter: number,
+        perClipPadKeys?: string[]
+    ): Promise<ShortSegment[]> => {
+        // Check if any padding is needed at all
+        const anyPad = globalBefore > 0 || globalAfter > 0 ||
+            (perClipPadKeys?.some(k => { const o = clipPadOverrides.get(k); return o && (o.before > 0 || o.after > 0); }) ?? false);
+        if (!anyPad) return segments;
 
         // Fetch all word timings for this video
         const allTranscriptSegs = await contentDB.getSegmentsByVideoId(videoId);
@@ -1154,11 +1242,17 @@ export const ContentLibraryPage: React.FC<{
                 }
             }
         }
-        if (allWords.length === 0) return segments; // no word timings available
+        if (allWords.length === 0) return segments;
         allWords.sort((a, b) => a.start - b.start);
 
-        return segments.map(clip => {
-            // Find first word at/after clip start, last word at/before clip end
+        return segments.map((clip, idx) => {
+            // Per-clip override takes precedence over global
+            const padKey = perClipPadKeys?.[idx];
+            const override = padKey ? clipPadOverrides.get(padKey) : undefined;
+            const padBefore = override ? override.before : globalBefore;
+            const padAfter = override ? override.after : globalAfter;
+            if (padBefore === 0 && padAfter === 0) return clip;
+
             const firstIdx = allWords.findIndex(w => w.start >= clip.startTime - 0.05);
             let lastIdx = -1;
             for (let i = allWords.length - 1; i >= 0; i--) {
@@ -1172,7 +1266,6 @@ export const ContentLibraryPage: React.FC<{
             const prependWords = allWords.slice(padStartIdx, firstIdx).map(w => w.text).join(' ');
             const appendWords = allWords.slice(lastIdx + 1, padEndIdx + 1).map(w => w.text).join(' ');
             const newText = [prependWords, clip.text, appendWords].filter(Boolean).join(' ');
-
             const prependCount = prependWords ? prependWords.split(/\s+/).length : 0;
 
             return {
@@ -1189,15 +1282,16 @@ export const ContentLibraryPage: React.FC<{
         if (!generatedShortsPreview.length) return null;
 
         let segments: ShortSegment[];
+        let perClipPadKeys: string[];
         let title: string;
         let hook: string;
         let hookTitle: string;
 
         if (assemblyMode) {
             if (clipBasket.length === 0) return null;
-            // Sort by source video time (chronological)
             const sorted = [...clipBasket].sort((a, b) => a.segment.startTime - b.segment.startTime);
             segments = sorted.map(c => ({ ...c.segment }));
+            perClipPadKeys = sorted.map(c => `${c.shortId}_${c.segmentIndex}`);
             title = 'Custom Assembly';
             hook = '';
             hookTitle = 'Custom Assembly';
@@ -1205,16 +1299,17 @@ export const ContentLibraryPage: React.FC<{
             if (selectedShortIndex === null) return null;
             const short = generatedShortsPreview[selectedShortIndex];
             const omitted = omittedClips.get(short.id);
-            segments = short.segments.filter((_, i) => !omitted?.has(i));
-            if (segments.length === 0) return null;
+            const filtered = short.segments.map((seg, i) => ({ seg, i })).filter(({ i }) => !omitted?.has(i));
+            if (filtered.length === 0) return null;
+            segments = filtered.map(({ seg }) => seg);
+            perClipPadKeys = filtered.map(({ i }) => `${short.id}_${i}`);
             title = short.title;
             hook = short.hook;
             hookTitle = short.hookTitle;
         }
 
-        // Apply word padding
         const videoId = generatedShortsPreview[0].videoId;
-        segments = await applyWordPadding(segments, videoId, wordPadBefore, wordPadAfter);
+        segments = await applyWordPadding(segments, videoId, wordPadBefore, wordPadAfter, perClipPadKeys);
 
         const baseShort = assemblyMode ? generatedShortsPreview[0] : generatedShortsPreview[selectedShortIndex!];
         return {
@@ -2121,6 +2216,40 @@ export const ContentLibraryPage: React.FC<{
                                         <ShortDetailPlayer
                                             short={generatedShortsPreview[selectedShortIndex]}
                                             videoId={generatedShortsPreview[selectedShortIndex].videoId}
+                                            omittedClips={omittedClips.get(generatedShortsPreview[selectedShortIndex].id)}
+                                            onToggleOmit={(si) => {
+                                                const short = generatedShortsPreview[selectedShortIndex];
+                                                setOmittedClips(prev => {
+                                                    const next = new Map(prev);
+                                                    const set = new Set(next.get(short.id) || []);
+                                                    if (set.has(si)) set.delete(si); else set.add(si);
+                                                    next.set(short.id, set);
+                                                    return next;
+                                                });
+                                            }}
+                                            clipPadOverrides={clipPadOverrides}
+                                            selectedClipForPad={selectedClipForPad}
+                                            onSelectClipForPad={(shortId, si) => {
+                                                setSelectedClipForPad(si === -1 ? null : { shortId, segmentIndex: si });
+                                            }}
+                                            onSetClipPad={(shortId, si, before, after) => {
+                                                setClipPadOverrides(prev => {
+                                                    const next = new Map(prev);
+                                                    next.set(`${shortId}_${si}`, { before, after });
+                                                    return next;
+                                                });
+                                            }}
+                                            assemblyMode={assemblyMode}
+                                            clipBasket={clipBasket}
+                                            onToggleBasket={(si) => {
+                                                const short = generatedShortsPreview[selectedShortIndex];
+                                                const inBasket = clipBasket.some(c => c.shortId === short.id && c.segmentIndex === si);
+                                                if (inBasket) {
+                                                    setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
+                                                } else {
+                                                    setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: selectedShortIndex, segmentIndex: si, shortTitle: short.title, segment: short.segments[si] }]);
+                                                }
+                                            }}
                                         />
                                     </div>
                                 )}
@@ -2153,63 +2282,89 @@ export const ContentLibraryPage: React.FC<{
                                                 <p className="text-[10px] text-gray-400 line-clamp-2">{short.hook}</p>
                                             </div>
 
-                                            {/* Clip strip — toggle omit (single) or add to basket (assembly) */}
-                                            <div className="px-3 pb-1.5">
+                                            {/* Clip strip — toggle omit / basket + per-clip pad */}
+                                            <div className="px-3 pb-1.5" onClick={e => e.stopPropagation()}>
                                                 <div className="flex flex-wrap gap-1">
                                                     {short.segments.map((seg, si) => {
                                                         const isOmitted = omittedClips.get(short.id)?.has(si) ?? false;
                                                         const inBasket = clipBasket.some(c => c.shortId === short.id && c.segmentIndex === si);
+                                                        const padKey = `${short.id}_${si}`;
+                                                        const override = clipPadOverrides.get(padKey);
+                                                        const isSelectedForPad = selectedClipForPad?.shortId === short.id && selectedClipForPad?.segmentIndex === si;
+                                                        const hasPadOverride = override && (override.before > 0 || override.after > 0);
 
-                                                        if (assemblyMode) {
-                                                            return (
-                                                                <button
-                                                                    key={si}
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        if (inBasket) {
-                                                                            setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
-                                                                        } else {
-                                                                            setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }]);
-                                                                        }
-                                                                    }}
-                                                                    className={`px-1.5 py-0.5 text-[9px] rounded border transition-colors ${inBasket ? 'bg-green-600/30 border-green-500/50 text-green-300' : 'bg-[#222] border-[#444] text-gray-400 hover:border-green-500/40 hover:text-green-400'}`}
-                                                                    title={inBasket ? 'Remove from assembly' : 'Add to assembly'}
-                                                                >
-                                                                    {inBasket ? `C${si + 1} \u2713` : `C${si + 1} +`}
-                                                                </button>
-                                                            );
-                                                        } else {
-                                                            return (
-                                                                <button
-                                                                    key={si}
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        setOmittedClips(prev => {
-                                                                            const next = new Map(prev);
-                                                                            const set = new Set(next.get(short.id) || []);
-                                                                            if (set.has(si)) set.delete(si); else set.add(si);
-                                                                            next.set(short.id, set);
-                                                                            return next;
-                                                                        });
-                                                                    }}
-                                                                    className={`px-1.5 py-0.5 text-[9px] rounded border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300'}`}
-                                                                    title={isOmitted ? 'Include this clip' : 'Omit this clip'}
-                                                                >
-                                                                    C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
-                                                                </button>
-                                                            );
-                                                        }
+                                                        return (
+                                                            <div key={si} className="flex flex-col gap-0.5">
+                                                                <div className="flex gap-0">
+                                                                    {/* Omit / basket toggle */}
+                                                                    {assemblyMode ? (
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                if (inBasket) {
+                                                                                    setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
+                                                                                } else {
+                                                                                    setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }]);
+                                                                                }
+                                                                            }}
+                                                                            className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${inBasket ? 'bg-green-600/30 border-green-500/50 text-green-300' : 'bg-[#222] border-[#444] text-gray-400 hover:border-green-500/40 hover:text-green-400'}`}
+                                                                            title={inBasket ? 'Remove from assembly' : 'Add to assembly'}
+                                                                        >
+                                                                            C{si + 1} {inBasket ? '\u2713' : '+'}
+                                                                        </button>
+                                                                    ) : (
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                setOmittedClips(prev => {
+                                                                                    const next = new Map(prev);
+                                                                                    const set = new Set(next.get(short.id) || []);
+                                                                                    if (set.has(si)) set.delete(si); else set.add(si);
+                                                                                    next.set(short.id, set);
+                                                                                    return next;
+                                                                                });
+                                                                            }}
+                                                                            className={`px-1.5 py-0.5 text-[9px] rounded-l border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300 hover:border-gray-400'}`}
+                                                                            title={isOmitted ? 'Include this clip' : 'Omit this clip'}
+                                                                        >
+                                                                            C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
+                                                                        </button>
+                                                                    )}
+                                                                    {/* Per-clip pad selector */}
+                                                                    <button
+                                                                        onClick={() => setSelectedClipForPad(isSelectedForPad ? null : { shortId: short.id, segmentIndex: si })}
+                                                                        className={`px-1 py-0.5 text-[9px] rounded-r border-t border-r border-b transition-colors ${isSelectedForPad ? 'bg-yellow-600/30 border-yellow-500/50 text-yellow-300' : hasPadOverride ? 'bg-yellow-900/20 border-yellow-700/40 text-yellow-500' : 'bg-[#222] border-[#444] text-gray-500 hover:text-yellow-400 hover:border-yellow-600/40'}`}
+                                                                        title="Set word padding for this clip"
+                                                                    >
+                                                                        {hasPadOverride ? `±${(override!.before || 0) + (override!.after || 0)}` : '±'}
+                                                                    </button>
+                                                                </div>
+                                                                {/* Inline pad editor */}
+                                                                {isSelectedForPad && (
+                                                                    <div className="flex items-center gap-1 bg-yellow-950/40 border border-yellow-700/30 rounded px-1.5 py-1 text-[9px]">
+                                                                        <span className="text-yellow-500/70">bef</span>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: Math.max(0, (override?.before ?? 0) - 1), after: override?.after ?? 0 }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                                                        <span className="w-3 text-center text-yellow-200">{override?.before ?? 0}</span>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: Math.min(5, (override?.before ?? 0) + 1), after: override?.after ?? 0 }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
+                                                                        <span className="text-yellow-500/70 ml-1">aft</span>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: override?.before ?? 0, after: Math.max(0, (override?.after ?? 0) - 1) }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                                                        <span className="w-3 text-center text-yellow-200">{override?.after ?? 0}</span>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: override?.before ?? 0, after: Math.min(5, (override?.after ?? 0) + 1) }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
+                                                                        {(override?.before || override?.after) ? (
+                                                                            <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: 0, after: 0 }); return n; })} className="ml-1 text-[8px] text-red-400 hover:text-red-300">clr</button>
+                                                                        ) : null}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
                                                     })}
                                                     {assemblyMode && (
                                                         <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
+                                                            onClick={() => {
                                                                 const newClips = short.segments
                                                                     .map((seg, si) => ({ shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }))
                                                                     .filter(c => !clipBasket.some(b => b.shortId === c.shortId && b.segmentIndex === c.segmentIndex));
                                                                 if (newClips.length > 0) setClipBasket(prev => [...prev, ...newClips]);
                                                             }}
-                                                            className="px-1.5 py-0.5 text-[9px] rounded border border-dashed border-[#555] text-gray-500 hover:text-green-400 hover:border-green-500/40 transition-colors"
+                                                            className="px-1.5 py-0.5 text-[9px] rounded border border-dashed border-[#555] text-gray-500 hover:text-green-400 hover:border-green-500/40 transition-colors self-start"
                                                             title="Add all clips to assembly"
                                                         >
                                                             All +
