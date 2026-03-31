@@ -1014,7 +1014,7 @@ app.post('/api/ai/generate-short', async (req, res) => {
 
         const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
 
-Create 10 different ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
+Create 10 different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
 
 ${userPromptSection}${refinementSection}${existingShortsSection}
 
@@ -1025,15 +1025,15 @@ ${groupedTranscript.substring(0, 15000)}
 
 EDITING RULES (apply to EACH of the 10 shorts):
 1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
-2. BUILD (middle) — Context and rising tension. Let the speaker develop the idea. Maintain momentum — no tangents, no repeated points, no filler.
+2. BUILD & CONDENSE (middle) — Connect the strongest thoughts. AGGRESSIVELY cut dead air, tangents, filler, and restatements. Stitch together the speaker's best points to create a dense, fast-paced narrative. If they take 20 seconds to make a point that can be summarised in their own two 4-second sentences, jump-cut those two sentences together.
 3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
 4. PRECISION TRIMMING — Start each clip at the exact moment compelling content begins. End at the exact peak. Common traps to avoid:
    - Including warm-up sentences before the hook
    - Trailing past the punchline into softening or restating
    - Including "and another thing..." transitions
    When in doubt, shorter and punchier beats longer and complete.
-5. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
-6. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds.
+5. EMBRACE JUMP CUTS — To pack maximum value into ${duration} seconds, use 3 to 6 shorter clips stitched together. Do not rely on one long continuous block of speech. Jump cuts are highly engaging in short-form content; use them to skip the boring parts and connect the gold.
+6. MINIMUM CLIP LENGTH — Each individual clip can be as short as 3 seconds, as long as it contains a complete, punchy thought or phrase.
 7. CHRONOLOGICAL — Clips within each short must appear in the order they occur in the source.
 8. TOTAL DURATION — All clips in each short combined ≈ ${duration} seconds.
 9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
@@ -1042,7 +1042,9 @@ EDITING RULES (apply to EACH of the 10 shorts):
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — For each short, identify 2-4 moments where stock footage or still images would enhance the visual storytelling.
+12. B-ROLL SUGGESTIONS — Identify moments where stock footage or still images would enhance the visual storytelling and help mask jump cuts.
+    Be generous — suggest B-roll for any concrete noun, action, place, emotion, or concept the speaker references. Aim for at least one suggestion per clip.
+    Do NOT suggest B-roll only when the speaker's raw personal emotion or delivery IS the content.
     For each suggestion provide: clipIndex (0-based within that short), offsetInClip (seconds into that clip),
     duration (2-5s), searchQuery (concise Pexels search term, e.g. "sunset ocean waves" or "person praying hands"),
     and rationale (one sentence why this helps).
@@ -1074,7 +1076,13 @@ Return JSON only — an object with a "shorts" array containing exactly 10 short
       "totalDuration": number
     }
   ]
-}`;
+}
+
+CRITICAL JSON RULES:
+1. Return ONLY the raw JSON object. Do not wrap it in \`\`\`json markdown blocks.
+2. Ensure ALL double quotes inside string values are properly escaped (e.g., \\"word\\").
+3. Do not include any trailing commas.
+4. Start immediately with { and end with }`;
 
         // Use a stronger model for creative editorial decisions
         const effectiveModel = model || GEMINI_MODEL;
@@ -1215,7 +1223,7 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
 
         const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
 
-Create 10 different ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
+Create 10 different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
 
 ${userPromptSection}${refinementSection}${existingShortsSection}
 
@@ -1226,15 +1234,15 @@ ${rawTranscript.substring(0, 50000)}
 
 EDITING RULES (apply to EACH of the 10 shorts):
 1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
-2. BUILD (middle) — Context and rising tension. Let the speaker develop the idea. Maintain momentum — no tangents, no repeated points, no filler.
+2. BUILD & CONDENSE (middle) — Connect the strongest thoughts. AGGRESSIVELY cut dead air, tangents, filler, and restatements. Stitch together the speaker's best points to create a dense, fast-paced narrative. If they take 20 seconds to make a point that can be summarised in their own two 4-second sentences, jump-cut those two sentences together.
 3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
 4. PRECISION TRIMMING — Start each clip at the exact moment compelling content begins. End at the exact peak. Common traps to avoid:
    - Including warm-up sentences before the hook
    - Trailing past the punchline into softening or restating
    - Including "and another thing..." transitions
    When in doubt, shorter and punchier beats longer and complete.
-5. PREFER CONTINUOUS SECTIONS — Use 2-4 long clips (15-30s each) rather than many tiny ones. Continuous speech is more watchable than jump cuts.
-6. MINIMUM CLIP LENGTH — Each clip must be at least 10 seconds.
+5. EMBRACE JUMP CUTS — To pack maximum value into ${duration} seconds, use 3 to 6 shorter clips stitched together. Do not rely on one long continuous block of speech. Jump cuts are highly engaging in short-form content; use them to skip the boring parts and connect the gold.
+6. MINIMUM CLIP LENGTH — Each individual clip can be as short as 3 seconds, as long as it contains a complete, punchy thought or phrase.
 7. CHRONOLOGICAL — Clips within each short must appear in the order they occur in the source.
 8. TOTAL DURATION — All clips in each short combined ≈ ${duration} seconds.
 9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
@@ -1243,7 +1251,9 @@ EDITING RULES (apply to EACH of the 10 shorts):
     NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
     Pick words the viewer needs to FEEL. Return in lowercase.
 11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — For each short, identify 2-4 moments where stock footage or still images would enhance the visual storytelling.
+12. B-ROLL SUGGESTIONS — Identify moments where stock footage or still images would enhance the visual storytelling and help mask jump cuts.
+    Be generous — suggest B-roll for any concrete noun, action, place, emotion, or concept the speaker references. Aim for at least one suggestion per clip.
+    Do NOT suggest B-roll only when the speaker's raw personal emotion or delivery IS the content.
     For each suggestion provide: clipIndex (0-based within that short), offsetInClip (seconds into that clip),
     duration (2-5s), searchQuery (concise Pexels search term, e.g. "sunset ocean waves" or "person praying hands"),
     and rationale (one sentence why this helps).
