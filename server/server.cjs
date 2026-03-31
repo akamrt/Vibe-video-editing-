@@ -1565,7 +1565,7 @@ app.get('/api/local-cache', (req, res) => {
     res.json(cache);
 });
 
-// Stream locally cached video
+// Stream locally cached video with byte-range support (required for browser video playback/seeking)
 app.get('/api/local-video', (req, res) => {
     const { videoId } = req.query;
     if (!videoId) return res.status(400).json({ error: 'Missing videoId' });
@@ -1574,10 +1574,25 @@ app.get('/api/local-video', (req, res) => {
     if (!videoPath) return res.status(404).json({ error: 'Video not cached locally' });
 
     const stat = fs.statSync(videoPath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
     res.header('Content-Type', 'video/mp4');
-    res.header('Content-Length', stat.size);
-    res.header('X-Video-Id', videoId);
-    fs.createReadStream(videoPath).pipe(res);
+    res.header('Accept-Ranges', 'bytes');
+
+    if (range) {
+        const parts = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+        const chunkSize = end - start + 1;
+        res.status(206);
+        res.header('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+        res.header('Content-Length', chunkSize);
+        fs.createReadStream(videoPath, { start, end }).pipe(res);
+    } else {
+        res.header('Content-Length', fileSize);
+        fs.createReadStream(videoPath).pipe(res);
+    }
 });
 
 // Get locally cached transcript
