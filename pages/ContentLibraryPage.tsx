@@ -174,7 +174,7 @@ const ShortDetailPlayer: React.FC<{
                 )}
                 {hasVideo && (
                     <>
-                        <video ref={videoRef} src={src} className="w-full h-full object-contain" muted playsInline preload="auto" />
+                        <video ref={videoRef} src={src} className="w-full h-full object-contain" playsInline preload="auto" />
                         <button onClick={handlePlayPause} className="absolute inset-0 flex items-center justify-center group">
                             {!isPlaying && (
                                 <div className="w-14 h-14 rounded-full bg-black/60 group-hover:bg-black/80 flex items-center justify-center shadow-xl transition-colors">
@@ -313,7 +313,7 @@ const ShortThumbnailPlayer: React.FC<{
                     ref={videoRef}
                     src={src}
                     className="absolute inset-0 w-full h-full object-cover"
-                    muted playsInline preload="metadata"
+                    playsInline preload="metadata"
                 />
             )}
 
