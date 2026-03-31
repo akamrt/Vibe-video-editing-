@@ -63,6 +63,16 @@ export interface ShortSegment {
     removedWordIndices?: number[];
 }
 
+// ==================== Clip Assembly ====================
+
+export interface ClipReference {
+    shortId: string;         // which GeneratedShort this came from
+    shortIndex: number;      // index in generatedShortsPreview array
+    segmentIndex: number;    // index within that short's segments array
+    shortTitle: string;      // display label
+    segment: ShortSegment;   // the actual segment data
+}
+
 // ==================== B-Roll (Pexels) ====================
 
 export interface BRollSuggestion {

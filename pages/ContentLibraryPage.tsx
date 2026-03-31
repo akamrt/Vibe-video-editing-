@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import HotkeysPanel from '../components/HotkeysPanel';
-import { contentDB, VideoRecord, TranscriptSegment, Category, GeneratedShort, generateId } from '../services/contentDatabase';
+import { contentDB, VideoRecord, TranscriptSegment, Category, GeneratedShort, ShortSegment, ClipReference, generateId } from '../services/contentDatabase';
 import { searchTranscripts, generateShort, SearchResult, buildShortPrompt, importManualShort } from '../services/contentAIService';
 import { CookieUploadButton } from '../components/CookieUploadButton';
 import type { KeywordEmphasis, TrendItem, TrendAnalysis, TrendState } from '../types';
@@ -416,6 +416,13 @@ export const ContentLibraryPage: React.FC<{
     const [captionMode, setCaptionMode] = useState<'sentences' | 'words'>('sentences');
     const [refinementPrompt, setRefinementPrompt] = useState('');
     const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
+
+    // Clip Assembly Workbench
+    const [omittedClips, setOmittedClips] = useState<Map<string, Set<number>>>(new Map());
+    const [clipBasket, setClipBasket] = useState<ClipReference[]>([]);
+    const [wordPadBefore, setWordPadBefore] = useState(0);
+    const [wordPadAfter, setWordPadAfter] = useState(0);
+    const [assemblyMode, setAssemblyMode] = useState(false);
 
     // External AI Input
     const [externalAiJson, setExternalAiJson] = useState('');
@@ -1128,6 +1135,98 @@ export const ContentLibraryPage: React.FC<{
         const m = Math.floor(seconds / 60);
         const s = Math.floor(seconds % 60);
         return `${m}:${s.toString().padStart(2, '0')}`;
+    };
+
+    // ==================== Clip Assembly ====================
+
+    const applyWordPadding = async (segments: ShortSegment[], videoId: string, padBefore: number, padAfter: number): Promise<ShortSegment[]> => {
+        if (padBefore === 0 && padAfter === 0) return segments;
+
+        // Fetch all word timings for this video
+        const allTranscriptSegs = await contentDB.getSegmentsByVideoId(videoId);
+        const allWords: Array<{ text: string; start: number; end: number }> = [];
+        for (const seg of allTranscriptSegs) {
+            if (seg.wordTimings) {
+                for (const wt of seg.wordTimings) {
+                    if (wt.text && wt.start != null && wt.end != null) {
+                        allWords.push({ text: wt.text, start: wt.start, end: wt.end });
+                    }
+                }
+            }
+        }
+        if (allWords.length === 0) return segments; // no word timings available
+        allWords.sort((a, b) => a.start - b.start);
+
+        return segments.map(clip => {
+            // Find first word at/after clip start, last word at/before clip end
+            const firstIdx = allWords.findIndex(w => w.start >= clip.startTime - 0.05);
+            let lastIdx = -1;
+            for (let i = allWords.length - 1; i >= 0; i--) {
+                if (allWords[i].end <= clip.endTime + 0.05) { lastIdx = i; break; }
+            }
+            if (firstIdx < 0 || lastIdx < 0) return clip;
+
+            const padStartIdx = Math.max(0, firstIdx - padBefore);
+            const padEndIdx = Math.min(allWords.length - 1, lastIdx + padAfter);
+
+            const prependWords = allWords.slice(padStartIdx, firstIdx).map(w => w.text).join(' ');
+            const appendWords = allWords.slice(lastIdx + 1, padEndIdx + 1).map(w => w.text).join(' ');
+            const newText = [prependWords, clip.text, appendWords].filter(Boolean).join(' ');
+
+            const prependCount = prependWords ? prependWords.split(/\s+/).length : 0;
+
+            return {
+                ...clip,
+                startTime: allWords[padStartIdx].start,
+                endTime: allWords[padEndIdx].end,
+                text: newText,
+                keywords: clip.keywords?.map(kw => ({ ...kw, wordIndex: kw.wordIndex + prependCount })),
+            };
+        });
+    };
+
+    const buildExportShort = async (): Promise<GeneratedShort | null> => {
+        if (!generatedShortsPreview.length) return null;
+
+        let segments: ShortSegment[];
+        let title: string;
+        let hook: string;
+        let hookTitle: string;
+
+        if (assemblyMode) {
+            if (clipBasket.length === 0) return null;
+            // Sort by source video time (chronological)
+            const sorted = [...clipBasket].sort((a, b) => a.segment.startTime - b.segment.startTime);
+            segments = sorted.map(c => ({ ...c.segment }));
+            title = 'Custom Assembly';
+            hook = '';
+            hookTitle = 'Custom Assembly';
+        } else {
+            if (selectedShortIndex === null) return null;
+            const short = generatedShortsPreview[selectedShortIndex];
+            const omitted = omittedClips.get(short.id);
+            segments = short.segments.filter((_, i) => !omitted?.has(i));
+            if (segments.length === 0) return null;
+            title = short.title;
+            hook = short.hook;
+            hookTitle = short.hookTitle;
+        }
+
+        // Apply word padding
+        const videoId = generatedShortsPreview[0].videoId;
+        segments = await applyWordPadding(segments, videoId, wordPadBefore, wordPadAfter);
+
+        const baseShort = assemblyMode ? generatedShortsPreview[0] : generatedShortsPreview[selectedShortIndex!];
+        return {
+            ...baseShort,
+            id: `assembly_${Date.now()}`,
+            title,
+            hook,
+            hookTitle,
+            segments,
+            totalDuration: segments.reduce((s, seg) => s + (seg.endTime - seg.startTime), 0),
+            captionMode,
+        };
     };
 
     // ==================== Render ====================
@@ -1906,8 +2005,8 @@ export const ContentLibraryPage: React.FC<{
                                         <h4 className="text-sm font-bold text-white">{generatedShortsPreview.length} Shorts Generated</h4>
                                         <p className="text-xs text-gray-500">Select one to export</p>
                                     </div>
-                                    <div className="flex items-center gap-2">
-                                        <button onClick={() => { setGeneratedShortsPreview([]); setGeneratedShort(null); setSelectedShortIndex(null); }} className="px-3 py-1.5 text-xs border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <button onClick={() => { setGeneratedShortsPreview([]); setGeneratedShort(null); setSelectedShortIndex(null); setOmittedClips(new Map()); setClipBasket([]); }} className="px-3 py-1.5 text-xs border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
                                         {/* Caption mode selector */}
                                         <div className="flex items-center gap-1 bg-[#222] border border-[#333] rounded overflow-hidden">
                                             <button
@@ -1925,15 +2024,51 @@ export const ContentLibraryPage: React.FC<{
                                                 Word by Word
                                             </button>
                                         </div>
-                                        {onExportShort && selectedShortIndex !== null && (
+                                        {/* Single / Assembly mode toggle */}
+                                        <div className="flex items-center gap-1 bg-[#222] border border-[#333] rounded overflow-hidden">
+                                            <button
+                                                onClick={() => setAssemblyMode(false)}
+                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${!assemblyMode ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                                                title="Export one short with optional clip omissions"
+                                            >
+                                                Single
+                                            </button>
+                                            <button
+                                                onClick={() => setAssemblyMode(true)}
+                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${assemblyMode ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'}`}
+                                                title="Cherry-pick clips across shorts into a mashup"
+                                            >
+                                                Assembly
+                                            </button>
+                                        </div>
+                                        {/* Word padding controls */}
+                                        <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                                            <span className="text-gray-500">Pad:</span>
+                                            <div className="flex items-center gap-0.5">
+                                                <button onClick={() => setWordPadBefore(Math.max(0, wordPadBefore - 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">-</button>
+                                                <span className="w-3 text-center text-[10px]">{wordPadBefore}</span>
+                                                <button onClick={() => setWordPadBefore(Math.min(5, wordPadBefore + 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">+</button>
+                                                <span className="text-gray-600 text-[9px]">before</span>
+                                            </div>
+                                            <div className="flex items-center gap-0.5">
+                                                <button onClick={() => setWordPadAfter(Math.max(0, wordPadAfter - 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">-</button>
+                                                <span className="w-3 text-center text-[10px]">{wordPadAfter}</span>
+                                                <button onClick={() => setWordPadAfter(Math.min(5, wordPadAfter + 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">+</button>
+                                                <span className="text-gray-600 text-[9px]">after</span>
+                                            </div>
+                                        </div>
+                                        {/* Export button */}
+                                        {onExportShort && (assemblyMode ? clipBasket.length > 0 : selectedShortIndex !== null) && (
                                             <button
                                                 onClick={async () => {
-                                                    if (isExporting || selectedShortIndex === null) return;
+                                                    if (isExporting) return;
                                                     setIsExporting(true);
                                                     try {
-                                                        const shortToExport = { ...generatedShortsPreview[selectedShortIndex], captionMode };
-                                                        await onExportShort(shortToExport);
-                                                        setShowShortModal(false);
+                                                        const syntheticShort = await buildExportShort();
+                                                        if (syntheticShort) {
+                                                            await onExportShort(syntheticShort);
+                                                            setShowShortModal(false);
+                                                        }
                                                     } finally {
                                                         setIsExporting(false);
                                                     }
@@ -1941,11 +2076,41 @@ export const ContentLibraryPage: React.FC<{
                                                 disabled={isExporting}
                                                 className="px-4 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded font-medium"
                                             >
-                                                {isExporting ? 'Exporting...' : 'Export Selected'}
+                                                {isExporting ? 'Exporting...' : assemblyMode ? `Export Assembly (${clipBasket.length})` : 'Export Selected'}
                                             </button>
                                         )}
                                     </div>
                                 </div>
+
+                                {/* Assembly Basket (assembly mode only) */}
+                                {assemblyMode && clipBasket.length > 0 && (
+                                    <div className="mb-4 bg-[#1a1a1a] border border-purple-500/30 rounded-lg p-3">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <h5 className="text-xs font-bold text-purple-300">
+                                                Assembly Basket ({clipBasket.length} clip{clipBasket.length !== 1 ? 's' : ''}, {formatDuration(clipBasket.reduce((s, c) => s + (c.segment.endTime - c.segment.startTime), 0))})
+                                            </h5>
+                                            <button onClick={() => setClipBasket([])} className="text-[9px] text-gray-500 hover:text-red-400 transition-colors">Clear All</button>
+                                        </div>
+                                        <div className="space-y-1 max-h-40 overflow-auto">
+                                            {clipBasket.map((clip, ci) => (
+                                                <div key={`${clip.shortId}_${clip.segmentIndex}`} className="flex items-center gap-2 text-[10px] bg-[#222] rounded px-2 py-1 border border-[#333]">
+                                                    <span className="text-gray-500 font-mono w-4">{ci + 1}.</span>
+                                                    <span className="text-purple-300 font-medium">#{clip.shortIndex + 1}/C{clip.segmentIndex + 1}</span>
+                                                    <span className="text-gray-400 truncate flex-1" title={clip.segment.text}>{clip.segment.text}</span>
+                                                    <span className="text-gray-600 text-[9px] whitespace-nowrap">
+                                                        {Math.floor(clip.segment.startTime / 60)}:{Math.floor(clip.segment.startTime % 60).toString().padStart(2, '0')}-{Math.floor(clip.segment.endTime / 60)}:{Math.floor(clip.segment.endTime % 60).toString().padStart(2, '0')}
+                                                    </span>
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); setClipBasket(prev => prev.filter((_, i) => i !== ci)); }}
+                                                        className="text-gray-500 hover:text-red-400 text-xs transition-colors"
+                                                    >
+                                                        &times;
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
 
                                 {/* Expanded preview when a card is selected */}
                                 {selectedShortIndex !== null && generatedShortsPreview[selectedShortIndex] && (
@@ -1986,6 +2151,71 @@ export const ContentLibraryPage: React.FC<{
                                             {/* Clips summary */}
                                             <div className="px-3 py-1.5">
                                                 <p className="text-[10px] text-gray-400 line-clamp-2">{short.hook}</p>
+                                            </div>
+
+                                            {/* Clip strip — toggle omit (single) or add to basket (assembly) */}
+                                            <div className="px-3 pb-1.5">
+                                                <div className="flex flex-wrap gap-1">
+                                                    {short.segments.map((seg, si) => {
+                                                        const isOmitted = omittedClips.get(short.id)?.has(si) ?? false;
+                                                        const inBasket = clipBasket.some(c => c.shortId === short.id && c.segmentIndex === si);
+
+                                                        if (assemblyMode) {
+                                                            return (
+                                                                <button
+                                                                    key={si}
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        if (inBasket) {
+                                                                            setClipBasket(prev => prev.filter(c => !(c.shortId === short.id && c.segmentIndex === si)));
+                                                                        } else {
+                                                                            setClipBasket(prev => [...prev, { shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }]);
+                                                                        }
+                                                                    }}
+                                                                    className={`px-1.5 py-0.5 text-[9px] rounded border transition-colors ${inBasket ? 'bg-green-600/30 border-green-500/50 text-green-300' : 'bg-[#222] border-[#444] text-gray-400 hover:border-green-500/40 hover:text-green-400'}`}
+                                                                    title={inBasket ? 'Remove from assembly' : 'Add to assembly'}
+                                                                >
+                                                                    {inBasket ? `C${si + 1} \u2713` : `C${si + 1} +`}
+                                                                </button>
+                                                            );
+                                                        } else {
+                                                            return (
+                                                                <button
+                                                                    key={si}
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setOmittedClips(prev => {
+                                                                            const next = new Map(prev);
+                                                                            const set = new Set(next.get(short.id) || []);
+                                                                            if (set.has(si)) set.delete(si); else set.add(si);
+                                                                            next.set(short.id, set);
+                                                                            return next;
+                                                                        });
+                                                                    }}
+                                                                    className={`px-1.5 py-0.5 text-[9px] rounded border transition-colors ${isOmitted ? 'bg-red-900/30 border-red-500/40 text-red-400 line-through' : 'bg-[#222] border-[#444] text-gray-300'}`}
+                                                                    title={isOmitted ? 'Include this clip' : 'Omit this clip'}
+                                                                >
+                                                                    C{si + 1} {isOmitted ? '\u2717' : '\u2713'}
+                                                                </button>
+                                                            );
+                                                        }
+                                                    })}
+                                                    {assemblyMode && (
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                const newClips = short.segments
+                                                                    .map((seg, si) => ({ shortId: short.id, shortIndex: idx, segmentIndex: si, shortTitle: short.title, segment: seg }))
+                                                                    .filter(c => !clipBasket.some(b => b.shortId === c.shortId && b.segmentIndex === c.segmentIndex));
+                                                                if (newClips.length > 0) setClipBasket(prev => [...prev, ...newClips]);
+                                                            }}
+                                                            className="px-1.5 py-0.5 text-[9px] rounded border border-dashed border-[#555] text-gray-500 hover:text-green-400 hover:border-green-500/40 transition-colors"
+                                                            title="Add all clips to assembly"
+                                                        >
+                                                            All +
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </div>
 
                                             {/* Collapsible B-Roll */}
