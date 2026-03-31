@@ -273,11 +273,11 @@ const ShortDetailPlayer: React.FC<{
                                     {isSelectedForPad && onSetClipPad && (
                                         <div className="flex items-center gap-1 bg-yellow-950/40 border border-yellow-700/30 rounded px-1.5 py-1 text-[9px]">
                                             <span className="text-yellow-500/70">before</span>
-                                            <button onClick={() => onSetClipPad(short.id, si, Math.max(0, (override?.before ?? 0) - 1), override?.after ?? 0)} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                            <button onClick={() => onSetClipPad(short.id, si, Math.max(-5, (override?.before ?? 0) - 1), override?.after ?? 0)} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
                                             <span className="w-3 text-center text-yellow-200">{override?.before ?? 0}</span>
                                             <button onClick={() => onSetClipPad(short.id, si, Math.min(5, (override?.before ?? 0) + 1), override?.after ?? 0)} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
                                             <span className="text-yellow-500/70 ml-1">after</span>
-                                            <button onClick={() => onSetClipPad(short.id, si, override?.before ?? 0, Math.max(0, (override?.after ?? 0) - 1))} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                            <button onClick={() => onSetClipPad(short.id, si, override?.before ?? 0, Math.max(-5, (override?.after ?? 0) - 1))} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
                                             <span className="w-3 text-center text-yellow-200">{override?.after ?? 0}</span>
                                             <button onClick={() => onSetClipPad(short.id, si, override?.before ?? 0, Math.min(5, (override?.after ?? 0) + 1))} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
                                             {(override?.before || override?.after) ? (
@@ -1225,9 +1225,9 @@ export const ContentLibraryPage: React.FC<{
         globalAfter: number,
         perClipPadKeys?: string[]
     ): Promise<ShortSegment[]> => {
-        // Check if any padding is needed at all
-        const anyPad = globalBefore > 0 || globalAfter > 0 ||
-            (perClipPadKeys?.some(k => { const o = clipPadOverrides.get(k); return o && (o.before > 0 || o.after > 0); }) ?? false);
+        // Check if any adjustment is needed at all (positive = add words, negative = remove words)
+        const anyPad = globalBefore !== 0 || globalAfter !== 0 ||
+            (perClipPadKeys?.some(k => { const o = clipPadOverrides.get(k); return o && (o.before !== 0 || o.after !== 0); }) ?? false);
         if (!anyPad) return segments;
 
         // Fetch all word timings for this video
@@ -1260,12 +1260,27 @@ export const ContentLibraryPage: React.FC<{
             }
             if (firstIdx < 0 || lastIdx < 0) return clip;
 
-            const padStartIdx = Math.max(0, firstIdx - padBefore);
-            const padEndIdx = Math.min(allWords.length - 1, lastIdx + padAfter);
+            // Positive: expand outward. Negative: trim inward (clamp so start <= end).
+            const rawStartIdx = firstIdx - padBefore;  // negative padBefore moves start later (trim)
+            const rawEndIdx = lastIdx + padAfter;       // negative padAfter moves end earlier (trim)
+            const padStartIdx = Math.max(0, Math.min(rawStartIdx, lastIdx));
+            const padEndIdx = Math.min(allWords.length - 1, Math.max(rawEndIdx, firstIdx));
 
-            const prependWords = allWords.slice(padStartIdx, firstIdx).map(w => w.text).join(' ');
-            const appendWords = allWords.slice(lastIdx + 1, padEndIdx + 1).map(w => w.text).join(' ');
-            const newText = [prependWords, clip.text, appendWords].filter(Boolean).join(' ');
+            // Guard: if trimming crossed over, just return original
+            if (padStartIdx > padEndIdx) return clip;
+
+            const prependWords = padBefore > 0 ? allWords.slice(padStartIdx, firstIdx).map(w => w.text).join(' ') : '';
+            const appendWords = padAfter > 0 ? allWords.slice(lastIdx + 1, padEndIdx + 1).map(w => w.text).join(' ') : '';
+
+            // For trimming: rebuild text from the trimmed word range
+            let newText: string;
+            if (padBefore < 0 || padAfter < 0) {
+                const keptWords = allWords.slice(padStartIdx, padEndIdx + 1).map(w => w.text).join(' ');
+                newText = keptWords;
+            } else {
+                newText = [prependWords, clip.text, appendWords].filter(Boolean).join(' ');
+            }
+
             const prependCount = prependWords ? prependWords.split(/\s+/).length : 0;
 
             return {
@@ -2140,13 +2155,13 @@ export const ContentLibraryPage: React.FC<{
                                         <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
                                             <span className="text-gray-500">Pad:</span>
                                             <div className="flex items-center gap-0.5">
-                                                <button onClick={() => setWordPadBefore(Math.max(0, wordPadBefore - 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">-</button>
+                                                <button onClick={() => setWordPadBefore(Math.max(-5, wordPadBefore - 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">-</button>
                                                 <span className="w-3 text-center text-[10px]">{wordPadBefore}</span>
                                                 <button onClick={() => setWordPadBefore(Math.min(5, wordPadBefore + 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">+</button>
                                                 <span className="text-gray-600 text-[9px]">before</span>
                                             </div>
                                             <div className="flex items-center gap-0.5">
-                                                <button onClick={() => setWordPadAfter(Math.max(0, wordPadAfter - 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">-</button>
+                                                <button onClick={() => setWordPadAfter(Math.max(-5, wordPadAfter - 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">-</button>
                                                 <span className="w-3 text-center text-[10px]">{wordPadAfter}</span>
                                                 <button onClick={() => setWordPadAfter(Math.min(5, wordPadAfter + 1))} className="w-4 h-4 flex items-center justify-center bg-[#222] border border-[#444] rounded text-[9px] hover:bg-[#333]">+</button>
                                                 <span className="text-gray-600 text-[9px]">after</span>
@@ -2341,11 +2356,11 @@ export const ContentLibraryPage: React.FC<{
                                                                 {isSelectedForPad && (
                                                                     <div className="flex items-center gap-1 bg-yellow-950/40 border border-yellow-700/30 rounded px-1.5 py-1 text-[9px]">
                                                                         <span className="text-yellow-500/70">bef</span>
-                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: Math.max(0, (override?.before ?? 0) - 1), after: override?.after ?? 0 }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: Math.max(-5, (override?.before ?? 0) - 1), after: override?.after ?? 0 }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
                                                                         <span className="w-3 text-center text-yellow-200">{override?.before ?? 0}</span>
                                                                         <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: Math.min(5, (override?.before ?? 0) + 1), after: override?.after ?? 0 }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
                                                                         <span className="text-yellow-500/70 ml-1">aft</span>
-                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: override?.before ?? 0, after: Math.max(0, (override?.after ?? 0) - 1) }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
+                                                                        <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: override?.before ?? 0, after: Math.max(-5, (override?.after ?? 0) - 1) }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">-</button>
                                                                         <span className="w-3 text-center text-yellow-200">{override?.after ?? 0}</span>
                                                                         <button onClick={() => setClipPadOverrides(prev => { const n = new Map(prev); n.set(padKey, { before: override?.before ?? 0, after: Math.min(5, (override?.after ?? 0) + 1) }); return n; })} className="w-3.5 h-3.5 flex items-center justify-center bg-[#333] rounded text-yellow-300 hover:bg-[#444]">+</button>
                                                                         {(override?.before || override?.after) ? (
