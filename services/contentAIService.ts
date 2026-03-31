@@ -222,10 +222,6 @@ export async function generateShort(
             delete json._usageMetadata;
         }
 
-        if (!json.clips || !Array.isArray(json.clips) || json.clips.length === 0) {
-            return { success: false, error: "AI could not find suitable content for this prompt" };
-        }
-
         // Helper to parse potential string timestamps (e.g. "120" or "2:00")
         const parseTime = (val: any): number => {
             if (typeof val === 'number') return val;
@@ -240,78 +236,97 @@ export async function generateShort(
             return 0;
         };
 
-        // Create the GeneratedShort object
-        const shortSegments: ShortSegment[] = json.clips.map((clip: any) => ({
-            startTime: parseTime(clip.startTime),
-            endTime: parseTime(clip.endTime),
-            text: clip.text,
-            keywords: clip.keywords || []
-        }));
+        // Helper to build a GeneratedShort from raw short data
+        const buildShort = async (rawShort: any): Promise<GeneratedShort> => {
+            const clips = rawShort.clips || [];
+            const shortSegments: ShortSegment[] = clips.map((clip: any) => ({
+                startTime: parseTime(clip.startTime),
+                endTime: parseTime(clip.endTime),
+                text: clip.text,
+                keywords: clip.keywords || []
+            }));
 
-        const generatedShort: GeneratedShort = {
-            id: generateId(),
-            title: json.title || `Short from ${video.title}`,
-            prompt,
-            videoId: video.id,
-            videoTitle: video.title,
-            segments: shortSegments,
-            hook: json.hook || shortSegments[0]?.text || "",
-            hookTitle: json.hookTitle || (json.title || "").split(' ').slice(0, 5).join(' ') || "Watch This",
-            resolution: json.resolution || shortSegments[shortSegments.length - 1]?.text || "",
-            totalDuration: json.totalDuration || shortSegments.reduce((sum, s) => sum + (s.endTime - s.startTime), 0),
-            createdAt: new Date()
+            const genShort: GeneratedShort = {
+                id: generateId(),
+                title: rawShort.title || `Short from ${video!.title}`,
+                prompt,
+                videoId: video!.id,
+                videoTitle: video!.title,
+                segments: shortSegments,
+                hook: rawShort.hook || shortSegments[0]?.text || "",
+                hookTitle: rawShort.hookTitle || (rawShort.title || "").split(' ').slice(0, 5).join(' ') || "Watch This",
+                resolution: rawShort.resolution || shortSegments[shortSegments.length - 1]?.text || "",
+                totalDuration: rawShort.totalDuration || shortSegments.reduce((sum: number, s: ShortSegment) => sum + (s.endTime - s.startTime), 0),
+                createdAt: new Date()
+            };
+
+            // Fetch B-roll suggestions from Pexels if LLM provided them
+            if (rawShort.bRollSuggestions && Array.isArray(rawShort.bRollSuggestions) && rawShort.bRollSuggestions.length > 0) {
+                try {
+                    const keysRes = await fetch('/api/keys');
+                    const keys = await keysRes.json();
+                    if (keys.PEXELS_API_KEY) {
+                        const bRollResults = await Promise.all(
+                            rawShort.bRollSuggestions.map(async (suggestion: any): Promise<BRollSuggestion | null> => {
+                                try {
+                                    const [vids, photos] = await Promise.all([
+                                        searchPexelsBRoll(suggestion.searchQuery),
+                                        searchPexelsPhotos(suggestion.searchQuery),
+                                    ]);
+                                    if (vids.length === 0 && photos.length === 0) return null;
+                                    return {
+                                        id: generateId(),
+                                        clipIndex: suggestion.clipIndex ?? 0,
+                                        offsetInClip: suggestion.offsetInClip ?? 0,
+                                        duration: suggestion.duration ?? 3,
+                                        searchQuery: suggestion.searchQuery || '',
+                                        rationale: suggestion.rationale || '',
+                                        approved: true,
+                                        pexelsResults: vids,
+                                        pexelsPhotos: photos,
+                                        selectedVideoIndex: 0,
+                                        selectedType: 'video',
+                                    };
+                                } catch (e) {
+                                    console.warn('[ContentAI] Pexels search failed for:', suggestion.searchQuery, e);
+                                    return null;
+                                }
+                            })
+                        );
+                        const validSuggestions = bRollResults.filter((s): s is BRollSuggestion => s !== null);
+                        if (validSuggestions.length > 0) {
+                            genShort.bRollSuggestions = validSuggestions;
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[ContentAI] B-roll fetch failed (non-fatal):', e);
+                }
+            }
+
+            return genShort;
         };
 
-        // Fetch B-roll suggestions from Pexels if LLM provided them
-        if (json.bRollSuggestions && Array.isArray(json.bRollSuggestions) && json.bRollSuggestions.length > 0) {
-            try {
-                const keysRes = await fetch('/api/keys');
-                const keys = await keysRes.json();
-                if (keys.PEXELS_API_KEY) {
-                    const bRollResults = await Promise.all(
-                        json.bRollSuggestions.map(async (suggestion: any): Promise<BRollSuggestion | null> => {
-                            try {
-                                const [videos, photos] = await Promise.all([
-                                    searchPexelsBRoll(suggestion.searchQuery),
-                                    searchPexelsPhotos(suggestion.searchQuery),
-                                ]);
-                                if (videos.length === 0 && photos.length === 0) return null;
-                                return {
-                                    id: generateId(),
-                                    clipIndex: suggestion.clipIndex ?? 0,
-                                    offsetInClip: suggestion.offsetInClip ?? 0,
-                                    duration: suggestion.duration ?? 3,
-                                    searchQuery: suggestion.searchQuery || '',
-                                    rationale: suggestion.rationale || '',
-                                    approved: true,
-                                    pexelsResults: videos,
-                                    pexelsPhotos: photos,
-                                    selectedVideoIndex: 0,
-                                    selectedType: 'video',
-                                };
-                            } catch (e) {
-                                console.warn('[ContentAI] Pexels search failed for:', suggestion.searchQuery, e);
-                                return null;
-                            }
-                        })
-                    );
-                    const validSuggestions = bRollResults.filter((s): s is BRollSuggestion => s !== null);
-                    if (validSuggestions.length > 0) {
-                        generatedShort.bRollSuggestions = validSuggestions;
-                        console.log(`[ContentAI] Found ${validSuggestions.length} B-roll suggestions with Pexels results`);
-                    }
-                }
-            } catch (e) {
-                console.warn('[ContentAI] B-roll fetch failed (non-fatal):', e);
-            }
+        // Handle multi-short response (shorts array) or legacy single-short (clips array)
+        const rawShorts = json.shorts && Array.isArray(json.shorts) ? json.shorts : (json.clips ? [json] : []);
+        if (rawShorts.length === 0) {
+            return { success: false, error: "AI could not find suitable content for this prompt" };
         }
 
-        // Save to database
-        await contentDB.addShort(generatedShort);
+        const generatedShorts: GeneratedShort[] = [];
+        for (const raw of rawShorts) {
+            if (!raw.clips || !Array.isArray(raw.clips) || raw.clips.length === 0) continue;
+            const gs = await buildShort(raw);
+            await contentDB.addShort(gs);
+            generatedShorts.push(gs);
+        }
 
-        console.log(`[ContentAI] Generated short: "${generatedShort.title}" (${generatedShort.totalDuration}s)`);
+        if (generatedShorts.length === 0) {
+            return { success: false, error: "AI could not find suitable content for this prompt" };
+        }
 
-        return { success: true, short: generatedShort };
+        console.log(`[ContentAI] Generated ${generatedShorts.length} shorts from "${video!.title}"`);
+
+        return { success: true, short: generatedShorts[0], shorts: generatedShorts };
 
     } catch (error) {
         console.error("[ContentAI] Short generation error:", error);
