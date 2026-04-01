@@ -536,6 +536,44 @@ export interface RemovedWord {
   originalEventIndex: number;
 }
 
+// ============ AUDIO MIXER ============
+export interface EQBand {
+  frequency: number;          // Hz (e.g., 100 for bass, 1000 for mid, 8000 for treble)
+  gain: number;               // dB, -12 to +12
+  Q: number;                  // Quality factor, 0.5 to 10
+  type: BiquadFilterType;     // 'lowshelf' | 'peaking' | 'highshelf'
+}
+
+export interface AudioEffects {
+  // Noise Reduction (RNNoise WASM)
+  noiseReduction: boolean;
+
+  // 3-band EQ (bass/mid/treble)
+  eqEnabled: boolean;
+  eqBands: [EQBand, EQBand, EQBand];
+
+  // Dynamics Compressor
+  compressorEnabled: boolean;
+  compressorThreshold: number;  // dB, -100 to 0
+  compressorKnee: number;       // dB, 0 to 40
+  compressorRatio: number;      // 1 to 20
+  compressorAttack: number;     // seconds, 0 to 1
+  compressorRelease: number;    // seconds, 0 to 1
+
+  // Limiter (hard limiter)
+  limiterEnabled: boolean;
+  limiterThreshold: number;     // dB, -30 to 0
+
+  // Loudness Normalization
+  normalizationEnabled: boolean;
+  normalizationTarget: number;  // LUFS (e.g., -14 YouTube, -16 podcast, -23 broadcast)
+}
+
+export interface AudioMixerState {
+  masterVolume: number;         // 0.0 to 2.0 (1.0 = unity gain)
+  effects: AudioEffects;
+}
+
 export interface ProjectState {
   library: MediaItem[];
   segments: Segment[]; // The active sequence
@@ -550,6 +588,7 @@ export interface ProjectState {
   activeTitleTemplate: SubtitleTemplate | null;
   activeKeywordAnimation: TextAnimation | null;
   removedWords: RemovedWord[];
+  audioMixer?: AudioMixerState;
 }
 
 // ============ REMOTION TEMPLATE SYSTEM ============
