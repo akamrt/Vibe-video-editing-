@@ -32,6 +32,11 @@ import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
 import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes, detectPersonInFrame } from './services/templateTrackingService';
 import { fullScanAndCenter, trackHeadForPivot, headTrackForPivot } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
+import { AudioMixerPanel } from './components/AudioMixerPanel';
+import { createDefaultAudioMixer } from './utils/audioMixerDefaults';
+import { buildAudioChain } from './utils/audioProcessingChain';
+import type { AudioChain } from './utils/audioProcessingChain';
+import type { AudioMixerState } from './types';
 import RenderQueuePanel from './components/RenderQueuePanel';
 import { renderQueue } from './services/renderQueue';
 import TrackerOverlay from './components/TrackerOverlay';
@@ -198,6 +203,7 @@ function App() {
       audioContext: audioContextRef.current || new AudioContext(),
       audioSourcesRef: audioSourcesRef.current,
       safeZoneHeight: safeZoneRef.current?.getBoundingClientRect().height || viewportSize.height,
+      audioMixer: (projectRef.current as any).audioMixer || undefined,
       getCombinedTransform,
       setIsExporting: (v: boolean) => { isExportingRef.current = v; setIsExporting(v); },
     }));
@@ -220,6 +226,7 @@ function App() {
       audioContext: audioContextRef.current || new AudioContext(),
       audioSourcesRef: audioSourcesRef.current,
       safeZoneHeight: safeZoneRef.current?.getBoundingClientRect().height || viewportSize.height,
+      audioMixer: (projectRef.current as any).audioMixer || undefined,
       getCombinedTransform,
       setIsExporting: (v: boolean) => { isExportingRef.current = v; setIsExporting(v); },
     }));
@@ -330,7 +337,7 @@ function App() {
   const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'stock' | 'properties'>('media');
 
   // Right Panel State
-  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions' | 'render'>('transitions');
+  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions' | 'render' | 'audio'>('transitions');
 
   // Resizable Panel Sizes (persisted to localStorage)
   const [leftPanelWidth, setLeftPanelWidth] = useState(() =>
@@ -483,6 +490,9 @@ function App() {
   // Audio Context for Export
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourcesRef = useRef<WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>>(new WeakMap());
+  // Audio mixer chain for real-time preview metering
+  const audioChainRef = useRef<AudioChain | null>(null);
+  const [audioAnalyserNode, setAudioAnalyserNode] = useState<AnalyserNode | null>(null);
 
   const viewportContainerRef = useRef<HTMLDivElement>(null);
   const viewportOuterRef = useRef<HTMLDivElement>(null);
@@ -1695,6 +1705,39 @@ function App() {
     renderQueue.addJob(settings);
     setActiveRightTab('render');
   };
+
+  // Set up real-time audio analyser for the Audio mixer panel metering
+  useEffect(() => {
+    if (activeRightTab !== 'audio') {
+      // Clean up when leaving audio tab
+      if (audioChainRef.current) {
+        audioChainRef.current.destroy();
+        audioChainRef.current = null;
+        setAudioAnalyserNode(null);
+      }
+      return;
+    }
+    // Create AudioContext if needed
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    const ctx = audioContextRef.current;
+    const mixer = project.audioMixer || createDefaultAudioMixer();
+
+    // Build processing chain for preview metering
+    if (audioChainRef.current) audioChainRef.current.destroy();
+    const chain = buildAudioChain(ctx, mixer.effects, mixer.masterVolume);
+    chain.output.connect(ctx.destination);
+    audioChainRef.current = chain;
+    setAudioAnalyserNode(chain.analyser);
+
+    return () => {
+      if (audioChainRef.current) {
+        audioChainRef.current.destroy();
+        audioChainRef.current = null;
+      }
+    };
+  }, [activeRightTab, project.audioMixer]);
 
   // Export video with animations (real-time playback capture) — legacy, kept as fallback
   const handleExportVideo = async (settings: ExportSettings) => {
@@ -7816,6 +7859,7 @@ function App() {
                 <button onClick={() => setActiveRightTab('transitions')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'transitions' ? 'bg-[#333] text-cyan-400 border-b-2 border-cyan-400' : 'text-gray-400'}`}>TRANS.</button>
                 <button onClick={() => setActiveRightTab('tracking')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'tracking' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400'}`}>TRACKING</button>
                 <button onClick={() => setActiveRightTab('render')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'render' ? 'bg-[#333] text-orange-400 border-b-2 border-orange-400' : 'text-gray-400'}`}>RENDER</button>
+                <button onClick={() => setActiveRightTab('audio')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'audio' ? 'bg-[#333] text-pink-400 border-b-2 border-pink-400' : 'text-gray-400'}`}>AUDIO</button>
               </div>
               <div className="flex-1 overflow-hidden">
                 {activeRightTab === 'templates' && (
@@ -7926,6 +7970,15 @@ function App() {
                 )}
                 {activeRightTab === 'render' && (
                   <RenderQueuePanel />
+                )}
+                {activeRightTab === 'audio' && (
+                  <AudioMixerPanel
+                    audioMixer={project.audioMixer || createDefaultAudioMixer()}
+                    onUpdate={(mixer: AudioMixerState) => setProject(p => ({ ...p, audioMixer: mixer }))}
+                    segments={project.segments}
+                    isPlaying={project.isPlaying}
+                    analyserNode={audioAnalyserNode}
+                  />
                 )}
               </div>
             </div>

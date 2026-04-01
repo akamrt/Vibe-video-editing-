@@ -14,6 +14,7 @@ import { Muxer, ArrayBufferTarget } from 'webm-muxer';
 import { getInterpolatedTransform, ASPECT_RATIO_PRESETS } from '../utils/interpolation';
 import { renderTransition as renderTransitionCanvas } from '../utils/transitionRenderer';
 import { drawSubtitleOnCanvas } from '../utils/canvasSubtitleRenderer';
+import { buildAudioChain, normalizeLoudness, processBufferThroughRNNoise } from '../utils/audioProcessingChain';
 import type {
   ExportSettings,
   Segment,
@@ -21,6 +22,7 @@ import type {
   TitleLayer,
   SubtitleStyle,
   Transition,
+  AudioMixerState,
 } from '../types';
 
 type SubtitleTemplate = any;
@@ -41,6 +43,7 @@ export interface RendererDeps {
   audioContext: AudioContext;
   audioSourcesRef: WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>;
   safeZoneHeight: number;
+  audioMixer?: AudioMixerState;
   getCombinedTransform: (
     kfs: ClipKeyframe[] | undefined,
     clipTime: number,
@@ -204,6 +207,18 @@ export class OfflineRenderer {
       // This is critical after silence removal, which can create 60-100 segments from
       // the same source file — without dedup, the browser would OOM loading the full
       // video file once per segment concurrently.
+      // Build global audio processing chain (EQ, compressor, limiter, master volume)
+      const mixer = deps.audioMixer;
+      const mixerEffects = mixer?.effects;
+      let audioDestination: AudioNode = offlineCtx.destination;
+
+      if (mixer) {
+        const chain = buildAudioChain(offlineCtx, mixer.effects, mixer.masterVolume);
+        chain.output.connect(offlineCtx.destination);
+        audioDestination = chain.input;
+      }
+
+      // Decode each unique media URL once, optionally through noise reduction
       const urlDecodeCache = new Map<string, Promise<AudioBuffer | null>>();
       const decodePromises = deps.segments
         .filter(seg => seg.type !== 'blank')
@@ -217,7 +232,12 @@ export class OfflineRenderer {
               try {
                 const response = await fetch(item.url);
                 const arrayBuffer = await response.arrayBuffer();
-                return await offlineCtx.decodeAudioData(arrayBuffer);
+                let decoded = await offlineCtx.decodeAudioData(arrayBuffer);
+                // Apply noise reduction if enabled
+                if (mixerEffects?.noiseReduction) {
+                  decoded = await processBufferThroughRNNoise(decoded);
+                }
+                return decoded;
               } catch (e) {
                 console.warn('[OfflineRenderer] Audio decode failed for', item.url, e);
                 return null;
@@ -230,12 +250,32 @@ export class OfflineRenderer {
 
           const source = offlineCtx.createBufferSource();
           source.buffer = audioBuffer;
-          source.connect(offlineCtx.destination);
+
+          // Per-segment GainNode for volume keyframes
+          const segGain = offlineCtx.createGain();
+          source.connect(segGain);
+          segGain.connect(audioDestination);
+
+          // Apply volume keyframes via Web Audio automation
+          const segStart = Math.max(0, seg.timelineStart);
+          if (seg.keyframes?.length) {
+            // Sort keyframes by time
+            const sorted = [...seg.keyframes].sort((a, b) => a.time - b.time);
+            for (const kf of sorted) {
+              const vol = kf.volume ?? 1.0;
+              const absTime = segStart + kf.time;
+              if (absTime >= 0) {
+                segGain.gain.linearRampToValueAtTime(vol, absTime);
+              }
+            }
+          } else {
+            segGain.gain.setValueAtTime(1.0, segStart);
+          }
 
           // Schedule: start at timelineStart, offset into source at seg.startTime
           const segDuration = seg.endTime - seg.startTime;
           source.start(
-            Math.max(0, seg.timelineStart),
+            segStart,
             Math.max(0, seg.startTime),
             segDuration,
           );
@@ -243,6 +283,12 @@ export class OfflineRenderer {
 
       await Promise.all(decodePromises);
       renderedAudioBuffer = await offlineCtx.startRendering();
+
+      // Apply loudness normalization if enabled (two-pass: measure then adjust)
+      if (mixerEffects?.normalizationEnabled && renderedAudioBuffer) {
+        normalizeLoudness(renderedAudioBuffer, mixerEffects.normalizationTarget);
+        console.log('[OfflineRenderer] Audio normalized to', mixerEffects.normalizationTarget, 'LUFS');
+      }
       console.log('[OfflineRenderer] Audio rendered:', renderedAudioBuffer.duration.toFixed(2), 's');
     } catch (e) {
       console.warn('[OfflineRenderer] Audio rendering failed, video will be silent:', e);
