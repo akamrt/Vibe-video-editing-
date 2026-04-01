@@ -208,11 +208,23 @@ export class OfflineRenderer {
       // the same source file — without dedup, the browser would OOM loading the full
       // video file once per segment concurrently.
       // Build global audio processing chain (EQ, compressor, limiter, master volume)
-      const mixer = deps.audioMixer;
-      const mixerEffects = mixer?.effects;
+      // Always use mixer (fall back to defaults if not configured)
+      const { createDefaultAudioMixer } = await import('../utils/audioMixerDefaults');
+      const mixer = deps.audioMixer || createDefaultAudioMixer();
+      const mixerEffects = mixer.effects;
       let audioDestination: AudioNode = offlineCtx.destination;
 
-      if (mixer) {
+      // Log active audio processing for debugging
+      const activeEffects: string[] = [];
+      if (mixer.masterVolume !== 1.0) activeEffects.push(`masterVol=${(mixer.masterVolume * 100).toFixed(0)}%`);
+      if (mixerEffects.noiseReduction) activeEffects.push('noiseReduction');
+      if (mixerEffects.eqEnabled) activeEffects.push('EQ');
+      if (mixerEffects.compressorEnabled) activeEffects.push('compressor');
+      if (mixerEffects.limiterEnabled) activeEffects.push('limiter');
+      if (mixerEffects.normalizationEnabled) activeEffects.push(`normalize=${mixerEffects.normalizationTarget}LUFS`);
+      console.log('[OfflineRenderer] Audio mixer:', activeEffects.length > 0 ? activeEffects.join(', ') : 'defaults (no effects)');
+
+      {
         const chain = buildAudioChain(offlineCtx, mixer.effects, mixer.masterVolume);
         chain.output.connect(offlineCtx.destination);
         audioDestination = chain.input;
