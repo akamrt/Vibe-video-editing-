@@ -2244,7 +2244,7 @@ export const ContentLibraryPage: React.FC<{
                                 <div className="flex items-center justify-between mb-4">
                                     <div>
                                         <h4 className="text-sm font-bold text-white">{generatedShortsPreview.length} Shorts Generated</h4>
-                                        <p className="text-xs text-gray-500">Select one to export</p>
+                                        <p className="text-xs text-gray-500">Select one to export, or export all to render queue</p>
                                     </div>
                                     <div className="flex items-center gap-2 flex-wrap">
                                         <button onClick={() => { setGeneratedShortsPreview([]); setGeneratedShort(null); setSelectedShortIndex(null); setOmittedClips(new Map()); setClipBasket([]); }} className="px-3 py-1.5 text-xs border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
@@ -2301,6 +2301,16 @@ export const ContentLibraryPage: React.FC<{
                                                 className="px-4 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded font-medium"
                                             >
                                                 {isExporting ? 'Exporting...' : clipBasket.length > 0 ? `Export Cart (${clipBasket.length})` : 'Export Selected'}
+                                            </button>
+                                        )}
+                                        {/* Export All button — queue all shorts to render */}
+                                        {onExportAllShorts && generatedShortsPreview.length > 1 && (
+                                            <button
+                                                onClick={() => setBatchExportShorts(generatedShortsPreview)}
+                                                disabled={isExporting || !!batchExportProgress}
+                                                className="px-4 py-1.5 text-xs bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded font-medium"
+                                            >
+                                                {batchExportProgress || `Export All ${generatedShortsPreview.length}`}
                                             </button>
                                         )}
                                     </div>
