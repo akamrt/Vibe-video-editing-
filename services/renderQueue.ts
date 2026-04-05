@@ -3,6 +3,7 @@ import { OfflineRenderer, RendererDeps } from './offlineRenderer';
 
 class RenderQueueManager {
   private jobs: RenderJob[] = [];
+  private jobDeps: Map<string, RendererDeps> = new Map(); // pre-captured deps per job
   private listeners: Array<(jobs: RenderJob[]) => void> = [];
   private activeRenderer: OfflineRenderer | null = null;
   private depsProvider: (() => RendererDeps) | null = null;
@@ -19,7 +20,7 @@ class RenderQueueManager {
     };
   }
 
-  addJob(settings: ExportSettings, name?: string): string {
+  addJob(settings: ExportSettings, name?: string, deps?: RendererDeps): string {
     const id = `render_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const jobName = name ?? `Export ${settings.aspectRatio} ${settings.resolution}`;
 
@@ -37,6 +38,11 @@ class RenderQueueManager {
       outputUrl: null,
     };
 
+    // Store pre-captured deps if provided (used by batch export)
+    if (deps) {
+      this.jobDeps.set(id, deps);
+    }
+
     this.jobs.push(job);
     this.notify();
     this.processNext();
@@ -48,6 +54,7 @@ class RenderQueueManager {
     if (!job) return;
 
     if (job.status === 'queued') {
+      this.jobDeps.delete(jobId); // free pre-captured deps
       this.updateJob(jobId, { status: 'aborted' });
       return;
     }
@@ -68,6 +75,7 @@ class RenderQueueManager {
     if (job.outputUrl) {
       URL.revokeObjectURL(job.outputUrl);
     }
+    this.jobDeps.delete(jobId);
 
     this.jobs = this.jobs.filter((j) => j.id !== jobId);
     this.notify();
@@ -111,12 +119,17 @@ class RenderQueueManager {
     const next = this.jobs.find((j) => j.status === 'queued');
     if (!next) return;
 
-    if (!this.depsProvider) {
+    // Use pre-captured deps if available (batch export), otherwise live provider
+    let deps: RendererDeps;
+    if (this.jobDeps.has(next.id)) {
+      deps = this.jobDeps.get(next.id)!;
+      this.jobDeps.delete(next.id); // free memory after use
+    } else if (this.depsProvider) {
+      deps = this.depsProvider();
+    } else {
       console.warn('[RenderQueue] No deps provider registered — cannot start render.');
       return;
     }
-
-    const deps = this.depsProvider();
     const startedAt = Date.now();
 
     this.updateJob(next.id, { status: 'rendering', startedAt, progress: 0, currentFrame: 0 });

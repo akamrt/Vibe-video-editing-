@@ -39,6 +39,7 @@ import type { AudioChain } from './utils/audioProcessingChain';
 import type { AudioMixerState } from './types';
 import RenderQueuePanel from './components/RenderQueuePanel';
 import { renderQueue } from './services/renderQueue';
+import type { RendererDeps } from './services/offlineRenderer';
 import TrackerOverlay from './components/TrackerOverlay';
 import GizmoOverlay from './components/GizmoOverlay';
 import StockBrowser from './components/StockBrowser';
@@ -4031,6 +4032,296 @@ function App() {
     }
   };
 
+  // Prepare a short's project data without loading into editor — returns deps snapshot for render queue
+  const prepareShortForRender = async (short: GeneratedShort): Promise<{ deps: RendererDeps; name: string } | null> => {
+    // 1. Get source video
+    const videoRecord = await contentDB.getVideo(short.videoId);
+    if (!videoRecord) throw new Error(`Source video not found for "${short.title}"`);
+
+    // 2. Load video blob (cache or download)
+    let blob: Blob | undefined;
+    const videoId = extractYoutubeVideoId(videoRecord.url);
+    if (videoId) {
+      try {
+        const cacheRes = await fetch(`/api/local-cache?videoId=${videoId}`);
+        const cache = await cacheRes.json();
+        if (cache.hasVideo) {
+          const localVideoRes = await fetch(`/api/local-video?videoId=${videoId}`);
+          if (localVideoRes.ok) blob = await localVideoRes.blob();
+        }
+      } catch { /* fall through to download */ }
+    }
+    if (!blob) {
+      const downloadRes = await fetch(`/api/download?url=${encodeURIComponent(videoRecord.url)}&_t=${Date.now()}`);
+      if (!downloadRes.ok) throw new Error(`Download failed for "${short.title}": ${downloadRes.status}`);
+      blob = await downloadRes.blob();
+    }
+
+    const file = new File([blob], `${short.title}.mp4`, { type: 'video/mp4' });
+    const videoUrl = URL.createObjectURL(blob);
+
+    // 3. Get duration
+    const video = document.createElement('video');
+    video.src = videoUrl;
+    await new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve(null), 5000);
+      video.onloadedmetadata = () => { clearTimeout(timeout); resolve(null); };
+      video.onerror = () => { clearTimeout(timeout); resolve(null); };
+    });
+    const duration = video.duration || short.totalDuration || 60;
+
+    // 3.5. Snap clip boundaries to silence
+    let snappedSegments = short.segments;
+    try {
+      const audioBuffer = await getAudioBuffer(`short_batch_${short.id}`, file);
+      snappedSegments = short.segments.map(seg => {
+        const snapped = snapClipBoundaries(audioBuffer, seg.startTime, seg.endTime, 0.4);
+        return { ...seg, startTime: snapped.startTime, endTime: snapped.endTime };
+      });
+    } catch { /* skip snap */ }
+
+    // 4. Build analysis events (same logic as handleExportShort)
+    const allVideoSegments = await contentDB.getSegmentsByVideoId(short.videoId);
+    const cleanedSegments = snappedSegments.map(seg => {
+      const cleaned = cleanSegmentText(seg.text, seg.removedWordIndices, seg.keywords);
+      return { ...seg, text: cleaned.text, keywords: cleaned.keywords };
+    });
+
+    const analysisEvents: AnalysisEvent[] = [];
+    const rawClipEvents: any[] = [];
+    const processedSegmentIds = new Set<string>();
+
+    cleanedSegments.forEach((clipSeg) => {
+      const clipRaw = allVideoSegments.filter(s => {
+        const segEnd = s.start + s.duration;
+        return segEnd > clipSeg.startTime && s.start < clipSeg.endTime;
+      });
+      clipRaw.filter(s => {
+        if (processedSegmentIds.has(s.id)) return false;
+        processedSegmentIds.add(s.id);
+        return true;
+      }).forEach(s => rawClipEvents.push(s));
+    });
+
+    rawClipEvents.sort((a, b) => a.start - b.start);
+
+    if (rawClipEvents.length > 0) {
+      if (short.captionMode === 'words') {
+        for (const seg of rawClipEvents) {
+          const wordTimings = (seg.wordTimings || []).filter((wt: any) => wt && wt.text);
+          if (wordTimings.length > 0) {
+            for (const wt of wordTimings) {
+              const word = wt.text.trim();
+              if (!word) continue;
+              analysisEvents.push({
+                type: 'dialogue', startTime: wt.start, endTime: wt.end, label: 'speech',
+                details: word, wordEmphases: resolveKeywordsForEvent(word, cleanedSegments, wt.start, wt.end),
+              });
+            }
+          } else {
+            analysisEvents.push({
+              type: 'dialogue', startTime: seg.start, endTime: seg.start + seg.duration, label: 'speech',
+              details: seg.text, wordEmphases: resolveKeywordsForEvent(seg.text, cleanedSegments, seg.start, seg.start + seg.duration),
+            });
+          }
+        }
+      } else {
+        let buffer: any[] = [rawClipEvents[0]];
+        for (let i = 1; i < rawClipEvents.length; i++) {
+          const current = rawClipEvents[i];
+          const prev = buffer[buffer.length - 1];
+          const isContiguous = (current.start - (prev.start + prev.duration)) < 0.2;
+          const bufferDuration = (prev.start + prev.duration) - buffer[0].start;
+          const combinedDuration = (current.start + current.duration) - buffer[0].start;
+          if (isContiguous && (bufferDuration < 0.5 || buffer.length < 3) && combinedDuration < 1.5) {
+            buffer.push(current);
+          } else {
+            const start = buffer[0].start;
+            const end = buffer[buffer.length - 1].start + buffer[buffer.length - 1].duration;
+            const text = buffer.map((e: any) => e.text).join(' ');
+            const collectedWordTimings = buffer.flatMap((s: any) => s.wordTimings || []).filter((wt: any) => wt && wt.text);
+            analysisEvents.push({
+              type: 'dialogue', startTime: start, endTime: end, label: 'speech', details: text,
+              wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end),
+              ...(collectedWordTimings.length > 0 ? { wordTimings: collectedWordTimings } : {}),
+            });
+            buffer = [current];
+          }
+        }
+        if (buffer.length > 0) {
+          const start = buffer[0].start;
+          const end = buffer[buffer.length - 1].start + buffer[buffer.length - 1].duration;
+          const text = buffer.map((e: any) => e.text).join(' ');
+          const collectedWordTimings = buffer.flatMap((s: any) => s.wordTimings || []).filter((wt: any) => wt && wt.text);
+          analysisEvents.push({
+            type: 'dialogue', startTime: start, endTime: end, label: 'speech', details: text,
+            wordEmphases: resolveKeywordsForEvent(text, cleanedSegments, start, end),
+            ...(collectedWordTimings.length > 0 ? { wordTimings: collectedWordTimings } : {}),
+          });
+        }
+      }
+    }
+
+    if (analysisEvents.length === 0) {
+      cleanedSegments.forEach(seg => {
+        analysisEvents.push({
+          type: 'dialogue', startTime: seg.startTime, endTime: seg.endTime, label: 'speech',
+          details: seg.text, wordEmphases: seg.keywords?.filter(k => k.enabled) || [],
+        });
+      });
+    }
+
+    // 5. Create MediaItem
+    const newMediaItem: MediaItem = {
+      id: Math.random().toString(36).substr(2, 9),
+      file, url: videoUrl, duration, name: short.title,
+      analysis: { summary: `AI Short: ${short.prompt || 'Auto-generated'}`, events: analysisEvents, generatedAt: new Date() },
+    };
+    await contentDB.saveMediaBlob(newMediaItem.id, file).catch(() => {});
+
+    // 6. Build timeline segments
+    const FADE_DURATION = 1.0;
+    const clipCount = snappedSegments.length;
+    let timelinePosition = 0;
+    const newSegments: Segment[] = snappedSegments.map((clipSeg, index) => {
+      const clipDuration = clipSeg.endTime - clipSeg.startTime;
+      const segment: Segment = {
+        id: Math.random().toString(36).substr(2, 9),
+        mediaId: newMediaItem.id,
+        startTime: clipSeg.startTime, endTime: clipSeg.endTime,
+        timelineStart: timelinePosition, track: 0,
+        description: `${short.title} - Clip ${index + 1}`,
+        color: `hsl(${280 + index * 20}, 60%, 40%)`,
+        transitionIn: index === 0 ? { type: 'FADE' as TransitionType, duration: FADE_DURATION, easing: 'easeOut' } : undefined,
+        transitionOut: index === clipCount - 1 ? { type: 'FADE' as TransitionType, duration: FADE_DURATION, easing: 'easeIn' } : undefined,
+      };
+      timelinePosition += clipDuration;
+      return segment;
+    });
+
+    // 7. Title layer
+    const titleLayer: TitleLayer = {
+      id: Math.random().toString(36).substr(2, 9),
+      text: short.hookTitle || short.title,
+      startTime: 0, endTime: 4, fadeInDuration: 0.5, fadeOutDuration: 0.5,
+      style: INITIAL_TITLE_STYLE, keyframes: [],
+    };
+
+    // 8. Default subtitle animation
+    const defaultSubtitleTemplate = {
+      id: `preset_batch_${Date.now()}`, name: 'Fade Up', style: {} as React.CSSProperties,
+      animation: {
+        id: `anim_batch_${Date.now()}`, name: 'Fade Up Animation', duration: 1.5, scope: 'line' as const, stagger: 0.2,
+        effects: [
+          { id: 'su1', type: 'opacity' as const, from: 0, to: 1, startAt: 0, endAt: 0.6, easing: 'easeOut' as const },
+          { id: 'su2', type: 'translateY' as const, from: 20, to: 0, startAt: 0, endAt: 0.6, easing: 'easeOut' as const },
+        ],
+      },
+    };
+
+    // 9. Download B-roll
+    const bRollMediaItems: MediaItem[] = [];
+    const bRollSegments: Segment[] = [];
+    const approvedBRoll = (short.bRollSuggestions || []).filter(s => s.approved && s.pexelsResults?.length);
+    for (const broll of approvedBRoll) {
+      try {
+        const selectedVideo = broll.pexelsResults![(broll.selectedVideoIndex ?? 0)];
+        if (!selectedVideo?.videoFileUrl) continue;
+        const dlRes = await fetch(`/api/pexels/download?url=${encodeURIComponent(selectedVideo.videoFileUrl)}`);
+        if (!dlRes.ok) continue;
+        const brollBlob = await dlRes.blob();
+        const brollFile = new File([brollBlob], `broll_${broll.searchQuery.replace(/\s+/g, '_')}.mp4`, { type: 'video/mp4' });
+        const brollUrl = URL.createObjectURL(brollBlob);
+        const brollVideo = document.createElement('video');
+        brollVideo.src = brollUrl;
+        await new Promise(r => { brollVideo.onloadedmetadata = r; setTimeout(r, 3000); });
+        const brollDuration = brollVideo.duration && isFinite(brollVideo.duration) ? brollVideo.duration : broll.duration;
+        const brollMediaItem: MediaItem = {
+          id: Math.random().toString(36).substr(2, 9), file: brollFile, url: brollUrl,
+          duration: brollDuration, name: `B-Roll: ${broll.searchQuery}`, analysis: null,
+        };
+        bRollMediaItems.push(brollMediaItem);
+        const v1Seg = newSegments[broll.clipIndex];
+        if (!v1Seg) continue;
+        bRollSegments.push({
+          id: Math.random().toString(36).substr(2, 9), mediaId: brollMediaItem.id,
+          startTime: 0, endTime: Math.min(broll.duration, brollDuration),
+          timelineStart: v1Seg.timelineStart + broll.offsetInClip, track: 1,
+          description: `B-Roll: ${broll.searchQuery}`, color: '#0d9488', audioLinked: false,
+          transitionIn: { type: 'FADE' as TransitionType, duration: 0.3, easing: 'easeOut' },
+          transitionOut: { type: 'FADE' as TransitionType, duration: 0.3, easing: 'easeIn' },
+        });
+        await contentDB.saveMediaBlob(brollMediaItem.id, brollFile).catch(() => {});
+      } catch { /* skip failed b-roll */ }
+    }
+
+    // 10. Build self-contained deps snapshot
+    const allLibrary = [newMediaItem, ...bRollMediaItems];
+    const allSegments = [...newSegments, ...bRollSegments];
+
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+
+    const deps: RendererDeps = {
+      segments: allSegments,
+      globalKeyframes: [],
+      titleLayer,
+      subtitleStyle: project.subtitleStyle || {} as any,
+      titleStyle: (project as any).titleStyle || project.subtitleStyle || {},
+      activeSubtitleTemplate: (project as any).activeSubtitleTemplate || defaultSubtitleTemplate,
+      activeTitleTemplate: (project as any).activeTitleTemplate || null,
+      activeKeywordAnimation: (project as any).activeKeywordAnimation || null,
+      removedWords: [],
+      library: allLibrary,
+      videoRefs: new Map(), // OfflineRenderer creates its own pool from library URLs
+      audioContext: audioContextRef.current,
+      audioSourcesRef: new WeakMap(),
+      safeZoneHeight: safeZoneRef.current?.getBoundingClientRect().height || 720,
+      audioMixer: (project as any).audioMixer || undefined,
+      getCombinedTransform,
+      setIsExporting: (v: boolean) => { isExportingRef.current = v; setIsExporting(v); },
+    };
+
+    return { deps, name: short.title };
+  };
+
+  // Export All Shorts — prepare each short and add all to render queue
+  const handleExportAllShorts = async (shorts: GeneratedShort[], settings: ExportSettings) => {
+    console.log(`[Export All] Starting batch export of ${shorts.length} shorts...`);
+    setStatus(ProcessingStatus.TRANSCRIBING);
+
+    let queued = 0;
+    const errors: string[] = [];
+
+    for (let i = 0; i < shorts.length; i++) {
+      const short = shorts[i];
+      try {
+        console.log(`[Export All] Preparing ${i + 1}/${shorts.length}: "${short.title}"`);
+        const result = await prepareShortForRender(short);
+        if (result) {
+          renderQueue.addJob(settings, `${result.name}`, result.deps);
+          queued++;
+          console.log(`[Export All] Queued: "${result.name}"`);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Unknown error';
+        console.error(`[Export All] Failed to prepare "${short.title}":`, msg);
+        errors.push(`${short.title}: ${msg}`);
+      }
+    }
+
+    setStatus(ProcessingStatus.IDLE);
+    setActiveRightTab('render');
+    setActivePage('editor');
+
+    if (errors.length > 0) {
+      alert(`Queued ${queued}/${shorts.length} shorts for export.\n\nFailed:\n${errors.join('\n')}`);
+    } else {
+      console.log(`[Export All] All ${queued} shorts queued successfully.`);
+    }
+  };
+
   const handleSplit = async (time: number) => {
     const segmentsToSplit = project.segments.filter(s =>
       time > s.timelineStart && time < (s.timelineStart + (s.endTime - s.startTime))
@@ -6332,6 +6623,7 @@ function App() {
     return <ContentLibraryPage
       onNavigateToEditor={() => setActivePage('editor')}
       onExportShort={handleExportShort}
+      onExportAllShorts={handleExportAllShorts}
       autoCenterOnImport={autoCenterOnImport}
       onToggleAutoCenter={setAutoCenterOnImport}
       project={project}
