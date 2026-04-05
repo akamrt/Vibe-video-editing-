@@ -436,6 +436,16 @@ export class ContentDatabase {
         });
     }
 
+    async getShort(id: string): Promise<GeneratedShort | null> {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const store = this.getStore('shorts');
+            const request = store.get(id);
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
     async deleteShort(id: string): Promise<void> {
         await this.init();
         return new Promise((resolve, reject) => {

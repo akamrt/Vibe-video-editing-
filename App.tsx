@@ -240,6 +240,28 @@ function App() {
     return () => { stopHealthPolling(); unsub(); };
   }, []);
 
+  // Auto-export short from URL parameter (?exportShort=shortId)
+  // Used by "Export All" to open each short in its own browser tab
+  const autoExportHandled = useRef(false);
+  useEffect(() => {
+    if (autoExportHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const shortId = params.get('exportShort');
+    if (!shortId) return;
+    autoExportHandled.current = true;
+    // Clean URL without reloading
+    window.history.replaceState({}, '', window.location.pathname);
+    // Load short from IndexedDB and auto-export
+    contentDB.getShort(shortId).then(short => {
+      if (short) {
+        console.log(`[Auto-Export] Loading short "${short.title}" from URL param`);
+        handleExportShort(short);
+      } else {
+        console.warn(`[Auto-Export] Short "${shortId}" not found in database`);
+      }
+    }).catch(e => console.error('[Auto-Export] Failed:', e));
+  });
+
   // Cost tracker: load persisted data + subscribe to updates
   useEffect(() => {
     const sync = () => { setCostTotal(getSessionTotal()); setCostLog(getSessionLog()); };
@@ -4032,7 +4054,6 @@ function App() {
     }
   };
 
-  // Prepare a short's project data without loading into editor — returns deps snapshot for render queue
   const prepareShortForRender = async (short: GeneratedShort): Promise<{ deps: RendererDeps; name: string } | null> => {
     // 1. Get source video
     const videoRecord = await contentDB.getVideo(short.videoId);
@@ -6623,7 +6644,6 @@ function App() {
     return <ContentLibraryPage
       onNavigateToEditor={() => setActivePage('editor')}
       onExportShort={handleExportShort}
-      onExportAllShorts={handleExportAllShorts}
       autoCenterOnImport={autoCenterOnImport}
       onToggleAutoCenter={setAutoCenterOnImport}
       project={project}

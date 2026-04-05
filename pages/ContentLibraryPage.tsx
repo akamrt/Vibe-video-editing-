@@ -10,7 +10,6 @@ import { fetchAllTrends, getDefaultTrendState } from '../services/trendsService'
 import { TrendsTicker } from '../components/TrendsTicker';
 import { RepostRanker } from '../components/RepostRanker';
 import { TrendPromptBuilder } from '../components/TrendPromptBuilder';
-import ExportModal from '../components/ExportModal';
 import { listShortsFiles, saveShortsToFile, loadShortsFromFile, exportAllData, importAllData, createExportBundle, uploadMediaToBundle, readImportBundle, fetchBundleMedia, downloadBundleZip, importBundleFromUrl, SavedShortsInfo } from '../services/saveApi';
 
 // ==================== Types ====================
@@ -542,16 +541,13 @@ const ShortThumbnailPlayer: React.FC<{
 export const ContentLibraryPage: React.FC<{
     onNavigateToEditor?: () => void;
     onExportShort?: (short: GeneratedShort) => Promise<void>;
-    onExportAllShorts?: (shorts: GeneratedShort[], settings: import('../types').ExportSettings) => Promise<void>;
     autoCenterOnImport?: boolean;
     onToggleAutoCenter?: (enabled: boolean) => void;
     project?: any;
     onProjectLoad?: (project: any) => void;
-}> = ({ onNavigateToEditor, onExportShort, onExportAllShorts, autoCenterOnImport = false, onToggleAutoCenter, project, onProjectLoad }) => {
+}> = ({ onNavigateToEditor, onExportShort, autoCenterOnImport = false, onToggleAutoCenter, project, onProjectLoad }) => {
     // State
     const [isExporting, setIsExporting] = useState(false);
-    const [batchExportShorts, setBatchExportShorts] = useState<GeneratedShort[] | null>(null); // shorts pending batch export modal
-    const [batchExportProgress, setBatchExportProgress] = useState<string | null>(null);
     const [bundleProgress, setBundleProgress] = useState<string | null>(null);
     const [lastExportBundleId, setLastExportBundleId] = useState<string | null>(null);
     const [bundleUrlInput, setBundleUrlInput] = useState('');
@@ -2044,15 +2040,19 @@ export const ContentLibraryPage: React.FC<{
                             </div>
                         ) : (
                             <div className="space-y-8">
-                                {/* Global Export All button when there are multiple shorts */}
-                                {onExportAllShorts && generatedShorts.length > 1 && (
+                                {/* Global Export All button — opens each short in its own tab */}
+                                {generatedShorts.length > 1 && (
                                     <div className="flex justify-end">
                                         <button
-                                            onClick={() => setBatchExportShorts(generatedShorts)}
-                                            disabled={isExporting || !!batchExportProgress}
-                                            className="text-sm bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white px-5 py-2.5 rounded-lg transition-colors flex items-center gap-2 font-medium"
+                                            onClick={() => {
+                                                const baseUrl = window.location.origin + window.location.pathname;
+                                                generatedShorts.forEach(short => {
+                                                    window.open(`${baseUrl}?exportShort=${encodeURIComponent(short.id)}`, '_blank');
+                                                });
+                                            }}
+                                            className="text-sm bg-green-600 hover:bg-green-500 text-white px-5 py-2.5 rounded-lg transition-colors flex items-center gap-2 font-medium"
                                         >
-                                            {batchExportProgress || `Export All ${generatedShorts.length} Shorts to Render Queue`}
+                                            Export All {generatedShorts.length} Shorts in New Tabs
                                         </button>
                                     </div>
                                 )}
@@ -2072,13 +2072,17 @@ export const ContentLibraryPage: React.FC<{
                                                         {shorts.length} Short{shorts.length !== 1 ? 's' : ''} Generated
                                                     </span>
                                                 </div>
-                                                {onExportAllShorts && shorts.length > 1 && (
+                                                {shorts.length > 1 && (
                                                     <button
-                                                        onClick={() => setBatchExportShorts(shorts)}
-                                                        disabled={isExporting || !!batchExportProgress}
-                                                        className="text-sm bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap"
+                                                        onClick={() => {
+                                                            const baseUrl = window.location.origin + window.location.pathname;
+                                                            shorts.forEach(short => {
+                                                                window.open(`${baseUrl}?exportShort=${encodeURIComponent(short.id)}`, '_blank');
+                                                            });
+                                                        }}
+                                                        className="text-sm bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap"
                                                     >
-                                                        {batchExportProgress ? batchExportProgress : `Export All ${shorts.length}`}
+                                                        Export All {shorts.length}
                                                     </button>
                                                 )}
                                             </div>
@@ -2303,14 +2307,18 @@ export const ContentLibraryPage: React.FC<{
                                                 {isExporting ? 'Exporting...' : clipBasket.length > 0 ? `Export Cart (${clipBasket.length})` : 'Export Selected'}
                                             </button>
                                         )}
-                                        {/* Export All button — queue all shorts to render */}
-                                        {onExportAllShorts && generatedShortsPreview.length > 1 && (
+                                        {/* Export All button — opens each short in its own tab */}
+                                        {generatedShortsPreview.length > 1 && (
                                             <button
-                                                onClick={() => setBatchExportShorts(generatedShortsPreview)}
-                                                disabled={isExporting || !!batchExportProgress}
-                                                className="px-4 py-1.5 text-xs bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded font-medium"
+                                                onClick={() => {
+                                                    const baseUrl = window.location.origin + window.location.pathname;
+                                                    generatedShortsPreview.forEach(short => {
+                                                        window.open(`${baseUrl}?exportShort=${encodeURIComponent(short.id)}`, '_blank');
+                                                    });
+                                                }}
+                                                className="px-4 py-1.5 text-xs bg-green-600 hover:bg-green-500 rounded font-medium"
                                             >
-                                                {batchExportProgress || `Export All ${generatedShortsPreview.length}`}
+                                                Export All {generatedShortsPreview.length}
                                             </button>
                                         )}
                                     </div>
@@ -2560,29 +2568,6 @@ export const ContentLibraryPage: React.FC<{
                         onClearPreSelected={() => setTrendPreSelected([])}
                     />
                 </div>
-            )}
-            {/* Batch Export Modal — pick settings then queue all shorts */}
-            {batchExportShorts && (
-                <ExportModal
-                    isOpen={true}
-                    duration={batchExportShorts.reduce((sum, s) => sum + s.totalDuration, 0) / batchExportShorts.length}
-                    onClose={() => setBatchExportShorts(null)}
-                    onExport={async (settings) => {
-                        if (!onExportAllShorts || !batchExportShorts) return;
-                        const shorts = batchExportShorts;
-                        setBatchExportShorts(null);
-                        setBatchExportProgress(`Preparing 0/${shorts.length}...`);
-                        setIsExporting(true);
-                        try {
-                            await onExportAllShorts(shorts, settings);
-                        } catch (e) {
-                            alert('Batch export failed: ' + (e instanceof Error ? e.message : 'Unknown error'));
-                        } finally {
-                            setIsExporting(false);
-                            setBatchExportProgress(null);
-                        }
-                    }}
-                />
             )}
         </div >
     );
