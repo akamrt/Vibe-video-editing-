@@ -481,7 +481,16 @@ const AnimatedText: React.FC<AnimatedTextProps> = ({
 
         // Whitespace tokens: just render a space, no animation
         if (animation.scope === 'word' && staggerIndex === -1) {
+          // Newline tokens: force a flex line break so \n renders as a new line
+          if (el.includes('\n')) {
+            return <span key={rawIndex} style={{ flexBasis: '100%', height: 0 }} />;
+          }
           return <span key={rawIndex} style={{ whiteSpace: 'pre' }}>{el}</span>;
+        }
+
+        // Character scope newline: force a flex line break
+        if (animation.scope === 'character' && el === '\n') {
+          return <span key={rawIndex} style={{ flexBasis: '100%', height: 0 }} />;
         }
 
         // Dual-stack mode: non-word scope + keywordAnimation + keywords present

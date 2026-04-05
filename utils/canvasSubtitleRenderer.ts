@@ -158,6 +158,46 @@ interface ElementAnimValues {
 }
 
 /**
+ * Word-wrap a single line of text at word boundaries to fit within maxWidth.
+ * Returns an array of wrapped lines.
+ */
+function wrapLine(ctx: CanvasRenderingContext2D, line: string, maxWidth: number): string[] {
+    if (maxWidth <= 0 || !line) return [line];
+    const measured = ctx.measureText(line).width;
+    if (measured <= maxWidth) return [line];
+
+    const words = line.split(/(\s+)/);
+    const result: string[] = [];
+    let currentLine = '';
+
+    for (const word of words) {
+        const testLine = currentLine + word;
+        if (ctx.measureText(testLine).width > maxWidth && currentLine.length > 0) {
+            result.push(currentLine);
+            // If the word is whitespace, don't start a new line with it
+            currentLine = /^\s+$/.test(word) ? '' : word;
+        } else {
+            currentLine = testLine;
+        }
+    }
+    if (currentLine) result.push(currentLine);
+    return result.length > 0 ? result : [line];
+}
+
+/**
+ * Split text into visual lines: first by explicit \n, then word-wrap each.
+ */
+function splitAndWrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+    const explicitLines = text.split('\n');
+    const result: string[] = [];
+    for (const line of explicitLines) {
+        const wrapped = wrapLine(ctx, line, maxWidth);
+        result.push(...wrapped);
+    }
+    return result;
+}
+
+/**
  * Post-process a split(/(\s+)/) array so that \n characters are always
  * isolated as their own tokens. Without this, " \n" or "\n " get grouped
  * as a single whitespace token and newline detection fails.
@@ -520,7 +560,8 @@ function computeWordCanvasRects(
     outputWidth: number,
     textPaddingH: number,
 ): CanvasWordRect[] {
-    const textLines = text.split('\n');
+    const maxTextWidth = outputWidth * 0.9 - textPaddingH * 2;
+    const textLines = splitAndWrapText(ctx, text, maxTextWidth);
     const result: CanvasWordRect[] = [];
     const numLines = textLines.length;
     const lineYStart = numLines > 1 ? -((numLines * lineHeight) - lineHeight) / 2 : 0;
@@ -934,35 +975,50 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     // Compute per-element animation values
     const elements = computeElementAnimations(text, effectiveAnimation, frame, fps, wordEmphases, keywordAnimation);
 
-    // Check if we have multi-line content (line-scope or text with \n)
-    const hasNewlines = elements.some(el => el.text.includes('\n'));
-
     // Measure all elements (skip newline markers)
     const elementWidths = elements.map((el: ElementAnimValues) => {
         if (el.text === '\n') return 0;
         return ctx.measureText(el.text).width;
     });
 
-    // For multi-line: compute per-line widths and layout
+    // Compute per-line layout: break on explicit \n AND word-wrap at max width
+    // This matches the viewport's whiteSpace: 'pre-wrap' + flexWrap: 'wrap'
+    const maxTextWidth = outputWidth * 0.9 - textPaddingH * 2;
     const lineHeight = fontSize * 1.4;
     let lines: { startIdx: number; endIdx: number; width: number }[] = [];
-    if (hasNewlines) {
+    {
         let lineStart = 0;
         let lineW = 0;
         for (let i = 0; i < elements.length; i++) {
             if (elements[i].text === '\n') {
+                // Explicit newline: finish current line
                 lines.push({ startIdx: lineStart, endIdx: i, width: lineW });
                 lineStart = i + 1;
                 lineW = 0;
             } else {
-                lineW += elementWidths[i];
+                const elW = elementWidths[i];
+                const isWhitespace = /^\s+$/.test(elements[i].text);
+                // Word-wrap: if adding this non-whitespace element would exceed max width,
+                // start a new line (always allow at least one word per line)
+                if (maxTextWidth > 0 && !isWhitespace && lineW + elW > maxTextWidth && lineW > 0) {
+                    // Trim trailing whitespace from the line we're closing
+                    let endIdx = i;
+                    let trimmedW = lineW;
+                    while (endIdx > lineStart && /^\s+$/.test(elements[endIdx - 1].text)) {
+                        trimmedW -= elementWidths[endIdx - 1];
+                        endIdx--;
+                    }
+                    lines.push({ startIdx: lineStart, endIdx, width: trimmedW });
+                    // This word starts the new line
+                    lineStart = i;
+                    lineW = elW;
+                } else {
+                    lineW += elW;
+                }
             }
         }
         // Last line
         lines.push({ startIdx: lineStart, endIdx: elements.length, width: lineW });
-    } else {
-        const totalWidth = elementWidths.reduce((sum: number, w: number) => sum + w, 0);
-        lines = [{ startIdx: 0, endIdx: elements.length, width: totalWidth }];
     }
 
     const totalWidth = Math.max(...lines.map(l => l.width));
@@ -1127,6 +1183,17 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
             continue;
         }
 
+        // Check if this element starts a new wrapped line
+        // (lines created by word-wrapping, not explicit \n)
+        while (currentLineIdx < lines.length - 1 && i >= lines[currentLineIdx].endIdx) {
+            currentLineIdx++;
+            xOffset = computeLineXOffset(lines[currentLineIdx].width);
+            yOffset = lineYStart + currentLineIdx * lineHeight;
+        }
+
+        // Skip elements outside current line range (trimmed whitespace)
+        if (i < lines[currentLineIdx].startIdx) continue;
+
         if (el.opacity <= 0.01) {
             if (!/^\s+$/.test(el.text)) hlWordIdx++;
             xOffset += elWidth;
@@ -1288,8 +1355,9 @@ function drawPlainText(
         }
     }
 
-    // Handle multi-line text: split on \n, draw each line with proper spacing
-    const lines = text.split('\n');
+    // Handle multi-line text: split on \n AND word-wrap to match viewport's pre-wrap
+    const maxTextWidth = outputWidth * 0.9 - textPaddingH * 2;
+    const lines = splitAndWrapText(ctx, text, maxTextWidth);
     const lineHeight = fontSize * 1.4;
     const totalTextHeight = lines.length * lineHeight;
     // Offset to center all lines vertically around the baseline position (y=0)
