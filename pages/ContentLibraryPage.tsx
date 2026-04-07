@@ -590,6 +590,11 @@ export const ContentLibraryPage: React.FC<{
     const [generatedShort, setGeneratedShort] = useState<GeneratedShort | null>(null);
     const [generatedShortsPreview, setGeneratedShortsPreview] = useState<GeneratedShort[]>([]);
     const [selectedShortIndex, setSelectedShortIndex] = useState<number | null>(null);
+    // "Export All" modal — shows clickable links per short. Browser popup blockers
+    // block multiple window.open() calls from one user gesture, but anchor link
+    // clicks (one per gesture) bypass blockers.
+    const [exportAllModalShorts, setExportAllModalShorts] = useState<GeneratedShort[] | null>(null);
+    const [exportAllOpenedIds, setExportAllOpenedIds] = useState<Set<string>>(new Set());
     const [expandedBRoll, setExpandedBRoll] = useState<Record<number, boolean>>({});
     const [expandedKeywords, setExpandedKeywords] = useState<Record<number, boolean>>({});
     const [captionMode, setCaptionMode] = useState<'sentences' | 'words'>('sentences');
@@ -2040,16 +2045,11 @@ export const ContentLibraryPage: React.FC<{
                             </div>
                         ) : (
                             <div className="space-y-8">
-                                {/* Global Export All button — opens each short in its own tab */}
+                                {/* Global Export All button — opens modal with one link per short */}
                                 {generatedShorts.length > 1 && (
                                     <div className="flex justify-end">
                                         <button
-                                            onClick={() => {
-                                                const baseUrl = window.location.origin + window.location.pathname;
-                                                generatedShorts.forEach(short => {
-                                                    window.open(`${baseUrl}?exportShort=${encodeURIComponent(short.id)}`, '_blank');
-                                                });
-                                            }}
+                                            onClick={() => { setExportAllOpenedIds(new Set()); setExportAllModalShorts(generatedShorts); }}
                                             className="text-sm bg-green-600 hover:bg-green-500 text-white px-5 py-2.5 rounded-lg transition-colors flex items-center gap-2 font-medium"
                                         >
                                             Export All {generatedShorts.length} Shorts in New Tabs
@@ -2074,12 +2074,7 @@ export const ContentLibraryPage: React.FC<{
                                                 </div>
                                                 {shorts.length > 1 && (
                                                     <button
-                                                        onClick={() => {
-                                                            const baseUrl = window.location.origin + window.location.pathname;
-                                                            shorts.forEach(short => {
-                                                                window.open(`${baseUrl}?exportShort=${encodeURIComponent(short.id)}`, '_blank');
-                                                            });
-                                                        }}
+                                                        onClick={() => { setExportAllOpenedIds(new Set()); setExportAllModalShorts(shorts); }}
                                                         className="text-sm bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap"
                                                     >
                                                         Export All {shorts.length}
@@ -2307,15 +2302,10 @@ export const ContentLibraryPage: React.FC<{
                                                 {isExporting ? 'Exporting...' : clipBasket.length > 0 ? `Export Cart (${clipBasket.length})` : 'Export Selected'}
                                             </button>
                                         )}
-                                        {/* Export All button — opens each short in its own tab */}
+                                        {/* Export All button — opens modal with one link per short */}
                                         {generatedShortsPreview.length > 1 && (
                                             <button
-                                                onClick={() => {
-                                                    const baseUrl = window.location.origin + window.location.pathname;
-                                                    generatedShortsPreview.forEach(short => {
-                                                        window.open(`${baseUrl}?exportShort=${encodeURIComponent(short.id)}`, '_blank');
-                                                    });
-                                                }}
+                                                onClick={() => { setExportAllOpenedIds(new Set()); setExportAllModalShorts(generatedShortsPreview); }}
                                                 className="px-4 py-1.5 text-xs bg-green-600 hover:bg-green-500 rounded font-medium"
                                             >
                                                 Export All {generatedShortsPreview.length}
@@ -2567,6 +2557,87 @@ export const ContentLibraryPage: React.FC<{
                         }}
                         onClearPreSelected={() => setTrendPreSelected([])}
                     />
+                </div>
+            )}
+
+            {/* ==================== Export All Shorts Modal ==================== */}
+            {/* Browser popup blockers prevent opening multiple tabs from one click,
+                so this modal renders one anchor link per short. Each link is a real
+                <a target="_blank"> that the user clicks individually — bypasses blockers. */}
+            {exportAllModalShorts && (
+                <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[100] p-4">
+                    <div className="bg-[#1a1a1a] rounded-xl w-full max-w-lg max-h-[90vh] overflow-hidden border border-[#333] flex flex-col">
+                        <div className="p-4 border-b border-[#333] flex items-center justify-between">
+                            <div>
+                                <h3 className="text-lg font-bold">Export {exportAllModalShorts.length} Shorts</h3>
+                                <p className="text-xs text-gray-500 mt-0.5">{exportAllOpenedIds.size} of {exportAllModalShorts.length} opened</p>
+                            </div>
+                            <button onClick={() => { setExportAllModalShorts(null); setExportAllOpenedIds(new Set()); }} className="text-gray-400 hover:text-white text-2xl leading-none">×</button>
+                        </div>
+                        <div className="px-4 py-3 text-xs text-amber-300/90 bg-amber-900/20 border-b border-amber-900/40">
+                            Browsers block multiple popup tabs from a single click. Click <span className="font-semibold">Open</span> on each short below to open it in its own tab — each click counts as a separate user gesture.
+                        </div>
+                        <div className="flex-1 overflow-auto p-3 space-y-2">
+                            {exportAllModalShorts.map((short, idx) => {
+                                const url = `${window.location.pathname}?exportShort=${encodeURIComponent(short.id)}`;
+                                const opened = exportAllOpenedIds.has(short.id);
+                                return (
+                                    <div key={short.id} className={`flex items-center gap-3 p-2 rounded border ${opened ? 'bg-green-900/20 border-green-700/40' : 'bg-[#222] border-[#333]'}`}>
+                                        <span className="text-xs text-gray-500 font-mono w-6 text-right">{idx + 1}.</span>
+                                        <span className="flex-1 text-sm truncate" title={short.title}>{short.title}</span>
+                                        <span className="text-[10px] text-gray-500 font-mono whitespace-nowrap">{formatDuration(short.totalDuration)}</span>
+                                        <a
+                                            href={url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={() => {
+                                                setExportAllOpenedIds(prev => {
+                                                    const next = new Set(prev);
+                                                    next.add(short.id);
+                                                    return next;
+                                                });
+                                            }}
+                                            className={`text-xs px-3 py-1.5 rounded font-medium text-white ${opened ? 'bg-gray-600 hover:bg-gray-500' : 'bg-green-600 hover:bg-green-500'}`}
+                                        >
+                                            {opened ? 'Reopen' : 'Open'}
+                                        </a>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <div className="p-3 border-t border-[#333] flex justify-between items-center gap-2">
+                            <button
+                                onClick={() => {
+                                    // Convenience: try to open all at once. Will only work if the user
+                                    // has allowed popups for this site, otherwise only the first opens.
+                                    let openedCount = 0;
+                                    const newlyOpened = new Set(exportAllOpenedIds);
+                                    exportAllModalShorts.forEach(short => {
+                                        const url = `${window.location.pathname}?exportShort=${encodeURIComponent(short.id)}`;
+                                        const win = window.open(url, '_blank');
+                                        if (win) {
+                                            openedCount++;
+                                            newlyOpened.add(short.id);
+                                        }
+                                    });
+                                    setExportAllOpenedIds(newlyOpened);
+                                    if (openedCount < exportAllModalShorts.length) {
+                                        // Some were blocked — keep modal open so user can click remaining
+                                    }
+                                }}
+                                className="text-xs bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded font-medium"
+                                title="Tries window.open() for all — only works if popups are allowed for this site"
+                            >
+                                Try Open All
+                            </button>
+                            <button
+                                onClick={() => { setExportAllModalShorts(null); setExportAllOpenedIds(new Set()); }}
+                                className="text-xs text-gray-400 hover:text-white px-3 py-1.5"
+                            >
+                                Done
+                            </button>
+                        </div>
+                    </div>
                 </div>
             )}
         </div >
