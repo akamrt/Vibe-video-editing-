@@ -4031,6 +4031,34 @@ function App() {
     }
   };
 
+  // On mount: if URL has ?loadShortId=<id>, load that short from localStorage and export it.
+  // Used by the "Export All" feature in ContentLibraryPage which opens one tab per short.
+  const pendingShortLoadRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (pendingShortLoadRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const shortId = params.get('loadShortId');
+    if (!shortId) return;
+    pendingShortLoadRef.current = true;
+    try {
+      const raw = localStorage.getItem(`pendingShort_${shortId}`);
+      if (!raw) {
+        console.warn('[loadShortId] No pending short found in localStorage for id:', shortId);
+        return;
+      }
+      const short = JSON.parse(raw) as GeneratedShort;
+      localStorage.removeItem(`pendingShort_${shortId}`);
+      // Clear the URL param so refresh doesn't re-trigger
+      const url = new URL(window.location.href);
+      url.searchParams.delete('loadShortId');
+      window.history.replaceState({}, '', url.toString());
+      // Trigger export
+      handleExportShort(short).catch(e => console.error('[loadShortId] export failed:', e));
+    } catch (e) {
+      console.error('[loadShortId] failed to parse pending short:', e);
+    }
+  }, []);
+
   const handleSplit = async (time: number) => {
     const segmentsToSplit = project.segments.filter(s =>
       time > s.timelineStart && time < (s.timelineStart + (s.endTime - s.startTime))

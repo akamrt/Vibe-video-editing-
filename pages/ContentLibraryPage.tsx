@@ -2219,9 +2219,40 @@ export const ContentLibraryPage: React.FC<{
                                 <div className="flex items-center justify-between mb-4">
                                     <div>
                                         <h4 className="text-sm font-bold text-white">{generatedShortsPreview.length} Shorts Generated</h4>
-                                        <p className="text-xs text-gray-500">Select one to export</p>
+                                        <p className="text-xs text-gray-500">Select one to export, or export all</p>
                                     </div>
                                     <div className="flex items-center gap-2 flex-wrap">
+                                        {generatedShortsPreview.length > 1 && (
+                                            <button
+                                                onClick={() => {
+                                                    // IMPORTANT: All work in this handler must be synchronous (no await)
+                                                    // so the browser treats every window.open() as part of the same
+                                                    // user gesture and doesn't block popups after the first one.
+                                                    let openedCount = 0;
+                                                    let blockedCount = 0;
+                                                    for (const baseShort of generatedShortsPreview) {
+                                                        const short = { ...baseShort, captionMode };
+                                                        try {
+                                                            localStorage.setItem(`pendingShort_${short.id}`, JSON.stringify(short));
+                                                        } catch (e) {
+                                                            console.error('[Export All] localStorage write failed for', short.id, e);
+                                                            continue;
+                                                        }
+                                                        const url = `${window.location.pathname}?loadShortId=${encodeURIComponent(short.id)}`;
+                                                        const win = window.open(url, '_blank');
+                                                        if (win) openedCount++;
+                                                        else blockedCount++;
+                                                    }
+                                                    if (blockedCount > 0) {
+                                                        alert(`Opened ${openedCount} of ${generatedShortsPreview.length} tabs. ${blockedCount} were blocked by your browser's popup blocker — please allow popups for this site and try again.`);
+                                                    }
+                                                }}
+                                                className="px-3 py-1.5 text-xs bg-green-700 hover:bg-green-600 rounded font-medium text-white"
+                                                title="Open each short in its own browser tab"
+                                            >
+                                                {`Export All ${generatedShortsPreview.length} (new tabs)`}
+                                            </button>
+                                        )}
                                         <button onClick={() => { setGeneratedShortsPreview([]); setGeneratedShort(null); setSelectedShortIndex(null); setOmittedClips(new Map()); setClipBasket([]); }} className="px-3 py-1.5 text-xs border border-[#333] hover:bg-[#222] rounded text-gray-400">Start Over</button>
                                         {/* Caption mode selector */}
                                         <div className="flex items-center gap-1 bg-[#222] border border-[#333] rounded overflow-hidden">
