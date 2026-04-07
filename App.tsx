@@ -241,26 +241,32 @@ function App() {
   }, []);
 
   // Auto-export short from URL parameter (?exportShort=shortId)
-  // Used by "Export All" to open each short in its own browser tab
-  const autoExportHandled = useRef(false);
+  // Used by "Export All" to open each short in its own browser tab.
+  // handleExportShort is defined later in this component body, but useEffect
+  // callbacks run AFTER render completes, so it's already initialized by then.
+  // We use a ref so the effect doesn't need handleExportShort in its deps.
+  const handleExportShortRef = useRef<((short: GeneratedShort) => Promise<void>) | null>(null);
   useEffect(() => {
-    if (autoExportHandled.current) return;
     const params = new URLSearchParams(window.location.search);
     const shortId = params.get('exportShort');
     if (!shortId) return;
-    autoExportHandled.current = true;
     // Clean URL without reloading
     window.history.replaceState({}, '', window.location.pathname);
     // Load short from IndexedDB and auto-export
     contentDB.getShort(shortId).then(short => {
-      if (short) {
-        console.log(`[Auto-Export] Loading short "${short.title}" from URL param`);
-        handleExportShort(short);
-      } else {
+      if (!short) {
         console.warn(`[Auto-Export] Short "${shortId}" not found in database`);
+        return;
+      }
+      const fn = handleExportShortRef.current;
+      if (fn) {
+        console.log(`[Auto-Export] Loading short "${short.title}" from URL param`);
+        fn(short);
+      } else {
+        console.error('[Auto-Export] handleExportShort ref not yet set');
       }
     }).catch(e => console.error('[Auto-Export] Failed:', e));
-  });
+  }, []);
 
   // Cost tracker: load persisted data + subscribe to updates
   useEffect(() => {
@@ -4053,6 +4059,10 @@ function App() {
       setStatus(ProcessingStatus.IDLE);
     }
   };
+
+  // Expose handleExportShort to the auto-export effect (which runs once on mount,
+  // before this function is defined within the same render).
+  handleExportShortRef.current = handleExportShort;
 
   const prepareShortForRender = async (short: GeneratedShort): Promise<{ deps: RendererDeps; name: string } | null> => {
     // 1. Get source video
