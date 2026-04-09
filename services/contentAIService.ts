@@ -5,8 +5,9 @@
  * This keeps the API key secure on the server and avoids browser rate limits.
  */
 
-import { contentDB, VideoRecord, TranscriptSegment, GeneratedShort, ShortSegment, BRollSuggestion, PexelsVideoResult, PexelsPhotoResult, generateId } from "./contentDatabase";
+import { contentDB, VideoRecord, TranscriptSegment, GeneratedShort, ShortSegment, BRollSuggestion, PexelsVideoResult, PexelsPhotoResult, SocialPackage, BrandSettings, generateId } from "./contentDatabase";
 import { trackServerUsage } from "./costTracker";
+import { loadBrandSettings } from "./brandSettings";
 
 // ==================== Types ====================
 
@@ -333,6 +334,375 @@ export async function generateShort(
         return {
             success: false,
             error: "Failed to generate short: " + (error instanceof Error ? error.message : "Unknown error")
+        };
+    }
+}
+
+// ==================== Social Media Packages ====================
+
+export interface SocialPackageResult {
+    success: boolean;
+    shorts?: GeneratedShort[];
+    error?: string;
+}
+
+/**
+ * Collapse a short's clips into a single plain-text transcript that mirrors
+ * what the viewer will hear. Honors `removedWordIndices` when present.
+ */
+function buildClipTextForShort(short: GeneratedShort): string {
+    return short.segments.map(seg => {
+        if (!seg.text) return '';
+        if (!seg.removedWordIndices || seg.removedWordIndices.length === 0) return seg.text;
+        const removed = new Set(seg.removedWordIndices);
+        return seg.text.split(/\s+/).filter((_, i) => !removed.has(i)).join(' ');
+    }).filter(Boolean).join(' ');
+}
+
+/**
+ * Build the payload shared by both the in-app and external-AI flows.
+ * Looks up the source video URL so YouTube descriptions can link back.
+ */
+async function buildSocialPackagesPayload(shorts: GeneratedShort[]) {
+    if (shorts.length === 0) throw new Error('No shorts provided');
+    const brandSettings: BrandSettings = loadBrandSettings();
+    const firstShort = shorts[0];
+    const video = await contentDB.getVideo(firstShort.videoId);
+
+    const payload = {
+        shorts: shorts.map(s => ({
+            id: s.id,
+            title: s.title,
+            hookTitle: s.hookTitle,
+            hook: s.hook,
+            resolution: s.resolution,
+            clipText: buildClipTextForShort(s),
+        })),
+        videoTitle: video?.title || firstShort.videoTitle || 'Unknown',
+        sourceVideoUrl: video?.url || '',
+        brandSettings,
+    };
+
+    return { payload, brandSettings, sourceVideoUrl: video?.url || '' };
+}
+
+/**
+ * Parse the LLM's JSON response into a `packages` array, tolerating common
+ * wrapping mistakes (markdown fences, trailing commas, smart quotes).
+ */
+function parsePackagesJson(raw: string | any): any[] {
+    // If the server already parsed the JSON (callGemini returns a parsed object), use it.
+    if (raw && typeof raw === 'object') {
+        if (Array.isArray(raw.packages)) return raw.packages;
+        if (Array.isArray(raw)) return raw;
+        // Single-package wrapped as object
+        if (raw.instagram && raw.tiktok && raw.youtube) return [raw];
+        throw new Error('Response missing "packages" array');
+    }
+
+    if (typeof raw !== 'string') throw new Error('Unexpected response type');
+
+    let clean = raw.trim();
+    const fenceMatch = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fenceMatch && fenceMatch[1]) clean = fenceMatch[1].trim();
+
+    clean = clean
+        .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"')
+        .replace(/[\u2018\u2019\u201A\u201B\u2032\u2035]/g, "'")
+        .replace(/[\u00AB\u00BB]/g, '"')
+        .replace(/[\uFEFF\u200B\u200C\u200D\u2060]/g, '')
+        .replace(/,\s*([\]}])/g, '$1');
+
+    const firstBrace = clean.search(/[\[{]/);
+    if (firstBrace > 0) clean = clean.substring(firstBrace);
+
+    const parsed = JSON.parse(clean);
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed.packages)) return parsed.packages;
+    if (parsed.instagram && parsed.tiktok && parsed.youtube) return [parsed];
+    throw new Error('Parsed JSON missing "packages" array');
+}
+
+/**
+ * Validate a single package object against the expected shape. Throws on
+ * failure so the caller surfaces a readable error.
+ */
+function validatePackage(p: any, index: number): void {
+    const required = ['instagram', 'tiktok', 'youtube'];
+    for (const key of required) {
+        if (!p[key] || typeof p[key] !== 'object') {
+            throw new Error(`Package ${index}: missing "${key}" object`);
+        }
+    }
+    if (!Array.isArray(p.instagram.hashtags)) throw new Error(`Package ${index}: instagram.hashtags must be an array`);
+    if (!Array.isArray(p.tiktok.hashtags)) throw new Error(`Package ${index}: tiktok.hashtags must be an array`);
+    if (!Array.isArray(p.tiktok.onScreenText)) throw new Error(`Package ${index}: tiktok.onScreenText must be an array`);
+    if (!Array.isArray(p.youtube.titles)) throw new Error(`Package ${index}: youtube.titles must be an array`);
+    if (!Array.isArray(p.youtube.thumbnailText)) throw new Error(`Package ${index}: youtube.thumbnailText must be an array`);
+    if (!Array.isArray(p.youtube.tags)) throw new Error(`Package ${index}: youtube.tags must be an array`);
+}
+
+/**
+ * Match a parsed package back to its source short. Prefers id match, falls
+ * back to positional match so models that drop the id field still work.
+ */
+function matchPackagesToShorts(packages: any[], shorts: GeneratedShort[]): Array<{ short: GeneratedShort; pkg: any }> {
+    const pairs: Array<{ short: GeneratedShort; pkg: any }> = [];
+    for (let i = 0; i < shorts.length; i++) {
+        const short = shorts[i];
+        let pkg = packages.find(p => p && p.id === short.id);
+        if (!pkg) pkg = packages[i]; // positional fallback
+        if (pkg) pairs.push({ short, pkg });
+    }
+    return pairs;
+}
+
+/**
+ * In-app path: POST to /api/ai/generate-social-packages, validate the
+ * response, write each package onto its short, and persist. Returns the
+ * updated shorts so the caller can update local state.
+ */
+export async function generateSocialPackages(
+    shorts: GeneratedShort[],
+    model?: string
+): Promise<SocialPackageResult> {
+    if (!shorts || shorts.length === 0) {
+        return { success: false, error: 'No shorts provided' };
+    }
+
+    try {
+        const { payload, brandSettings, sourceVideoUrl } = await buildSocialPackagesPayload(shorts);
+
+        console.log(`[ContentAI] Generating social packages for ${shorts.length} shorts`);
+
+        const response = await fetch('/api/ai/generate-social-packages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...payload, model })
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: 'Unknown error' }));
+            throw new Error(err.error || 'Social package generation failed');
+        }
+
+        const json = await response.json();
+
+        if (json._usageMetadata) {
+            trackServerUsage('Generate Social Packages', model || 'gemini-2.5-flash', json._usageMetadata);
+            delete json._usageMetadata;
+        }
+
+        const packages = parsePackagesJson(json);
+        if (packages.length === 0) {
+            return { success: false, error: 'No packages returned' };
+        }
+
+        const pairs = matchPackagesToShorts(packages, shorts);
+        if (pairs.length === 0) {
+            return { success: false, error: 'Could not match any packages to shorts' };
+        }
+
+        const updatedShorts: GeneratedShort[] = [];
+        for (let i = 0; i < pairs.length; i++) {
+            const { short, pkg } = pairs[i];
+            try {
+                validatePackage(pkg, i);
+            } catch (e) {
+                console.warn('[ContentAI] Skipping invalid package:', e);
+                continue;
+            }
+
+            const socialPackage: SocialPackage = {
+                instagram: pkg.instagram,
+                tiktok: pkg.tiktok,
+                youtube: pkg.youtube,
+                generatedAt: new Date(),
+                modelUsed: model || 'gemini-2.5-flash',
+                brandSnapshot: brandSettings,
+                sourceVideoUrl: sourceVideoUrl || undefined,
+            };
+
+            const updated: GeneratedShort = { ...short, socialPackage };
+            await contentDB.addShort(updated); // put() is upsert
+            updatedShorts.push(updated);
+        }
+
+        if (updatedShorts.length === 0) {
+            return { success: false, error: 'All returned packages were invalid' };
+        }
+
+        console.log(`[ContentAI] Persisted social packages for ${updatedShorts.length} shorts`);
+        return { success: true, shorts: updatedShorts };
+    } catch (error) {
+        console.error('[ContentAI] Social package generation error:', error);
+        return {
+            success: false,
+            error: 'Failed to generate social packages: ' + (error instanceof Error ? error.message : 'Unknown error')
+        };
+    }
+}
+
+/**
+ * External-AI path — returns the prompt string for the user to paste into
+ * ChatGPT/Claude externally. Mirrors `buildShortPrompt`.
+ */
+export async function buildSocialPackagesPrompt(
+    shorts: GeneratedShort[]
+): Promise<{ success: boolean; prompt?: string; error?: string }> {
+    if (!shorts || shorts.length === 0) {
+        return { success: false, error: 'No shorts provided' };
+    }
+
+    try {
+        const { payload } = await buildSocialPackagesPayload(shorts);
+        const response = await fetch('/api/ai/build-social-packages-prompt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: 'Unknown error' }));
+            throw new Error(err.error || 'Failed to build prompt');
+        }
+
+        const json = await response.json();
+        return { success: true, prompt: json.prompt };
+    } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+}
+
+/**
+ * Build a social-packages prompt from raw shorts JSON (pre-import).
+ * Used in the Generate Short modal when the user has pasted shorts JSON
+ * but hasn't imported yet — we extract the short data from the raw text
+ * and send it to the server to build the prompt.
+ */
+export async function buildSocialPromptFromRawJson(
+    rawShortsJson: string,
+    videoTitle?: string
+): Promise<{ success: boolean; prompt?: string; error?: string }> {
+    if (!rawShortsJson?.trim()) return { success: false, error: 'Empty JSON' };
+
+    try {
+        let clean = rawShortsJson.trim();
+        const fenceMatch = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+        if (fenceMatch?.[1]) clean = fenceMatch[1].trim();
+        clean = clean.replace(/,\s*([\]}])/g, '$1');
+
+        const parsed = JSON.parse(clean);
+        const rawShorts: any[] = Array.isArray(parsed) ? parsed
+            : Array.isArray(parsed.shorts) ? parsed.shorts
+            : [parsed];
+
+        if (rawShorts.length === 0) return { success: false, error: 'No shorts found in JSON' };
+
+        const shorts = rawShorts.map((s: any, i: number) => ({
+            id: s.id || `short_${i + 1}`,
+            title: s.title || s.hookTitle || `Short ${i + 1}`,
+            hookTitle: s.hookTitle || s.title || '',
+            hook: s.hook || '',
+            resolution: s.resolution || '',
+            clipText: s.clipText || (s.segments || []).map((seg: any) => seg.text || '').filter(Boolean).join(' ') || '',
+        }));
+
+        const derivedTitle = videoTitle
+            || rawShorts[0]?.videoTitle
+            || rawShorts[0]?.sourceTitle
+            || 'Unknown Video';
+
+        const brandSettings = loadBrandSettings();
+        const payload = {
+            shorts,
+            videoTitle: derivedTitle,
+            sourceVideoUrl: '',
+            brandSettings,
+        };
+
+        const response = await fetch('/api/ai/build-social-packages-prompt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: 'Unknown error' }));
+            throw new Error(err.error || 'Failed to build prompt');
+        }
+
+        const json = await response.json();
+        return { success: true, prompt: json.prompt };
+    } catch (error) {
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to parse shorts JSON' };
+    }
+}
+
+/**
+ * Parse pasted JSON from an external LLM and write the resulting packages
+ * back onto the matching shorts. Mirrors `importManualShort`.
+ */
+export async function importSocialPackagesFromJson(
+    jsonString: string,
+    shorts: GeneratedShort[]
+): Promise<SocialPackageResult> {
+    if (!jsonString?.trim()) {
+        return { success: false, error: 'Empty JSON' };
+    }
+    if (!shorts || shorts.length === 0) {
+        return { success: false, error: 'No shorts to attach packages to' };
+    }
+
+    try {
+        const packages = parsePackagesJson(jsonString);
+        if (packages.length === 0) return { success: false, error: 'No packages found in JSON' };
+
+        const brandSettings = loadBrandSettings();
+        const firstShort = shorts[0];
+        const video = await contentDB.getVideo(firstShort.videoId);
+        const sourceVideoUrl = video?.url || '';
+
+        const pairs = matchPackagesToShorts(packages, shorts);
+        if (pairs.length === 0) {
+            return { success: false, error: 'Could not match any packages to shorts' };
+        }
+
+        const updatedShorts: GeneratedShort[] = [];
+        for (let i = 0; i < pairs.length; i++) {
+            const { short, pkg } = pairs[i];
+            try {
+                validatePackage(pkg, i);
+            } catch (e) {
+                console.warn('[ContentAI] Skipping invalid package:', e);
+                continue;
+            }
+
+            const socialPackage: SocialPackage = {
+                instagram: pkg.instagram,
+                tiktok: pkg.tiktok,
+                youtube: pkg.youtube,
+                generatedAt: new Date(),
+                modelUsed: 'External AI (Manual Import)',
+                brandSnapshot: brandSettings,
+                sourceVideoUrl: sourceVideoUrl || undefined,
+            };
+
+            const updated: GeneratedShort = { ...short, socialPackage };
+            await contentDB.addShort(updated);
+            updatedShorts.push(updated);
+        }
+
+        if (updatedShorts.length === 0) {
+            return { success: false, error: 'All packages were invalid' };
+        }
+
+        return { success: true, shorts: updatedShorts };
+    } catch (error) {
+        console.error('[ContentAI] Import social packages error:', error);
+        return {
+            success: false,
+            error: 'Failed to import packages: ' + (error instanceof Error ? error.message : 'Unknown error')
         };
     }
 }

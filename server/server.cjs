@@ -1301,6 +1301,152 @@ CRITICAL JSON RULES:
     }
 });
 
+// ==================== Social Media Packages ====================
+
+/**
+ * Build the social package prompt string shared by both the in-app generator
+ * (/api/ai/generate-social-packages) and the external-AI copy-to-clipboard
+ * flow (/api/ai/build-social-packages-prompt). Takes already-generated shorts
+ * (title/hookTitle/hook/resolution/clipText) plus brand settings + source
+ * video URL and returns a ready-to-send LLM prompt.
+ */
+function buildSocialPackagesPrompt(shorts, videoTitle, sourceVideoUrl, brandSettings) {
+    const bs = brandSettings || {};
+    const shortsBlock = (shorts || []).map((s, i) => `
+---
+SHORT #${i + 1}
+id: ${s.id}
+title: "${(s.title || '').replace(/"/g, '\\"')}"
+hookTitle (on-screen, ≤5 words): "${(s.hookTitle || '').replace(/"/g, '\\"')}"
+spoken hook: "${(s.hook || '').replace(/"/g, '\\"')}"
+spoken resolution: "${(s.resolution || '').replace(/"/g, '\\"')}"
+full clip transcript:
+"""
+${(s.clipText || '').substring(0, 4000)}
+"""`).join('\n');
+
+    return `You are a social media growth strategist producing ready-to-paste copy for a batch of short-form videos that were all cut from the same source video.
+
+SOURCE VIDEO: "${videoTitle || 'Unknown'}"
+SOURCE VIDEO URL: ${sourceVideoUrl || '(not provided)'}
+
+BRAND PROFILE:
+- Instagram: ${bs.instagramHandle || '(none)'}
+- TikTok: ${bs.tiktokHandle || '(none)'}
+- YouTube channel: ${bs.youtubeChannel || '(none)'}
+- Website: ${bs.website || '(none)'}
+- Default CTA: ${bs.defaultCta || '(none)'}
+
+RULES:
+- Write in a human, punchy tone — never corporate or generic.
+- Each short is independent; do not cross-reference other shorts in the batch.
+- First line of every caption MUST hook curiosity or emotion.
+- Every caption must feel NATIVE to its platform. Do not reuse the same caption across platforms.
+- Hashtags lowercase, NO '#' prefix in the array values, NO spaces, NO emojis inside hashtags.
+- TikTok caption must be under 150 characters.
+- YouTube titles must create curiosity or promise value; avoid clickbait.
+- Thumbnail text: ≤5 words each.
+- If a source video URL is provided, include it naturally in the YouTube description (e.g. "Full sermon: <url>").
+- If brand handles are provided, weave them into captions / CTAs where natural (don't force them).
+- If a default CTA is provided, use it as the starting point for each platform's CTA and adapt per-platform.
+- Do NOT include emojis in hashtags or tags arrays.
+
+SHORTS TO PROCESS:
+${shortsBlock}
+
+OUTPUT FORMAT — return ONLY this JSON, no markdown fences, no commentary:
+{
+  "packages": [
+    {
+      "id": "<matching short id>",
+      "instagram": {
+        "hook": "...",
+        "caption": "...",
+        "cta": "...",
+        "hashtags": ["tag1", "tag2"]
+      },
+      "tiktok": {
+        "hook": "...",
+        "caption": "...",
+        "onScreenText": ["...", "...", "..."],
+        "cta": "...",
+        "hashtags": ["tag1"]
+      },
+      "youtube": {
+        "titles": ["...", "...", "..."],
+        "description": "...",
+        "hook": "...",
+        "thumbnailText": ["...", "..."],
+        "cta": "...",
+        "tags": ["keyword1"]
+      }
+    }
+  ]
+}
+
+CRITICAL JSON RULES:
+1. Return ONLY the raw JSON object. No \`\`\`json fences.
+2. Escape all double quotes inside string values.
+3. No trailing commas.
+4. packages array length MUST equal the number of shorts in SHORTS TO PROCESS.
+5. Each package's "id" MUST match its source short's id verbatim.`;
+}
+
+/**
+ * In-app path — dispatches to the selected model and returns parsed packages.
+ */
+app.post('/api/ai/generate-social-packages', async (req, res) => {
+    try {
+        const { shorts, videoTitle, sourceVideoUrl, brandSettings, model } = req.body;
+
+        if (!shorts || !Array.isArray(shorts) || shorts.length === 0) {
+            return res.status(400).json({ error: 'Missing shorts array' });
+        }
+
+        const aiPrompt = buildSocialPackagesPrompt(shorts, videoTitle, sourceVideoUrl, brandSettings);
+
+        const effectiveModel = model || GEMINI_MODEL;
+        console.log('[AI] Generating social packages for', shorts.length, 'shorts | Model:', effectiveModel);
+
+        let result;
+        if (effectiveModel.startsWith('moonshot')) {
+            result = await callKimi(aiPrompt, effectiveModel);
+        } else if (effectiveModel.startsWith('MiniMax') || effectiveModel.startsWith('abab')) {
+            const modelToUse = effectiveModel.includes('M2') ? effectiveModel : 'MiniMax-M2';
+            result = await callMiniMax(aiPrompt, modelToUse);
+        } else if (effectiveModel.startsWith('gpt-') || effectiveModel.startsWith('o')) {
+            result = await callOpenAI(aiPrompt, effectiveModel);
+        } else {
+            result = await callGemini(aiPrompt, effectiveModel);
+        }
+
+        res.json(result);
+    } catch (error) {
+        console.error('[AI] Generate social packages error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * External-AI path — returns the prompt string for the user to paste into
+ * ChatGPT/Claude externally.
+ */
+app.post('/api/ai/build-social-packages-prompt', async (req, res) => {
+    try {
+        const { shorts, videoTitle, sourceVideoUrl, brandSettings } = req.body;
+
+        if (!shorts || !Array.isArray(shorts) || shorts.length === 0) {
+            return res.status(400).json({ error: 'Missing shorts array' });
+        }
+
+        const aiPrompt = buildSocialPackagesPrompt(shorts, videoTitle, sourceVideoUrl, brandSettings);
+        res.json({ prompt: aiPrompt });
+    } catch (error) {
+        console.error('[AI] Build social packages prompt error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Search transcripts endpoint
 app.post('/api/ai/search-transcripts', async (req, res) => {
     try {
