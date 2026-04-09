@@ -26,6 +26,8 @@ import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
 import { YoutubeImportModal } from './components/YoutubeImportModal';
 import ContentLibraryPage from './pages/ContentLibraryPage';
 import { GeneratedShort, contentDB } from './services/contentDatabase';
+import PublishPanel from './components/PublishPanel';
+import { generateSocialPackages } from './services/contentAIService';
 import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion, getInterpolatedPivot, compensatePivotChange } from './utils/interpolation';
 import { resolveGradientStops, buildGradientCSS } from './utils/gradientUtils';
 import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
@@ -366,7 +368,17 @@ function App() {
   const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'stock' | 'properties'>('media');
 
   // Right Panel State
-  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions' | 'render' | 'audio'>('transitions');
+  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions' | 'render' | 'audio' | 'publish'>('transitions');
+
+  // Publish panel data — populated when a short is exported from the Content Library
+  // so the PUBLISH tab can show its social media package for copy-paste.
+  const [exportedShortPublishInfo, setExportedShortPublishInfo] = useState<{
+    shortId: string;
+    shortTitle: string;
+    socialPackage?: import('./services/contentDatabase').SocialPackage;
+    sourceVideoUrl?: string;
+  } | null>(null);
+  const [isRegeneratingPublishSocial, setIsRegeneratingPublishSocial] = useState(false);
 
   // Resizable Panel Sizes (persisted to localStorage)
   const [leftPanelWidth, setLeftPanelWidth] = useState(() =>
@@ -3630,6 +3642,14 @@ function App() {
         throw new Error('Source video not found in library');
       }
 
+      // 1.5. Populate PUBLISH tab info so the editor can show the social package
+      setExportedShortPublishInfo({
+        shortId: short.id,
+        shortTitle: short.title,
+        socialPackage: short.socialPackage,
+        sourceVideoUrl: videoRecord.url,
+      });
+
       // 2. Try local cache first, fall back to YouTube download
       let blob: Blob;
       const videoId = extractYoutubeVideoId(videoRecord.url);
@@ -3704,6 +3724,18 @@ function App() {
         console.warn('[Export Short] Skipping snap-to-silence:', e instanceof Error ? e.message : e);
       }
 
+      // 3.6. Remove source-time overlaps between consecutive clips
+      // After snapping, adjacent clips may overlap — trim so each moment plays exactly once.
+      for (let i = 1; i < snappedShortSegments.length; i++) {
+        const prev = snappedShortSegments[i - 1];
+        const curr = snappedShortSegments[i];
+        if (curr.startTime < prev.endTime) {
+          const mid = (curr.startTime + prev.endTime) / 2;
+          snappedShortSegments[i - 1] = { ...prev, endTime: mid };
+          snappedShortSegments[i] = { ...curr, startTime: mid };
+        }
+      }
+
       // 4. Get granular transcript segments and GROUP them into slides (Karaoke style)
       const allVideoSegments = await contentDB.getSegmentsByVideoId(short.videoId);
       console.log('[ExportShort] VideoId:', short.videoId);
@@ -3717,72 +3749,84 @@ function App() {
       });
 
       const analysisEvents: AnalysisEvent[] = [];
-      const rawClipEvents: any[] = [];
-      const processedSegmentIds = new Set<string>(); // Track processed segments to avoid duplicates
+      const claimedTimeRanges = new Set<string>(); // Track claimed word time ranges to prevent duplicates
+
+      // Helper: expand a DB segment into per-word events, clamped to clip boundaries
+      const expandWordsForClip = (seg: any, clipStart: number, clipEnd: number) => {
+        const wordEvents: { start: number; end: number; text: string }[] = [];
+        const wordTimings = (seg.wordTimings || []).filter((wt: any) => wt && wt.text);
+        if (wordTimings.length > 0) {
+          for (const wt of wordTimings) {
+            const word = wt.text.trim();
+            if (!word) continue;
+            // Skip words outside this clip's boundaries
+            if (wt.end <= clipStart || wt.start >= clipEnd) continue;
+            wordEvents.push({ start: wt.start, end: wt.end, text: word });
+          }
+        } else {
+          // No word timings (e.g. YouTube transcript) — synthesize evenly
+          const allWords = (seg.text || '').split(/\s+/).filter(Boolean);
+          if (allWords.length === 0) return wordEvents;
+          const per = seg.duration / allWords.length;
+          for (let i = 0; i < allWords.length; i++) {
+            const s = seg.start + i * per;
+            const e = s + per;
+            // Skip words outside this clip's boundaries
+            if (e <= clipStart || s >= clipEnd) continue;
+            wordEvents.push({ start: s, end: e, text: allWords[i] });
+          }
+        }
+        return wordEvents;
+      };
 
       cleanedSegments.forEach((clipSeg, clipIdx) => {
         console.log(`[ExportShort] Processing clip ${clipIdx}: ${clipSeg.startTime}s - ${clipSeg.endTime}s`);
         // Find all granular segments that overlap this clip
         const clipRaw = allVideoSegments.filter(s => {
           const segEnd = s.start + s.duration;
-          const clipEnd = clipSeg.endTime;
-          // Overlap check: Segment ends after Clip starts AND Segment starts before Clip ends
-          return segEnd > clipSeg.startTime && s.start < clipEnd;
+          return segEnd > clipSeg.startTime && s.start < clipSeg.endTime;
         });
         console.log(`[ExportShort] Clip ${clipIdx} matched ${clipRaw.length} segments`);
 
-        // Keep ORIGINAL source video times - Timeline.tsx handles the time conversion
-        const filteredSegments = clipRaw
-          .filter(s => {
-            // Skip if already processed (avoid duplicates from overlapping clips)
-            if (processedSegmentIds.has(s.id)) {
-              return false;
-            }
-            processedSegmentIds.add(s.id);
-            return true;
-          });
-
-        rawClipEvents.push(...filteredSegments);
-      });
-
-      console.log('[ExportShort] rawClipEvents total (de-duplicated):', rawClipEvents.length);
-
-      // Sort by time just in case
-      rawClipEvents.sort((a, b) => a.start - b.start);
-
-      // Apply caption grouping based on captionMode
-      if (rawClipEvents.length > 0) {
         if (short.captionMode === 'words') {
-          // Word-by-word mode: one AnalysisEvent per granular segment (word/short phrase)
-          for (const seg of rawClipEvents) {
-            const wordTimings = (seg.wordTimings || []).filter((wt: any) => wt && wt.text);
-            if (wordTimings.length > 0) {
-              // Split into one event per word using AssemblyAI word timings
-              for (const wt of wordTimings) {
-                const word = wt.text.trim();
-                if (!word) continue;
-                analysisEvents.push({
-                  type: 'dialogue',
-                  startTime: wt.start,
-                  endTime: wt.end,
-                  label: 'speech',
-                  details: word,
-                  wordEmphases: resolveKeywordsForEvent(word, cleanedSegments, wt.start, wt.end),
-                });
-              }
-            } else {
-              // No word timings — fall back to one event per segment
+          // Word-by-word: expand each segment into words, clamped to clip, dedup by time
+          for (const seg of clipRaw) {
+            const words = expandWordsForClip(seg, clipSeg.startTime, clipSeg.endTime);
+            for (const w of words) {
+              const key = `${w.start.toFixed(3)}_${w.end.toFixed(3)}`;
+              if (claimedTimeRanges.has(key)) continue;
+              claimedTimeRanges.add(key);
               analysisEvents.push({
                 type: 'dialogue',
-                startTime: seg.start,
-                endTime: seg.start + seg.duration,
+                startTime: w.start,
+                endTime: w.end,
                 label: 'speech',
-                details: seg.text,
-                wordEmphases: resolveKeywordsForEvent(seg.text, cleanedSegments, seg.start, seg.start + seg.duration),
+                details: w.text,
+                wordEmphases: resolveKeywordsForEvent(w.text, cleanedSegments, w.start, w.end),
               });
             }
           }
-        } else {
+        }
+      });
+
+      // Sentences mode (or if words mode already handled above)
+      if (short.captionMode !== 'words') {
+        const rawClipEvents: any[] = [];
+        const processedSegmentIds = new Set<string>();
+        cleanedSegments.forEach((clipSeg) => {
+          const clipRaw = allVideoSegments.filter(s => {
+            const segEnd = s.start + s.duration;
+            return segEnd > clipSeg.startTime && s.start < clipSeg.endTime;
+          });
+          clipRaw.filter(s => {
+            if (processedSegmentIds.has(s.id)) return false;
+            processedSegmentIds.add(s.id);
+            return true;
+          }).forEach(s => rawClipEvents.push(s));
+        });
+        rawClipEvents.sort((a, b) => a.start - b.start);
+
+        if (rawClipEvents.length > 0) {
           // Sentences mode (default): Slide Grouping Logic
           let buffer: any[] = [rawClipEvents[0]];
 
@@ -4111,6 +4155,17 @@ function App() {
       });
     } catch { /* skip snap */ }
 
+    // 3.6. Remove source-time overlaps between consecutive clips
+    for (let i = 1; i < snappedSegments.length; i++) {
+      const prev = snappedSegments[i - 1];
+      const curr = snappedSegments[i];
+      if (curr.startTime < prev.endTime) {
+        const mid = (curr.startTime + prev.endTime) / 2;
+        snappedSegments[i - 1] = { ...prev, endTime: mid };
+        snappedSegments[i] = { ...curr, startTime: mid };
+      }
+    }
+
     // 4. Build analysis events (same logic as handleExportShort)
     const allVideoSegments = await contentDB.getSegmentsByVideoId(short.videoId);
     const cleanedSegments = snappedSegments.map(seg => {
@@ -4119,44 +4174,72 @@ function App() {
     });
 
     const analysisEvents: AnalysisEvent[] = [];
-    const rawClipEvents: any[] = [];
-    const processedSegmentIds = new Set<string>();
+    const claimedTimeRanges2 = new Set<string>();
+
+    // Helper: expand a DB segment into per-word events, clamped to clip boundaries
+    const expandWordsForClip2 = (seg: any, clipStart: number, clipEnd: number) => {
+      const wordEvents: { start: number; end: number; text: string }[] = [];
+      const wordTimings = (seg.wordTimings || []).filter((wt: any) => wt && wt.text);
+      if (wordTimings.length > 0) {
+        for (const wt of wordTimings) {
+          const word = wt.text.trim();
+          if (!word) continue;
+          if (wt.end <= clipStart || wt.start >= clipEnd) continue;
+          wordEvents.push({ start: wt.start, end: wt.end, text: word });
+        }
+      } else {
+        const allWords = (seg.text || '').split(/\s+/).filter(Boolean);
+        if (allWords.length === 0) return wordEvents;
+        const per = seg.duration / allWords.length;
+        for (let i = 0; i < allWords.length; i++) {
+          const s = seg.start + i * per;
+          const e = s + per;
+          if (e <= clipStart || s >= clipEnd) continue;
+          wordEvents.push({ start: s, end: e, text: allWords[i] });
+        }
+      }
+      return wordEvents;
+    };
 
     cleanedSegments.forEach((clipSeg) => {
       const clipRaw = allVideoSegments.filter(s => {
         const segEnd = s.start + s.duration;
         return segEnd > clipSeg.startTime && s.start < clipSeg.endTime;
       });
-      clipRaw.filter(s => {
-        if (processedSegmentIds.has(s.id)) return false;
-        processedSegmentIds.add(s.id);
-        return true;
-      }).forEach(s => rawClipEvents.push(s));
-    });
 
-    rawClipEvents.sort((a, b) => a.start - b.start);
-
-    if (rawClipEvents.length > 0) {
       if (short.captionMode === 'words') {
-        for (const seg of rawClipEvents) {
-          const wordTimings = (seg.wordTimings || []).filter((wt: any) => wt && wt.text);
-          if (wordTimings.length > 0) {
-            for (const wt of wordTimings) {
-              const word = wt.text.trim();
-              if (!word) continue;
-              analysisEvents.push({
-                type: 'dialogue', startTime: wt.start, endTime: wt.end, label: 'speech',
-                details: word, wordEmphases: resolveKeywordsForEvent(word, cleanedSegments, wt.start, wt.end),
-              });
-            }
-          } else {
+        for (const seg of clipRaw) {
+          const words = expandWordsForClip2(seg, clipSeg.startTime, clipSeg.endTime);
+          for (const w of words) {
+            const key = `${w.start.toFixed(3)}_${w.end.toFixed(3)}`;
+            if (claimedTimeRanges2.has(key)) continue;
+            claimedTimeRanges2.add(key);
             analysisEvents.push({
-              type: 'dialogue', startTime: seg.start, endTime: seg.start + seg.duration, label: 'speech',
-              details: seg.text, wordEmphases: resolveKeywordsForEvent(seg.text, cleanedSegments, seg.start, seg.start + seg.duration),
+              type: 'dialogue', startTime: w.start, endTime: w.end, label: 'speech',
+              details: w.text, wordEmphases: resolveKeywordsForEvent(w.text, cleanedSegments, w.start, w.end),
             });
           }
         }
-      } else {
+      }
+    });
+
+    if (short.captionMode !== 'words') {
+      const rawClipEvents: any[] = [];
+      const processedSegmentIds = new Set<string>();
+      cleanedSegments.forEach((clipSeg) => {
+        const clipRaw = allVideoSegments.filter(s => {
+          const segEnd = s.start + s.duration;
+          return segEnd > clipSeg.startTime && s.start < clipSeg.endTime;
+        });
+        clipRaw.filter(s => {
+          if (processedSegmentIds.has(s.id)) return false;
+          processedSegmentIds.add(s.id);
+          return true;
+        }).forEach(s => rawClipEvents.push(s));
+      });
+      rawClipEvents.sort((a, b) => a.start - b.start);
+
+      if (rawClipEvents.length > 0) {
         let buffer: any[] = [rawClipEvents[0]];
         for (let i = 1; i < rawClipEvents.length; i++) {
           const current = rawClipEvents[i];
@@ -8182,6 +8265,7 @@ function App() {
                 <button onClick={() => setActiveRightTab('tracking')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'tracking' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400'}`}>TRACKING</button>
                 <button onClick={() => setActiveRightTab('render')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'render' ? 'bg-[#333] text-orange-400 border-b-2 border-orange-400' : 'text-gray-400'}`}>RENDER</button>
                 <button onClick={() => setActiveRightTab('audio')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'audio' ? 'bg-[#333] text-pink-400 border-b-2 border-pink-400' : 'text-gray-400'}`}>AUDIO</button>
+                <button onClick={() => setActiveRightTab('publish')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'publish' ? 'bg-[#333] text-yellow-400 border-b-2 border-yellow-400' : 'text-gray-400'}`}>PUBLISH</button>
               </div>
               <div className="flex-1 overflow-hidden">
                 {activeRightTab === 'templates' && (
@@ -8301,6 +8385,44 @@ function App() {
                     isPlaying={project.isPlaying}
                     analyserNode={audioAnalyserNode}
                   />
+                )}
+                {activeRightTab === 'publish' && (
+                  <div className="h-full overflow-y-auto p-3">
+                    <PublishPanel
+                      socialPackage={exportedShortPublishInfo?.socialPackage}
+                      title="Publish Info"
+                      shortTitle={exportedShortPublishInfo?.shortTitle}
+                      keyPrefix="editor"
+                      isGenerating={isRegeneratingPublishSocial}
+                      emptyMessage="Export a short with a generated social package to see publish info here."
+                      onRegenerate={exportedShortPublishInfo?.shortId ? async () => {
+                        try {
+                          setIsRegeneratingPublishSocial(true);
+                          const all = await contentDB.getAllShorts();
+                          const target = all.find(s => s.id === exportedShortPublishInfo.shortId);
+                          if (!target) {
+                            console.warn('[PUBLISH] Source short not found in DB:', exportedShortPublishInfo.shortId);
+                            return;
+                          }
+                          const result = await generateSocialPackages([target]);
+                          if (result.success && result.shorts && result.shorts[0]?.socialPackage) {
+                            setExportedShortPublishInfo(info => info ? ({
+                              ...info,
+                              socialPackage: result.shorts![0].socialPackage,
+                            }) : info);
+                          } else if (result.error) {
+                            console.error('[PUBLISH] Regeneration failed:', result.error);
+                            alert('Failed to regenerate social package: ' + result.error);
+                          }
+                        } catch (e) {
+                          console.error('[PUBLISH] Regeneration error:', e);
+                          alert('Failed to regenerate social package: ' + (e instanceof Error ? e.message : String(e)));
+                        } finally {
+                          setIsRegeneratingPublishSocial(false);
+                        }
+                      } : undefined}
+                    />
+                  </div>
                 )}
               </div>
             </div>
