@@ -2553,38 +2553,35 @@ export const ContentLibraryPage: React.FC<{
                                     </div>
                                 </div>
 
-                                {/* Phase 2: External-AI Social Package flow */}
-                                <details className="mb-4 bg-[#1a1a1a] border border-[#333] rounded-lg">
-                                    <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-300 hover:text-white flex items-center gap-2">
-                                        <span>📋 External AI — Social Packages</span>
-                                        <span className="text-[10px] text-gray-500">(ChatGPT / Claude)</span>
-                                    </summary>
-                                    <div className="p-3 border-t border-[#333] space-y-2">
-                                        <p className="text-[10px] text-gray-500">
-                                            Generate social packages using an external LLM: copy the prompt, paste it into ChatGPT/Claude, then paste the response back here.
-                                        </p>
+                                {/* Social Media Packages — always visible on preview grid */}
+                                <div className="mb-4 bg-[#1a1a1a] border border-[#333] rounded-lg p-4">
+                                    <h4 className="text-sm font-bold text-gray-300 mb-1">Social Media Packages</h4>
+                                    <p className="text-xs text-gray-500 mb-3">
+                                        Generate Instagram, TikTok & YouTube copy for your shorts. Copy the prompt below, paste it into ChatGPT/Claude, then paste the response back.
+                                    </p>
+                                    <div className="space-y-2">
                                         <button
                                             onClick={handleCopySocialPrompt}
                                             disabled={isGeneratingSocialPrompt || generatedShortsPreview.length === 0}
-                                            className="w-full py-1.5 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-purple-500 transition-colors disabled:opacity-50 rounded text-xs font-medium"
+                                            className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-purple-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium"
                                         >
-                                            {isGeneratingSocialPrompt ? 'Building prompt...' : '1. Copy Social Package Prompt'}
+                                            {isGeneratingSocialPrompt ? 'Building prompt...' : '4. Copy Social Package Prompt to Clipboard'}
                                         </button>
                                         <textarea
                                             value={externalSocialJson}
                                             onChange={e => setExternalSocialJson(e.target.value)}
-                                            placeholder='2. Paste the social packages JSON response here...'
-                                            className="w-full bg-[#0f0f0f] border border-[#444] rounded px-2 py-1.5 text-[10px] font-mono text-purple-300 focus:border-purple-500 outline-none h-20 resize-none"
+                                            placeholder="5. Paste the social packages JSON response here..."
+                                            className="w-full bg-[#0f0f0f] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-purple-400 focus:border-purple-500 outline-none h-24 resize-none"
                                         />
                                         <button
                                             onClick={handleImportSocialJson}
                                             disabled={!externalSocialJson.trim()}
-                                            className="w-full py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded text-xs font-bold"
+                                            className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-bold"
                                         >
-                                            3. Import Social Packages
+                                            6. Import Social Packages
                                         </button>
                                     </div>
-                                </details>
+                                </div>
 
                                 {/* Expanded preview when a card is selected */}
                                 {selectedShortIndex !== null && generatedShortsPreview[selectedShortIndex] && (
