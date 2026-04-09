@@ -602,6 +602,7 @@ export const ContentLibraryPage: React.FC<{
     const [captionMode, setCaptionMode] = useState<'sentences' | 'words' | 'none'>('sentences');
     const [refinementPrompt, setRefinementPrompt] = useState('');
     const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
+    const [socialModel, setSocialModel] = useState<string>('gemini-2.5-flash');
 
     // Clip Assembly Workbench
     const [omittedClips, setOmittedClips] = useState<Map<string, Set<number>>>(new Map());
@@ -908,7 +909,7 @@ export const ContentLibraryPage: React.FC<{
         if (generatedShortsPreview.length === 0) return;
         setIsGeneratingSocial(true);
         try {
-            const result = await generateSocialPackages(generatedShortsPreview, selectedModel);
+            const result = await generateSocialPackages(generatedShortsPreview, socialModel);
             if (result.success && result.shorts) {
                 applySocialPackageUpdates(result.shorts);
             } else {
@@ -2541,45 +2542,98 @@ export const ContentLibraryPage: React.FC<{
                                                 Export All {generatedShortsPreview.length}
                                             </button>
                                         )}
-                                        {/* Generate Social Packages — in-app auto path */}
-                                        <button
-                                            onClick={handleGenerateSocialPackages}
-                                            disabled={isGeneratingSocial}
-                                            className="px-4 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded font-medium"
-                                            title="Generate Instagram/TikTok/YouTube copy for all shorts in this batch"
-                                        >
-                                            {isGeneratingSocial ? 'Generating...' : `⚡ Social Packages (${generatedShortsPreview.filter(s => s.socialPackage).length}/${generatedShortsPreview.length})`}
-                                        </button>
                                     </div>
                                 </div>
 
-                                {/* Social Media Packages — always visible on preview grid */}
-                                <div className="mb-4 bg-[#1a1a1a] border border-[#333] rounded-lg p-4">
-                                    <h4 className="text-sm font-bold text-gray-300 mb-1">Social Media Packages</h4>
-                                    <p className="text-xs text-gray-500 mb-3">
-                                        Generate Instagram, TikTok & YouTube copy for your shorts. Copy the prompt below, paste it into ChatGPT/Claude, then paste the response back.
-                                    </p>
-                                    <div className="space-y-2">
-                                        <button
-                                            onClick={handleCopySocialPrompt}
-                                            disabled={isGeneratingSocialPrompt || generatedShortsPreview.length === 0}
-                                            className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-purple-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium"
-                                        >
-                                            {isGeneratingSocialPrompt ? 'Building prompt...' : '4. Copy Social Package Prompt to Clipboard'}
-                                        </button>
-                                        <textarea
-                                            value={externalSocialJson}
-                                            onChange={e => setExternalSocialJson(e.target.value)}
-                                            placeholder="5. Paste the social packages JSON response here..."
-                                            className="w-full bg-[#0f0f0f] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-purple-400 focus:border-purple-500 outline-none h-24 resize-none"
-                                        />
-                                        <button
-                                            onClick={handleImportSocialJson}
-                                            disabled={!externalSocialJson.trim()}
-                                            className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-bold"
-                                        >
-                                            6. Import Social Packages
-                                        </button>
+                                {/* Social Media Packages panel */}
+                                <div className="mb-4 space-y-2">
+
+                                    {/* Auto-generate with API key — collapsible */}
+                                    <details className="bg-[#1a1a1a] border border-[#333] rounded-lg group">
+                                        <summary className="cursor-pointer px-4 py-3 flex items-center justify-between select-none list-none">
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-sm font-bold text-gray-300">⚡ Auto-Generate Social Packages</span>
+                                                <span className="text-[10px] text-gray-500">(uses API key)</span>
+                                                {generatedShortsPreview.filter(s => s.socialPackage).length > 0 && (
+                                                    <span className="text-[10px] bg-purple-600/30 text-purple-300 px-1.5 py-0.5 rounded">
+                                                        {generatedShortsPreview.filter(s => s.socialPackage).length}/{generatedShortsPreview.length} done
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <span className="text-gray-500 text-xs group-open:rotate-180 transition-transform">▼</span>
+                                        </summary>
+                                        <div className="px-4 pb-4 pt-2 border-t border-[#333] space-y-3">
+                                            <p className="text-xs text-gray-500">Automatically generate Instagram, TikTok & YouTube copy for all shorts using your configured API key.</p>
+                                            <div>
+                                                <label className="block text-xs text-gray-400 mb-1">AI Model</label>
+                                                <select
+                                                    value={socialModel}
+                                                    onChange={e => setSocialModel(e.target.value)}
+                                                    className="w-full bg-[#222] border border-[#333] rounded px-3 py-2 text-sm focus:border-purple-500 outline-none"
+                                                >
+                                                    <optgroup label="Gemini (Free Tier)">
+                                                        <option value="gemini-2.5-flash">Gemini 2.5 Flash (Recommended)</option>
+                                                        <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite (Fastest)</option>
+                                                    </optgroup>
+                                                    <optgroup label="OpenAI">
+                                                        <option value="gpt-4o">GPT-4o (Best Quality)</option>
+                                                        <option value="gpt-4o-mini">GPT-4o Mini (Fast + Cheap)</option>
+                                                        <option value="o3-mini">o3-mini (Reasoning)</option>
+                                                    </optgroup>
+                                                    <optgroup label="Gemini (Paid Key Required)">
+                                                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                                                        <option value="gemini-3-flash-preview">Gemini 3 Flash (Preview)</option>
+                                                        <option value="gemini-3-pro-preview">Gemini 3 Pro (Preview)</option>
+                                                    </optgroup>
+                                                    <optgroup label="Moonshot AI (Kimi)">
+                                                        <option value="moonshot-v1-8k">Kimi 8k (Standard)</option>
+                                                        <option value="moonshot-v1-32k">Kimi 32k (Long Context)</option>
+                                                        <option value="moonshot-v1-128k">Kimi 128k (Max Context)</option>
+                                                    </optgroup>
+                                                    <optgroup label="MiniMax">
+                                                        <option value="MiniMax-M2">MiniMax M2 (Fast)</option>
+                                                        <option value="MiniMax-M2.5">MiniMax M2.5 (Pro)</option>
+                                                    </optgroup>
+                                                </select>
+                                            </div>
+                                            <button
+                                                onClick={handleGenerateSocialPackages}
+                                                disabled={isGeneratingSocial}
+                                                className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-bold"
+                                            >
+                                                {isGeneratingSocial ? '⏳ Generating...' : `⚡ Generate Social Packages for All ${generatedShortsPreview.length} Shorts`}
+                                            </button>
+                                        </div>
+                                    </details>
+
+                                    {/* External AI — always visible */}
+                                    <div className="bg-[#1a1a1a] border border-[#333] rounded-lg p-4">
+                                        <h4 className="text-sm font-bold text-gray-300 mb-1">External AI (ChatGPT / Claude)</h4>
+                                        <p className="text-xs text-gray-500 mb-3">
+                                            Copy the prompt, paste it into ChatGPT/Claude, then paste the response back here.
+                                        </p>
+                                        <div className="space-y-2">
+                                            <button
+                                                onClick={handleCopySocialPrompt}
+                                                disabled={isGeneratingSocialPrompt || generatedShortsPreview.length === 0}
+                                                className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-purple-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium"
+                                            >
+                                                {isGeneratingSocialPrompt ? 'Building prompt...' : '4. Copy Social Package Prompt to Clipboard'}
+                                            </button>
+                                            <textarea
+                                                value={externalSocialJson}
+                                                onChange={e => setExternalSocialJson(e.target.value)}
+                                                placeholder="5. Paste the social packages JSON response here..."
+                                                className="w-full bg-[#0f0f0f] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-purple-400 focus:border-purple-500 outline-none h-24 resize-none"
+                                            />
+                                            <button
+                                                onClick={handleImportSocialJson}
+                                                disabled={!externalSocialJson.trim()}
+                                                className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-bold"
+                                            >
+                                                6. Import Social Packages
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
 
