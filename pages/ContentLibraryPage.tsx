@@ -2451,42 +2451,43 @@ export const ContentLibraryPage: React.FC<{
                                     </div>
                                 </div>
 
-                                {/* Phase 2: Social Media Packages (enabled after shorts JSON is pasted) */}
-                                {externalAiJson.trim() && (
-                                    <div className="mt-6 pt-6 border-t border-[#444]">
-                                        <h4 className="text-sm font-bold text-gray-300 mb-2">Social Media Packages</h4>
-                                        <p className="text-xs text-gray-500 mb-4">
-                                            Generate Instagram, TikTok & YouTube copy for your shorts. Copy the prompt below, paste it into ChatGPT/Claude, then paste the response back.
-                                        </p>
-                                        <div className="space-y-3">
-                                            <button
-                                                onClick={handleCopySocialPromptFromRaw}
-                                                disabled={isGeneratingSocialPrompt}
-                                                className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-purple-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
-                                            >
-                                                {isGeneratingSocialPrompt ? 'Building prompt...' : '4. Copy Social Package Prompt to Clipboard'}
-                                            </button>
+                                {/* Phase 2: Social Media Packages */}
+                                <div className="mt-6 pt-6 border-t border-[#444]">
+                                    <h4 className="text-sm font-bold text-gray-300 mb-2">Social Media Packages</h4>
+                                    <p className="text-xs text-gray-500 mb-4">
+                                        Generate Instagram, TikTok & YouTube copy for your shorts. Copy the prompt below, paste it into ChatGPT/Claude, then paste the response back.
+                                    </p>
+                                    <div className="space-y-3">
+                                        <button
+                                            onClick={handleCopySocialPromptFromRaw}
+                                            disabled={isGeneratingSocialPrompt || !externalAiJson.trim()}
+                                            className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-purple-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
+                                        >
+                                            {isGeneratingSocialPrompt ? 'Building prompt...' : '4. Copy Social Package Prompt to Clipboard'}
+                                        </button>
+                                        {!externalAiJson.trim() && (
+                                            <p className="text-[10px] text-gray-600">Paste the shorts JSON above (step 2) to enable this.</p>
+                                        )}
 
-                                            <textarea
-                                                value={externalSocialJson}
-                                                onChange={e => setExternalSocialJson(e.target.value)}
-                                                placeholder="5. Paste the social packages JSON response here..."
-                                                className="w-full bg-[#1a1a1a] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-purple-400 focus:border-purple-500 outline-none h-24 resize-none"
-                                            />
+                                        <textarea
+                                            value={externalSocialJson}
+                                            onChange={e => setExternalSocialJson(e.target.value)}
+                                            placeholder="5. Paste the social packages JSON response here..."
+                                            className="w-full bg-[#1a1a1a] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-purple-400 focus:border-purple-500 outline-none h-24 resize-none"
+                                        />
 
-                                            <button
-                                                onClick={handleImportSocialJson}
-                                                disabled={!externalSocialJson.trim() || generatedShortsPreview.length === 0}
-                                                className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-bold"
-                                            >
-                                                6. Import Social Packages
-                                            </button>
-                                            {generatedShortsPreview.length === 0 && externalSocialJson.trim() && (
-                                                <p className="text-[10px] text-yellow-500">Import the shorts first (step 3) before importing social packages.</p>
-                                            )}
-                                        </div>
+                                        <button
+                                            onClick={handleImportSocialJson}
+                                            disabled={!externalSocialJson.trim() || generatedShortsPreview.length === 0}
+                                            className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-bold"
+                                        >
+                                            6. Import Social Packages
+                                        </button>
+                                        {generatedShortsPreview.length === 0 && externalSocialJson.trim() && (
+                                            <p className="text-[10px] text-yellow-500">Import the shorts first (step 3) before importing social packages.</p>
+                                        )}
                                     </div>
-                                )}
+                                </div>
                             </div>
                         ) : (
                             /* ===== Multi-Short Preview Grid ===== */
