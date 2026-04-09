@@ -2257,8 +2257,6 @@ export const ContentLibraryPage: React.FC<{
 
                                             <div className="grid grid-cols-2 gap-4">
                                                 {shorts.map(short => {
-                                                    const socialExpanded = expandedSocialShortIds.has(short.id);
-                                                    const hasSocial = !!short.socialPackage;
                                                     return (
                                                     <div key={short.id} className="bg-[#1a1a1a] rounded-lg p-4 border border-[#333] hover:border-indigo-500/50 transition-colors">
                                                         <div className="flex items-start justify-between mb-2">
@@ -2292,33 +2290,6 @@ export const ContentLibraryPage: React.FC<{
                                                             </div>
                                                         </div>
 
-                                                        {/* Social Package accordion */}
-                                                        <button
-                                                            onClick={() => toggleSocialAccordion(short.id)}
-                                                            className="mt-3 w-full flex items-center justify-between text-[10px] px-2 py-1.5 bg-[#222] hover:bg-[#2a2a2a] border border-[#333] rounded text-gray-400 transition-colors"
-                                                        >
-                                                            <span className="flex items-center gap-1.5">
-                                                                <span className={`transition-transform ${socialExpanded ? 'rotate-90' : ''}`}>▶</span>
-                                                                Social Media Package
-                                                                {hasSocial && <span className="text-green-400">●</span>}
-                                                            </span>
-                                                            <span className="text-[9px] text-gray-600">
-                                                                {hasSocial ? 'IG · TT · YT' : 'not generated'}
-                                                            </span>
-                                                        </button>
-                                                        {socialExpanded && (
-                                                            <div className="mt-2">
-                                                                <PublishPanel
-                                                                    socialPackage={short.socialPackage}
-                                                                    keyPrefix={`card-${short.id}`}
-                                                                    compact
-                                                                    isGenerating={regeneratingShortId === short.id}
-                                                                    onGenerate={() => handleRegenerateSocialForShort(short)}
-                                                                    onRegenerate={() => handleRegenerateSocialForShort(short)}
-                                                                    emptyMessage="No social media package yet. Click below to generate one."
-                                                                />
-                                                            </div>
-                                                        )}
                                                     </div>
                                                     );
                                                 })}
