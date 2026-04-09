@@ -603,6 +603,36 @@ export const ContentLibraryPage: React.FC<{
     const [refinementPrompt, setRefinementPrompt] = useState('');
     const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
     const [socialModel, setSocialModel] = useState<string>('gemini-2.5-flash');
+    const DEFAULT_EDITING_INSTRUCTIONS = `EDITING RULES (apply to EACH of the 10 shorts):
+1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
+2. BUILD & CONDENSE (middle) — Connect the strongest thoughts. AGGRESSIVELY cut dead air, tangents, filler, and restatements. Stitch together the speaker's best points to create a dense, fast-paced narrative. If they take 20 seconds to make a point that can be summarised in their own two 4-second sentences, jump-cut those two sentences together.
+3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
+4. PRECISION TRIMMING — Start each clip at the exact moment compelling content begins. End at the exact peak. Common traps to avoid:
+   - Including warm-up sentences before the hook
+   - Trailing past the punchline into softening or restating
+   - Including "and another thing..." transitions
+   When in doubt, shorter and punchier beats longer and complete.
+5. EMBRACE JUMP CUTS — To pack maximum value into the target duration, use 3 to 6 shorter clips stitched together. Do not rely on one long continuous block of speech. Jump cuts are highly engaging in short-form content; use them to skip the boring parts and connect the gold.
+6. MINIMUM CLIP LENGTH — Each individual clip can be as short as 3 seconds, as long as it contains a complete, punchy thought or phrase.
+7. CHRONOLOGICAL — Clips within each short must appear in the order they occur in the source.
+8. TOTAL DURATION — All clips in each short combined ≈ target duration seconds.
+9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
+10. KEYWORDS — For each clip, identify 2-4 words PIVOTAL to the narrative arc.
+    These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
+    NOT generic words. Pick words the viewer needs to FEEL. Return in lowercase.
+11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript.
+12. B-ROLL SUGGESTIONS — Suggest stock footage for concrete nouns, actions, places, or emotions. Aim for at least one per clip.
+
+PLATFORM STRATEGY:
+Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
+
+GENRE-SPECIFIC STRATEGY:
+- Sermons/faith content: emotional crescendos, counterintuitive theology, personal vulnerability, prophetic declarations, conviction
+- Podcasts/interviews: hot takes, disagreements, surprising revelations, relatable stories, "I've never told anyone this"
+- Lectures/educational: "aha" moments, counterintuitive facts, powerful analogies, myth-busting
+- Motivational: universal truths, emotional breakthroughs, call-to-action moments
+- General: emotional peaks, humor, controversy, vulnerability, universal relatability`;
+    const [editingInstructions, setEditingInstructions] = useState<string>(DEFAULT_EDITING_INSTRUCTIONS);
 
     // Clip Assembly Workbench
     const [omittedClips, setOmittedClips] = useState<Map<string, Set<number>>>(new Map());
@@ -791,7 +821,7 @@ export const ContentLibraryPage: React.FC<{
                     endTime: s.segments[s.segments.length - 1]?.endTime || 0
                 }));
 
-            const result = await generateShort(shortTargetVideo, shortPrompt, shortDuration, undefined, existingShorts, selectedModel);
+            const result = await generateShort(shortTargetVideo, shortPrompt, shortDuration, undefined, existingShorts, selectedModel, editingInstructions !== DEFAULT_EDITING_INSTRUCTIONS ? editingInstructions : undefined);
             if (result.success) {
                 const allGenerated = result.shorts || (result.short ? [result.short] : []);
                 if (allGenerated.length > 0) {
@@ -830,7 +860,7 @@ export const ContentLibraryPage: React.FC<{
                     endTime: s.segments[s.segments.length - 1]?.endTime || 0
                 }));
 
-            const result = await buildShortPrompt(shortTargetVideo, shortPrompt, shortDuration, refinementPrompt, existingShorts);
+            const result = await buildShortPrompt(shortTargetVideo, shortPrompt, shortDuration, refinementPrompt, existingShorts, editingInstructions !== DEFAULT_EDITING_INSTRUCTIONS ? editingInstructions : undefined);
             if (result.success && result.prompt) {
                 // Try Clipboard API first, fall back to execCommand for permission-denied contexts
                 let copied = false;
@@ -2392,7 +2422,33 @@ export const ContentLibraryPage: React.FC<{
                                     </button>
                                 </div>
 
-                                <div className="mt-8 pt-6 border-t border-[#333]">
+                                {/* Prompt Instructions — editable, above copy-prompt section */}
+                                <details className="mt-6 pt-6 border-t border-[#333]">
+                                    <summary className="cursor-pointer flex items-center justify-between select-none list-none mb-2">
+                                        <h4 className="text-sm font-bold text-gray-300">Prompt Instructions</h4>
+                                        <span className="text-[10px] text-gray-500">click to expand / collapse</span>
+                                    </summary>
+                                    <p className="text-xs text-gray-500 mb-2">
+                                        These editing instructions are injected into every prompt sent to the AI. Edit them to customise how shorts are selected and cut.
+                                    </p>
+                                    <textarea
+                                        value={editingInstructions}
+                                        onChange={e => setEditingInstructions(e.target.value)}
+                                        className="w-full bg-[#111] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-gray-300 focus:border-indigo-500 outline-none resize-y"
+                                        style={{ minHeight: '220px' }}
+                                        spellCheck={false}
+                                    />
+                                    <div className="flex justify-end mt-1">
+                                        <button
+                                            onClick={() => setEditingInstructions(DEFAULT_EDITING_INSTRUCTIONS)}
+                                            className="text-[10px] text-gray-500 hover:text-indigo-400 transition-colors"
+                                        >
+                                            Reset to default
+                                        </button>
+                                    </div>
+                                </details>
+
+                                <div className="mt-6 pt-6 border-t border-[#333]">
                                     <h4 className="text-sm font-bold text-gray-300 mb-2">Use External AI (ChatGPT / Claude)</h4>
                                     <p className="text-xs text-gray-500 mb-4">
                                         Copy the prompt, generate JSON externally, and paste it back here.

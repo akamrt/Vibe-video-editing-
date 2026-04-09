@@ -985,45 +985,9 @@ async function callGemini(prompt, model = GEMINI_MODEL, retries = 3) {
     }
 }
 
-// Generate Short endpoint
-app.post('/api/ai/generate-short', async (req, res) => {
-    try {
-        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts, model } = req.body;
-
-        if (!transcript || !videoTitle) {
-            return res.status(400).json({ error: 'Missing transcript or videoTitle' });
-        }
-
-        // Parse transcript and group into readable passages
-        const transcriptLines = parseTranscriptLines(transcript);
-        const groupedTranscript = groupIntoPassages(transcriptLines, 5);
-
-        const duration = targetDuration || 60;
-
-        const userPromptSection = prompt?.trim()
-            ? `USER'S CREATIVE DIRECTION: "${prompt}"`
-            : `USER'S CREATIVE DIRECTION: None given — auto-detect the single most powerful, scroll-stopping moment. Prioritize emotional peaks, counterintuitive statements, and mic-drop lines.`;
-
-        const refinementSection = refinementInstruction?.trim()
-            ? `\nREFINEMENT (this overrides the original direction): "${refinementInstruction}"`
-            : '';
-
-        const existingShortsSection = (existingShorts && existingShorts.length > 0 && !refinementInstruction)
-            ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
-            : '';
-
-        const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
-
-Create 10 different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
-
-${userPromptSection}${refinementSection}${existingShortsSection}
-
-"${videoTitle}"
-
-TRANSCRIPT (with timestamps):
-${groupedTranscript.substring(0, 15000)}
-
-EDITING RULES (apply to EACH of the 10 shorts):
+// Default editing instructions — injected into both generate-short and build-short-prompt.
+// Callers can pass editingInstructions to override this entirely.
+const DEFAULT_EDITING_INSTRUCTIONS = (duration) => `EDITING RULES (apply to EACH of the 10 shorts):
 1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
 2. BUILD & CONDENSE (middle) — Connect the strongest thoughts. AGGRESSIVELY cut dead air, tangents, filler, and restatements. Stitch together the speaker's best points to create a dense, fast-paced narrative. If they take 20 seconds to make a point that can be summarised in their own two 4-second sentences, jump-cut those two sentences together.
 3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
@@ -1057,7 +1021,51 @@ GENRE-SPECIFIC STRATEGY:
 - Podcasts/interviews: hot takes, disagreements, surprising revelations, relatable stories, "I've never told anyone this"
 - Lectures/educational: "aha" moments, counterintuitive facts, powerful analogies, myth-busting
 - Motivational: universal truths, emotional breakthroughs, call-to-action moments
-- General: emotional peaks, humor, controversy, vulnerability, universal relatability
+- General: emotional peaks, humor, controversy, vulnerability, universal relatability`;
+
+// Generate Short endpoint
+app.post('/api/ai/generate-short', async (req, res) => {
+    try {
+        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts, model, editingInstructions } = req.body;
+
+        if (!transcript || !videoTitle) {
+            return res.status(400).json({ error: 'Missing transcript or videoTitle' });
+        }
+
+        // Parse transcript and group into readable passages
+        const transcriptLines = parseTranscriptLines(transcript);
+        const groupedTranscript = groupIntoPassages(transcriptLines, 5);
+
+        const duration = targetDuration || 60;
+
+        const userPromptSection = prompt?.trim()
+            ? `USER'S CREATIVE DIRECTION: "${prompt}"`
+            : `USER'S CREATIVE DIRECTION: None given — auto-detect the single most powerful, scroll-stopping moment. Prioritize emotional peaks, counterintuitive statements, and mic-drop lines.`;
+
+        const refinementSection = refinementInstruction?.trim()
+            ? `\nREFINEMENT (this overrides the original direction): "${refinementInstruction}"`
+            : '';
+
+        const existingShortsSection = (existingShorts && existingShorts.length > 0 && !refinementInstruction)
+            ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
+            : '';
+
+        const resolvedInstructions = (editingInstructions && editingInstructions.trim())
+            ? editingInstructions.trim()
+            : DEFAULT_EDITING_INSTRUCTIONS(duration);
+
+        const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
+
+Create 10 different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
+
+${userPromptSection}${refinementSection}${existingShortsSection}
+
+"${videoTitle}"
+
+TRANSCRIPT (with timestamps):
+${groupedTranscript.substring(0, 15000)}
+
+${resolvedInstructions}
 
 Return JSON only — an object with a "shorts" array containing exactly 10 shorts:
 {
@@ -1192,15 +1200,12 @@ CRITICAL JSON RULES:
 // Build Short Prompt endpoint (for external AI usage)
 app.post('/api/ai/build-short-prompt', async (req, res) => {
     try {
-        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts } = req.body;
+        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts, editingInstructions } = req.body;
 
         if (!transcript || !videoTitle) {
             return res.status(400).json({ error: 'Missing transcript or videoTitle' });
         }
 
-        // Parse transcript, then consolidate nearby segments into paragraph chunks
-        // (AssemblyAI produces many short utterance-level segments; this keeps the
-        // prompt compact while preserving timestamp precision at paragraph boundaries)
         const transcriptLines = parseTranscriptLines(transcript);
         const consolidated = consolidateSegments(transcriptLines);
         const rawTranscript = consolidated
@@ -1221,6 +1226,10 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
             ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
             : '';
 
+        const resolvedInstructions = (editingInstructions && editingInstructions.trim())
+            ? editingInstructions.trim()
+            : DEFAULT_EDITING_INSTRUCTIONS(duration);
+
         const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
 
 Create 10 different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
@@ -1232,41 +1241,7 @@ ${userPromptSection}${refinementSection}${existingShortsSection}
 TRANSCRIPT (with precise timestamps):
 ${rawTranscript.substring(0, 50000)}
 
-EDITING RULES (apply to EACH of the 10 shorts):
-1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
-2. BUILD & CONDENSE (middle) — Connect the strongest thoughts. AGGRESSIVELY cut dead air, tangents, filler, and restatements. Stitch together the speaker's best points to create a dense, fast-paced narrative. If they take 20 seconds to make a point that can be summarised in their own two 4-second sentences, jump-cut those two sentences together.
-3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
-4. PRECISION TRIMMING — Start each clip at the exact moment compelling content begins. End at the exact peak. Common traps to avoid:
-   - Including warm-up sentences before the hook
-   - Trailing past the punchline into softening or restating
-   - Including "and another thing..." transitions
-   When in doubt, shorter and punchier beats longer and complete.
-5. EMBRACE JUMP CUTS — To pack maximum value into ${duration} seconds, use 3 to 6 shorter clips stitched together. Do not rely on one long continuous block of speech. Jump cuts are highly engaging in short-form content; use them to skip the boring parts and connect the gold.
-6. MINIMUM CLIP LENGTH — Each individual clip can be as short as 3 seconds, as long as it contains a complete, punchy thought or phrase.
-7. CHRONOLOGICAL — Clips within each short must appear in the order they occur in the source.
-8. TOTAL DURATION — All clips in each short combined ≈ ${duration} seconds.
-9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
-10. KEYWORDS — For each clip, identify 2-4 words PIVOTAL to the narrative arc.
-    These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
-    NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
-    Pick words the viewer needs to FEEL. Return in lowercase.
-11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
-12. B-ROLL SUGGESTIONS — Identify moments where stock footage or still images would enhance the visual storytelling and help mask jump cuts.
-    Be generous — suggest B-roll for any concrete noun, action, place, emotion, or concept the speaker references. Aim for at least one suggestion per clip.
-    Do NOT suggest B-roll only when the speaker's raw personal emotion or delivery IS the content.
-    For each suggestion provide: clipIndex (0-based within that short), offsetInClip (seconds into that clip),
-    duration (2-5s), searchQuery (concise Pexels search term, e.g. "sunset ocean waves" or "person praying hands"),
-    and rationale (one sentence why this helps).
-
-PLATFORM STRATEGY:
-Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Dead air, slow buildups, and weak endings kill retention. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
-
-GENRE-SPECIFIC STRATEGY:
-- Sermons/faith content: emotional crescendos, counterintuitive theology, personal vulnerability, prophetic declarations, conviction
-- Podcasts/interviews: hot takes, disagreements, surprising revelations, relatable stories, "I've never told anyone this"
-- Lectures/educational: "aha" moments, counterintuitive facts, powerful analogies, myth-busting
-- Motivational: universal truths, emotional breakthroughs, call-to-action moments
-- General: emotional peaks, humor, controversy, vulnerability, universal relatability
+${resolvedInstructions}
 
 return JSON only — an object with a "shorts" array containing exactly 10 shorts:
 {

@@ -165,7 +165,8 @@ export async function generateShort(
     targetDuration: number = 60,
     refinementInstruction?: string,
     existingShorts: ExistingShortContext[] = [],
-    model?: string
+    model?: string,
+    editingInstructions?: string
 ): Promise<ShortGenerationResult> {
     // 1. Get video and its full transcript with timestamps
     const video = await contentDB.getVideo(videoId);
@@ -206,7 +207,8 @@ export async function generateShort(
                 targetDuration,
                 refinementInstruction,
                 existingShorts,
-                model
+                model,
+                editingInstructions
             })
         });
 
@@ -759,7 +761,8 @@ export async function buildShortPrompt(
     prompt: string,
     targetDuration: number = 60,
     refinementInstruction?: string,
-    existingShorts: ExistingShortContext[] = []
+    existingShorts: ExistingShortContext[] = [],
+    editingInstructions?: string
 ): Promise<{ success: boolean; prompt?: string; error?: string }> {
     const video = await contentDB.getVideo(videoId);
     if (!video) return { success: false, error: "Video not found" };
@@ -767,7 +770,6 @@ export async function buildShortPrompt(
     const segments = await contentDB.getSegmentsByVideoId(videoId);
     if (segments.length === 0) return { success: false, error: "No transcript found for this video" };
 
-    // Segment-level timestamps only — word timings are not used in the prompt
     const transcriptWithTimestamps = segments.map(seg =>
         `[${seg.start.toFixed(2)} - ${(seg.start + seg.duration).toFixed(2)}] ${seg.text}`
     ).join('\n');
@@ -782,7 +784,8 @@ export async function buildShortPrompt(
                 prompt,
                 targetDuration,
                 refinementInstruction,
-                existingShorts
+                existingShorts,
+                editingInstructions
             })
         });
 
