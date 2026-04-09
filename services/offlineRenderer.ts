@@ -50,6 +50,8 @@ export interface RendererDeps {
     timelineTime: number,
   ) => any;
   setIsExporting: (v: boolean) => void;
+  dialogueLayerVisible?: boolean;
+  titlesLayerVisible?: boolean;
 }
 
 export interface RenderCallbacks {
@@ -440,6 +442,7 @@ export class OfflineRenderer {
         // can be active at overlapping times — skip if we already drew this subtitle.
         const drawnSubtitles = new Set<string>();
         for (const activeSeg of activeSegments) {
+          if (deps.dialogueLayerVisible === false) break;
           const clipTime = currentTime - activeSeg.timelineStart;
           const media = deps.library.find(m => m.id === activeSeg.mediaId);
           if (media?.analysis) {
@@ -469,7 +472,7 @@ export class OfflineRenderer {
 
         // Title layer
         const tl = deps.titleLayer;
-        if (tl && currentTime >= tl.startTime && currentTime < tl.endTime) {
+        if (tl && deps.titlesLayerVisible !== false && currentTime >= tl.startTime && currentTime < tl.endTime) {
           const titleStyle = tl.style || deps.titleStyle;
           const titleClipTime = currentTime - tl.startTime;
           const titleDuration = tl.endTime - tl.startTime;

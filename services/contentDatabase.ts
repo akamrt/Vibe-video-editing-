@@ -51,7 +51,8 @@ export interface GeneratedShort {
     createdAt: Date;
     trendingTopic?: string;
     bRollSuggestions?: BRollSuggestion[];
-    captionMode?: 'sentences' | 'words';
+    captionMode?: 'sentences' | 'words' | 'none';
+    socialPackage?: SocialPackage;
 }
 
 export interface ShortSegment {
@@ -61,6 +62,50 @@ export interface ShortSegment {
     text: string;
     keywords?: KeywordEmphasis[];
     removedWordIndices?: number[];
+}
+
+// ==================== Social Media Packages ====================
+
+export interface InstagramPackage {
+    hook: string;          // Scroll-stopping first line
+    caption: string;       // Full caption body (hook embedded as line 1)
+    cta: string;           // Call-to-action line
+    hashtags: string[];    // 10-20, stored without '#' prefix
+}
+
+export interface TikTokPackage {
+    hook: string;          // First 1-2 seconds spoken line
+    caption: string;       // <150 chars, curiosity-driven
+    onScreenText: string[];// 3-5 overlay text suggestions
+    cta: string;
+    hashtags: string[];    // 5-10
+}
+
+export interface YouTubePackage {
+    titles: string[];      // 3 variations
+    description: string;   // SEO + engaging, keywords woven in
+    hook: string;          // First 5-10 seconds script hook
+    thumbnailText: string[];// 3-5 items, ≤5 words each
+    cta: string;
+    tags: string[];        // SEO keywords
+}
+
+export interface BrandSettings {
+    instagramHandle?: string;
+    tiktokHandle?: string;
+    youtubeChannel?: string;
+    website?: string;
+    defaultCta?: string;
+}
+
+export interface SocialPackage {
+    instagram: InstagramPackage;
+    tiktok: TikTokPackage;
+    youtube: YouTubePackage;
+    generatedAt: Date;
+    modelUsed: string;
+    brandSnapshot?: BrandSettings; // Snapshot of brand settings at generation time
+    sourceVideoUrl?: string;       // Long-form source video URL (for YouTube description linkback)
 }
 
 // ==================== Clip Assembly ====================

@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import HotkeysPanel from '../components/HotkeysPanel';
-import { contentDB, VideoRecord, TranscriptSegment, Category, GeneratedShort, ShortSegment, ClipReference, generateId } from '../services/contentDatabase';
-import { searchTranscripts, generateShort, SearchResult, buildShortPrompt, importManualShort } from '../services/contentAIService';
+import { contentDB, VideoRecord, TranscriptSegment, Category, GeneratedShort, ShortSegment, ClipReference, BrandSettings, generateId } from '../services/contentDatabase';
+import { searchTranscripts, generateShort, SearchResult, buildShortPrompt, importManualShort, generateSocialPackages, buildSocialPackagesPrompt, importSocialPackagesFromJson } from '../services/contentAIService';
+import { loadBrandSettings, saveBrandSettings } from '../services/brandSettings';
+import PublishPanel from '../components/PublishPanel';
 import { CookieUploadButton } from '../components/CookieUploadButton';
 import type { KeywordEmphasis, TrendItem, TrendAnalysis, TrendState } from '../types';
 import { getSessionLog, getSessionTotal, clearSession, onCostUpdate, offCostUpdate, initCostTracker, CostEntry } from '../services/costTracker';
@@ -597,7 +599,7 @@ export const ContentLibraryPage: React.FC<{
     const [exportAllOpenedIds, setExportAllOpenedIds] = useState<Set<string>>(new Set());
     const [expandedBRoll, setExpandedBRoll] = useState<Record<number, boolean>>({});
     const [expandedKeywords, setExpandedKeywords] = useState<Record<number, boolean>>({});
-    const [captionMode, setCaptionMode] = useState<'sentences' | 'words'>('sentences');
+    const [captionMode, setCaptionMode] = useState<'sentences' | 'words' | 'none'>('sentences');
     const [refinementPrompt, setRefinementPrompt] = useState('');
     const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
 
@@ -615,6 +617,16 @@ export const ContentLibraryPage: React.FC<{
     // External AI Input
     const [externalAiJson, setExternalAiJson] = useState('');
     const [isGeneratingPrompt, setIsGeneratingPrompt] = useState(false);
+
+    // Social media packages (Phase 2 external-AI flow + in-app button)
+    const [externalSocialJson, setExternalSocialJson] = useState('');
+    const [isGeneratingSocialPrompt, setIsGeneratingSocialPrompt] = useState(false);
+    const [isGeneratingSocial, setIsGeneratingSocial] = useState(false);
+    const [expandedSocialShortIds, setExpandedSocialShortIds] = useState<Set<string>>(new Set());
+    // Brand settings modal
+    const [showBrandSettingsModal, setShowBrandSettingsModal] = useState(false);
+    const [brandSettings, setBrandSettings] = useState<BrandSettings>(() => loadBrandSettings());
+    const [regeneratingShortId, setRegeneratingShortId] = useState<string | null>(null);
 
     // Saved shorts files (on disk)
     const [savedShortsFileList, setSavedShortsFileList] = useState<SavedShortsInfo[]>([]);
@@ -876,6 +888,121 @@ export const ContentLibraryPage: React.FC<{
             console.error('JSON import error:', err);
             alert('Import failed: ' + err.message);
         }
+    };
+
+    // ==================== Social Media Packages ====================
+
+    /**
+     * Apply the updated shorts returned by generateSocialPackages /
+     * importSocialPackagesFromJson back into local state.
+     */
+    const applySocialPackageUpdates = (updatedShorts: GeneratedShort[]) => {
+        if (updatedShorts.length === 0) return;
+        const updatedMap = new Map(updatedShorts.map(s => [s.id, s]));
+        setGeneratedShortsPreview(prev => prev.map(s => updatedMap.get(s.id) || s));
+        setGeneratedShort(prev => (prev && updatedMap.get(prev.id)) || prev);
+        loadData();
+    };
+
+    const handleGenerateSocialPackages = async () => {
+        if (generatedShortsPreview.length === 0) return;
+        setIsGeneratingSocial(true);
+        try {
+            const result = await generateSocialPackages(generatedShortsPreview, selectedModel);
+            if (result.success && result.shorts) {
+                applySocialPackageUpdates(result.shorts);
+            } else {
+                alert('Failed to generate social packages: ' + (result.error || 'Unknown error'));
+            }
+        } catch (err: any) {
+            console.error('Social package generation error:', err);
+            alert('Generation failed: ' + err.message);
+        } finally {
+            setIsGeneratingSocial(false);
+        }
+    };
+
+    const handleCopySocialPrompt = async () => {
+        if (generatedShortsPreview.length === 0) return;
+        setIsGeneratingSocialPrompt(true);
+        try {
+            const result = await buildSocialPackagesPrompt(generatedShortsPreview);
+            if (result.success && result.prompt) {
+                let copied = false;
+                try {
+                    await navigator.clipboard.writeText(result.prompt);
+                    copied = true;
+                } catch {
+                    const ta = document.createElement('textarea');
+                    ta.value = result.prompt;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    copied = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                if (copied) {
+                    alert('Social package prompt copied to clipboard! Paste this into ChatGPT or Claude.');
+                } else {
+                    console.log('Generated social prompt:\n', result.prompt);
+                    alert('Could not copy to clipboard. The prompt has been logged to the browser console (F12).');
+                }
+            } else {
+                alert('Failed to generate social prompt: ' + (result.error || 'Unknown error'));
+            }
+        } catch (err: any) {
+            console.error('Social prompt generation error:', err);
+            alert('Generation failed: ' + err.message);
+        } finally {
+            setIsGeneratingSocialPrompt(false);
+        }
+    };
+
+    const handleImportSocialJson = async () => {
+        if (!externalSocialJson.trim() || generatedShortsPreview.length === 0) return;
+        try {
+            const result = await importSocialPackagesFromJson(externalSocialJson, generatedShortsPreview);
+            if (result.success && result.shorts) {
+                applySocialPackageUpdates(result.shorts);
+                setExternalSocialJson('');
+                alert(`Imported ${result.shorts.length} social package${result.shorts.length !== 1 ? 's' : ''}.`);
+            } else {
+                alert('Failed to import social packages: ' + (result.error || 'Unknown error'));
+            }
+        } catch (err: any) {
+            console.error('Social JSON import error:', err);
+            alert('Import failed: ' + err.message);
+        }
+    };
+
+    const handleRegenerateSocialForShort = async (short: GeneratedShort) => {
+        setRegeneratingShortId(short.id);
+        try {
+            const result = await generateSocialPackages([short], selectedModel);
+            if (result.success && result.shorts) {
+                applySocialPackageUpdates(result.shorts);
+            } else {
+                alert('Failed to regenerate: ' + (result.error || 'Unknown error'));
+            }
+        } finally {
+            setRegeneratingShortId(null);
+        }
+    };
+
+    const toggleSocialAccordion = (shortId: string) => {
+        setExpandedSocialShortIds(prev => {
+            const next = new Set(prev);
+            if (next.has(shortId)) next.delete(shortId);
+            else next.add(shortId);
+            return next;
+        });
+    };
+
+    const handleSaveBrandSettings = (next: BrandSettings) => {
+        saveBrandSettings(next);
+        setBrandSettings(next);
+        setShowBrandSettingsModal(false);
     };
 
     // TTS Preview Functions
@@ -2037,6 +2164,13 @@ export const ContentLibraryPage: React.FC<{
                                     Auto-center person on export
                                 </label>
                             )}
+                            <button
+                                onClick={() => setShowBrandSettingsModal(true)}
+                                className="text-xs px-3 py-1.5 bg-[#222] border border-[#333] hover:bg-[#333] hover:border-indigo-500/50 rounded transition-colors flex items-center gap-1.5 text-gray-300"
+                                title="Brand settings for social media packages"
+                            >
+                                <span>⚙</span> Brand Settings
+                            </button>
                         </div>
                         {generatedShorts.length === 0 ? (
                             <div className="text-center py-12 text-gray-500">
@@ -2083,7 +2217,10 @@ export const ContentLibraryPage: React.FC<{
                                             </div>
 
                                             <div className="grid grid-cols-2 gap-4">
-                                                {shorts.map(short => (
+                                                {shorts.map(short => {
+                                                    const socialExpanded = expandedSocialShortIds.has(short.id);
+                                                    const hasSocial = !!short.socialPackage;
+                                                    return (
                                                     <div key={short.id} className="bg-[#1a1a1a] rounded-lg p-4 border border-[#333] hover:border-indigo-500/50 transition-colors">
                                                         <div className="flex items-start justify-between mb-2">
                                                             <h3 className="font-medium text-sm text-white">{short.title}</h3>
@@ -2115,8 +2252,37 @@ export const ContentLibraryPage: React.FC<{
                                                                 )}
                                                             </div>
                                                         </div>
+
+                                                        {/* Social Package accordion */}
+                                                        <button
+                                                            onClick={() => toggleSocialAccordion(short.id)}
+                                                            className="mt-3 w-full flex items-center justify-between text-[10px] px-2 py-1.5 bg-[#222] hover:bg-[#2a2a2a] border border-[#333] rounded text-gray-400 transition-colors"
+                                                        >
+                                                            <span className="flex items-center gap-1.5">
+                                                                <span className={`transition-transform ${socialExpanded ? 'rotate-90' : ''}`}>▶</span>
+                                                                Social Media Package
+                                                                {hasSocial && <span className="text-green-400">●</span>}
+                                                            </span>
+                                                            <span className="text-[9px] text-gray-600">
+                                                                {hasSocial ? 'IG · TT · YT' : 'not generated'}
+                                                            </span>
+                                                        </button>
+                                                        {socialExpanded && (
+                                                            <div className="mt-2">
+                                                                <PublishPanel
+                                                                    socialPackage={short.socialPackage}
+                                                                    keyPrefix={`card-${short.id}`}
+                                                                    compact
+                                                                    isGenerating={regeneratingShortId === short.id}
+                                                                    onGenerate={() => handleRegenerateSocialForShort(short)}
+                                                                    onRegenerate={() => handleRegenerateSocialForShort(short)}
+                                                                    emptyMessage="No social media package yet. Click below to generate one."
+                                                                />
+                                                            </div>
+                                                        )}
                                                     </div>
-                                                ))}
+                                                    );
+                                                })}
                                             </div>
                                         </div>
                                     );
@@ -2143,6 +2309,15 @@ export const ContentLibraryPage: React.FC<{
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* Brand Settings Modal */}
+            {showBrandSettingsModal && (
+                <BrandSettingsModal
+                    initial={brandSettings}
+                    onCancel={() => setShowBrandSettingsModal(false)}
+                    onSave={handleSaveBrandSettings}
+                />
             )}
 
             {/* Short Generation Modal */}
@@ -2217,13 +2392,13 @@ export const ContentLibraryPage: React.FC<{
                                             disabled={isGeneratingPrompt}
                                             className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-indigo-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium flex items-center justify-center gap-2"
                                         >
-                                            {isGeneratingPrompt ? 'Formatting Prompt...' : '1. Copy Prompt to Clipboard'}
+                                            {isGeneratingPrompt ? 'Formatting Prompt...' : '1. Copy Shorts Prompt to Clipboard'}
                                         </button>
 
                                         <textarea
                                             value={externalAiJson}
                                             onChange={e => setExternalAiJson(e.target.value)}
-                                            placeholder="2. Paste the JSON result here..."
+                                            placeholder="2. Paste the shorts JSON result here..."
                                             className="w-full bg-[#1a1a1a] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-green-400 focus:border-indigo-500 outline-none h-24 resize-none"
                                         />
 
@@ -2232,7 +2407,7 @@ export const ContentLibraryPage: React.FC<{
                                             disabled={!externalAiJson.trim()}
                                             className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-sm font-bold"
                                         >
-                                            3. Import & Preview
+                                            3. Import Shorts & Preview
                                         </button>
                                     </div>
                                 </div>
@@ -2262,6 +2437,13 @@ export const ContentLibraryPage: React.FC<{
                                                 title="Display one word at a time (TikTok-style)"
                                             >
                                                 Word by Word
+                                            </button>
+                                            <button
+                                                onClick={() => setCaptionMode('none')}
+                                                className={`px-2 py-1.5 text-[10px] font-medium transition-colors ${captionMode === 'none' ? 'bg-red-700 text-white' : 'text-gray-400 hover:text-white'}`}
+                                                title="No captions on the DLG layer (transcript still available in Transcript tab)"
+                                            >
+                                                No DLG
                                             </button>
                                         </div>
                                         {/* Word padding controls */}
@@ -2311,8 +2493,50 @@ export const ContentLibraryPage: React.FC<{
                                                 Export All {generatedShortsPreview.length}
                                             </button>
                                         )}
+                                        {/* Generate Social Packages — in-app auto path */}
+                                        <button
+                                            onClick={handleGenerateSocialPackages}
+                                            disabled={isGeneratingSocial}
+                                            className="px-4 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded font-medium"
+                                            title="Generate Instagram/TikTok/YouTube copy for all shorts in this batch"
+                                        >
+                                            {isGeneratingSocial ? 'Generating...' : `⚡ Social Packages (${generatedShortsPreview.filter(s => s.socialPackage).length}/${generatedShortsPreview.length})`}
+                                        </button>
                                     </div>
                                 </div>
+
+                                {/* Phase 2: External-AI Social Package flow */}
+                                <details className="mb-4 bg-[#1a1a1a] border border-[#333] rounded-lg">
+                                    <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-gray-300 hover:text-white flex items-center gap-2">
+                                        <span>📋 External AI — Social Packages</span>
+                                        <span className="text-[10px] text-gray-500">(ChatGPT / Claude)</span>
+                                    </summary>
+                                    <div className="p-3 border-t border-[#333] space-y-2">
+                                        <p className="text-[10px] text-gray-500">
+                                            Generate social packages using an external LLM: copy the prompt, paste it into ChatGPT/Claude, then paste the response back here.
+                                        </p>
+                                        <button
+                                            onClick={handleCopySocialPrompt}
+                                            disabled={isGeneratingSocialPrompt || generatedShortsPreview.length === 0}
+                                            className="w-full py-1.5 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-purple-500 transition-colors disabled:opacity-50 rounded text-xs font-medium"
+                                        >
+                                            {isGeneratingSocialPrompt ? 'Building prompt...' : '1. Copy Social Package Prompt'}
+                                        </button>
+                                        <textarea
+                                            value={externalSocialJson}
+                                            onChange={e => setExternalSocialJson(e.target.value)}
+                                            placeholder='2. Paste the social packages JSON response here...'
+                                            className="w-full bg-[#0f0f0f] border border-[#444] rounded px-2 py-1.5 text-[10px] font-mono text-purple-300 focus:border-purple-500 outline-none h-20 resize-none"
+                                        />
+                                        <button
+                                            onClick={handleImportSocialJson}
+                                            disabled={!externalSocialJson.trim()}
+                                            className="w-full py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded text-xs font-bold"
+                                        >
+                                            3. Import Social Packages
+                                        </button>
+                                    </div>
+                                </details>
 
                                 {/* Expanded preview when a card is selected */}
                                 {selectedShortIndex !== null && generatedShortsPreview[selectedShortIndex] && (
@@ -2645,3 +2869,94 @@ export const ContentLibraryPage: React.FC<{
 };
 
 export default ContentLibraryPage;
+
+// ==================== Brand Settings Modal ====================
+
+interface BrandSettingsModalProps {
+    initial: BrandSettings;
+    onCancel: () => void;
+    onSave: (next: BrandSettings) => void;
+}
+
+const BrandSettingsModal: React.FC<BrandSettingsModalProps> = ({ initial, onCancel, onSave }) => {
+    const [instagramHandle, setInstagramHandle] = useState(initial.instagramHandle || '');
+    const [tiktokHandle, setTiktokHandle] = useState(initial.tiktokHandle || '');
+    const [youtubeChannel, setYoutubeChannel] = useState(initial.youtubeChannel || '');
+    const [website, setWebsite] = useState(initial.website || '');
+    const [defaultCta, setDefaultCta] = useState(initial.defaultCta || '');
+
+    const handleSave = () => {
+        onSave({
+            instagramHandle: instagramHandle.trim() || undefined,
+            tiktokHandle: tiktokHandle.trim() || undefined,
+            youtubeChannel: youtubeChannel.trim() || undefined,
+            website: website.trim() || undefined,
+            defaultCta: defaultCta.trim() || undefined,
+        });
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+            <div className="bg-[#1a1a1a] rounded-xl p-6 w-full max-w-md border border-[#333]">
+                <h3 className="text-lg font-bold mb-1">Brand Settings</h3>
+                <p className="text-xs text-gray-500 mb-4">Auto-injected into every social media package prompt. All fields optional.</p>
+                <div className="space-y-3">
+                    <div>
+                        <label className="block text-xs text-gray-400 mb-1">Instagram Handle</label>
+                        <input
+                            type="text"
+                            value={instagramHandle}
+                            onChange={e => setInstagramHandle(e.target.value)}
+                            placeholder="@yourchurch"
+                            className="w-full bg-[#222] border border-[#333] rounded px-3 py-2 text-sm focus:border-indigo-500 outline-none"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-xs text-gray-400 mb-1">TikTok Handle</label>
+                        <input
+                            type="text"
+                            value={tiktokHandle}
+                            onChange={e => setTiktokHandle(e.target.value)}
+                            placeholder="@yourchurch"
+                            className="w-full bg-[#222] border border-[#333] rounded px-3 py-2 text-sm focus:border-indigo-500 outline-none"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-xs text-gray-400 mb-1">YouTube Channel</label>
+                        <input
+                            type="text"
+                            value={youtubeChannel}
+                            onChange={e => setYoutubeChannel(e.target.value)}
+                            placeholder="Your Church"
+                            className="w-full bg-[#222] border border-[#333] rounded px-3 py-2 text-sm focus:border-indigo-500 outline-none"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-xs text-gray-400 mb-1">Website</label>
+                        <input
+                            type="text"
+                            value={website}
+                            onChange={e => setWebsite(e.target.value)}
+                            placeholder="https://yourchurch.com"
+                            className="w-full bg-[#222] border border-[#333] rounded px-3 py-2 text-sm focus:border-indigo-500 outline-none"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-xs text-gray-400 mb-1">Default CTA</label>
+                        <input
+                            type="text"
+                            value={defaultCta}
+                            onChange={e => setDefaultCta(e.target.value)}
+                            placeholder="Full sermon in bio"
+                            className="w-full bg-[#222] border border-[#333] rounded px-3 py-2 text-sm focus:border-indigo-500 outline-none"
+                        />
+                    </div>
+                </div>
+                <div className="flex justify-end gap-2 mt-6">
+                    <button onClick={onCancel} className="px-4 py-2 hover:bg-[#333] rounded text-sm">Cancel</button>
+                    <button onClick={handleSave} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-sm font-medium">Save</button>
+                </div>
+            </div>
+        </div>
+    );
+};

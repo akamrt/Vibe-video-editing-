@@ -589,6 +589,8 @@ export interface ProjectState {
   activeKeywordAnimation: TextAnimation | null;
   removedWords: RemovedWord[];
   audioMixer?: AudioMixerState;
+  dialogueLayerVisible: boolean;
+  titlesLayerVisible: boolean;
 }
 
 // ============ REMOTION TEMPLATE SYSTEM ============

@@ -100,6 +100,8 @@ const INITIAL_STATE: ProjectState = {
   activeTitleTemplate: null,
   activeKeywordAnimation: null,
   removedWords: [],
+  dialogueLayerVisible: true,
+  titlesLayerVisible: true,
 };
 
 // --- Auto-center utilities (used by handleCenterPerson + autoCenterSegment) ---
@@ -209,6 +211,8 @@ function App() {
       audioMixer: (projectRef.current as any).audioMixer || undefined,
       getCombinedTransform,
       setIsExporting: (v: boolean) => { isExportingRef.current = v; setIsExporting(v); },
+      dialogueLayerVisible: projectRef.current.dialogueLayerVisible,
+      titlesLayerVisible: projectRef.current.titlesLayerVisible,
     }));
   });
 
@@ -232,6 +236,8 @@ function App() {
       audioMixer: (projectRef.current as any).audioMixer || undefined,
       getCombinedTransform,
       setIsExporting: (v: boolean) => { isExportingRef.current = v; setIsExporting(v); },
+      dialogueLayerVisible: projectRef.current.dialogueLayerVisible,
+      titlesLayerVisible: projectRef.current.titlesLayerVisible,
     }));
   });
 
@@ -314,6 +320,8 @@ function App() {
           activeSubtitleTemplate: savedProject.activeSubtitleTemplate ?? null,
           activeTitleTemplate: savedProject.activeTitleTemplate ?? null,
           activeKeywordAnimation: savedProject.activeKeywordAnimation ?? null,
+          dialogueLayerVisible: savedProject.dialogueLayerVisible ?? true,
+          titlesLayerVisible: savedProject.titlesLayerVisible ?? true,
         });
         // Restore global keyframes if any were saved
         if (savedGlobalKeyframes?.length) {
@@ -2137,7 +2145,7 @@ function App() {
         }
 
         // --- SUBTITLE DRAWING (outside vid.readyState guard — subtitles should render even if video is buffering) ---
-        const media = projectRef.current.library.find(m => m.id === activeSeg.mediaId);
+        const media = projectRef.current.dialogueLayerVisible ? projectRef.current.library.find(m => m.id === activeSeg.mediaId) : null;
         if (media && media.analysis) {
           const mediaTime = activeSeg.startTime + clipTime;
           // Use <= for endTime (matching viewport behavior)
@@ -2213,7 +2221,7 @@ function App() {
 
       // --- TITLE DRAWING (outside segment loop — titles are global) ---
       const titleLayer = projectRef.current.titleLayer;
-      if (titleLayer && currentTime >= titleLayer.startTime && currentTime < titleLayer.endTime) {
+      if (titleLayer && projectRef.current.titlesLayerVisible && currentTime >= titleLayer.startTime && currentTime < titleLayer.endTime) {
         const titleStyle = titleLayer.style || projectRef.current.titleStyle;
         const titleTemplate = projectRef.current.activeTitleTemplate;
         const titleAnim = titleLayer.animation || titleTemplate?.animation || null;
@@ -3788,7 +3796,7 @@ function App() {
         });
         console.log(`[ExportShort] Clip ${clipIdx} matched ${clipRaw.length} segments`);
 
-        if (short.captionMode === 'words') {
+        if (short.captionMode !== 'none' && short.captionMode === 'words') {
           // Word-by-word: expand each segment into words, clamped to clip, dedup by time
           for (const seg of clipRaw) {
             const words = expandWordsForClip(seg, clipSeg.startTime, clipSeg.endTime);
@@ -3810,7 +3818,7 @@ function App() {
       });
 
       // Sentences mode (or if words mode already handled above)
-      if (short.captionMode !== 'words') {
+      if (short.captionMode !== 'words' && short.captionMode !== 'none') {
         const rawClipEvents: any[] = [];
         const processedSegmentIds = new Set<string>();
         cleanedSegments.forEach((clipSeg) => {
@@ -4207,7 +4215,7 @@ function App() {
         return segEnd > clipSeg.startTime && s.start < clipSeg.endTime;
       });
 
-      if (short.captionMode === 'words') {
+      if (short.captionMode !== 'none' && short.captionMode === 'words') {
         for (const seg of clipRaw) {
           const words = expandWordsForClip2(seg, clipSeg.startTime, clipSeg.endTime);
           for (const w of words) {
@@ -4223,7 +4231,7 @@ function App() {
       }
     });
 
-    if (short.captionMode !== 'words') {
+    if (short.captionMode !== 'words' && short.captionMode !== 'none') {
       const rawClipEvents: any[] = [];
       const processedSegmentIds = new Set<string>();
       cleanedSegments.forEach((clipSeg) => {
@@ -4395,6 +4403,8 @@ function App() {
       audioMixer: (project as any).audioMixer || undefined,
       getCombinedTransform,
       setIsExporting: (v: boolean) => { isExportingRef.current = v; setIsExporting(v); },
+      dialogueLayerVisible: project.dialogueLayerVisible,
+      titlesLayerVisible: project.titlesLayerVisible,
     };
 
     return { deps, name: short.title };
@@ -7692,7 +7702,7 @@ function App() {
                     <div ref={safeZoneRef} style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none', zIndex: 500 }}>
 
                       {/* Animated Subtitle Overlay */}
-                      {activeSubtitleEvent && (() => {
+                      {activeSubtitleEvent && project.dialogueLayerVisible && (() => {
                         const subTemplate = activeSubtitleEvent.templateOverride || project.activeSubtitleTemplate;
                         const subAnim = subTemplate?.animation;
                         const subTx = activeSubtitleEvent.translateX || 0;
@@ -7890,7 +7900,7 @@ function App() {
                       })()}
 
                       {/* Animated Title Layer Overlay */}
-                      {project.titleLayer && project.currentTime >= project.titleLayer.startTime && project.currentTime <= project.titleLayer.endTime && (() => {
+                      {project.titleLayer && project.titlesLayerVisible && project.currentTime >= project.titleLayer.startTime && project.currentTime <= project.titleLayer.endTime && (() => {
                         const t = project.currentTime - project.titleLayer.startTime;
                         const duration = project.titleLayer.endTime - project.titleLayer.startTime;
 
@@ -8536,6 +8546,10 @@ function App() {
                 titleLayer={project.titleLayer}
                 onTitleSelect={handleTitleSelect}
                 onUpdateTitle={handleUpdateTitleLayer}
+                dialogueLayerVisible={project.dialogueLayerVisible}
+                titlesLayerVisible={project.titlesLayerVisible}
+                onToggleDialogueVisible={() => setProject(p => ({ ...p, dialogueLayerVisible: !p.dialogueLayerVisible }))}
+                onToggleTitlesVisible={() => setProject(p => ({ ...p, titlesLayerVisible: !p.titlesLayerVisible }))}
                 onInsertBlank={handleInsertBlank}
                 zoom={timelineZoom}
                 onZoomChange={safeSetTimelineZoom}
