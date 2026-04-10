@@ -7161,6 +7161,7 @@ function App() {
                     };
                   });
                   setGlobalKeyframes([]);
+                  setExportedShortPublishInfo(null);
                 }}
                 className="px-2 py-1 text-xs rounded font-medium bg-[#2a1a1a] text-red-400 hover:text-red-300 hover:bg-[#3a1a1a] border border-red-900/50"
                 title="Clear scene content, keep style presets"
