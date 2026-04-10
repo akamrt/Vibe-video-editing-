@@ -6881,6 +6881,12 @@ function App() {
                   scale: currentVals.scale,
                   rotation: currentVals.rotation,
                   volume,
+                  keyframeConfig: {
+                    volume: {
+                      inTangent: { x: -0.3, y: 0 },
+                      outTangent: { x: 0.3, y: 0 },
+                    },
+                  },
                 };
                 const existing = seg.keyframes || [];
                 const filtered = existing.filter(kf => Math.abs(kf.time - clipTime) >= 0.01);
@@ -6910,6 +6916,32 @@ function App() {
         </button>
         <button title="Razor Tool (C)" onClick={() => handleSplit(project.currentTime)} className="p-2 rounded text-gray-400 hover:text-white hover:bg-[#333]">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.121 15.536c-1.171 1.952-3.07 1.952-4.242 0-1.172-1.953-1.172-5.119 0-7.072 1.171-1.952 3.07-1.952 4.242 0M8 10.5h4m-4 3h4m9-1.5a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        </button>
+        <button
+          title="Transform Gizmo (G) — toggle viewport gizmo for selected clip"
+          onClick={() => {
+            if (transformTarget !== 'global') {
+              // Toggle off — go back to global
+              setTransformTarget('global');
+            } else {
+              // Toggle on — auto-select the active clip at playhead
+              const visualSegs = activeSegments.filter(s => s.type !== 'audio');
+              const topSeg = visualSegs.length > 0 ? visualSegs[visualSegs.length - 1] : activeSegments[activeSegments.length - 1];
+              if (topSeg) {
+                setTransformTarget(topSeg.id);
+                setSelectedSegmentIds([topSeg.id]);
+              } else if (project.segments.length > 0) {
+                setTransformTarget(project.segments[0].id);
+                setSelectedSegmentIds([project.segments[0].id]);
+              }
+            }
+          }}
+          className={`p-2 rounded ${transformTarget !== 'global' ? 'bg-[#333] text-orange-400' : 'text-gray-400 hover:text-white hover:bg-[#333]'}`}
+        >
+          {/* Move/transform icon */}
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 2v20M2 12h20M7 7l-5 5 5 5M17 7l5 5-5 5M7 7L12 2l5 5M7 17l5 5 5-5" />
+          </svg>
         </button>
 
         <div className="w-8 h-px bg-[#444] my-1" />
@@ -7699,8 +7731,8 @@ function App() {
                       sz.y = (viewportSize.height - sz.h) / 2;
                     }
                   }
-                  return (
-                    <div ref={safeZoneRef} style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none', zIndex: 500 }}>
+                  return [
+                    <div key="safe-zone" ref={safeZoneRef} style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none', zIndex: 500 }}>
 
                       {/* Animated Subtitle Overlay */}
                       {activeSubtitleEvent && project.dialogueLayerVisible && (() => {
@@ -8027,22 +8059,43 @@ function App() {
                         </div>
                       )}
 
-                      {/* Viewport Gizmo Overlay */}
-                      {(() => {
+                      {/* Auto-pivot progress overlay */}
+                      {autoPivotProgress && (
+                        <div style={{
+                          position: 'absolute', inset: 0, zIndex: 10002,
+                          background: 'rgba(0,0,0,0.7)', display: 'flex',
+                          flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                          pointerEvents: 'auto',
+                        }}>
+                          <div style={{ color: '#fff', fontSize: 14, marginBottom: 12 }}>
+                            {autoPivotProgress.label}
+                          </div>
+                          <div style={{ width: 200, height: 4, background: '#333', borderRadius: 2 }}>
+                            <div style={{
+                              width: `${Math.round(autoPivotProgress.progress * 100)}%`,
+                              height: '100%', background: '#06b6d4', borderRadius: 2,
+                              transition: 'width 0.3s ease',
+                            }} />
+                          </div>
+                        </div>
+                      )}
+
+                    </div>,
+
+                    /* Viewport Gizmo Overlay — rendered outside safe zone so it's above all masks */
+                    (() => {
                         const gizmoTarget = getGizmoTarget();
                         if (!gizmoTarget.type || activeRightTab === 'tracking') return null;
 
                         let gizmoTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0, pivotX: 50, pivotY: 50 };
                         let elemBounds = { width: sz.w, height: sz.h };
                         let elemCenter = { x: sz.w / 2, y: sz.h / 2 };
-                        // cropDims for drag delta conversion — overridden for clips
                         let gizmoCropDims = cropDims;
 
                         if (gizmoTarget.type === 'clip' && primarySelectedSegment) {
                           const clipTime = project.currentTime - primarySelectedSegment.timelineStart;
                           const t = getCombinedTransform(primarySelectedSegment.keyframes, clipTime, project.currentTime);
                           gizmoTransform = { ...t, pivotX: t.pivotX ?? 50, pivotY: t.pivotY ?? 50 };
-                          // Compute displayed video size using same math as the CSS transform (object-contain within full viewport)
                           const vidEl = videoRefs.current.get(primarySelectedSegment.id);
                           const vw = vidEl?.videoWidth || 1920;
                           const vh = vidEl?.videoHeight || 1080;
@@ -8051,13 +8104,10 @@ function App() {
                           const displayW = containerAR > videoAR ? viewportSize.height * videoAR : viewportSize.width;
                           const displayH = containerAR > videoAR ? viewportSize.height : viewportSize.width / videoAR;
                           elemBounds = { width: displayW, height: displayH };
-                          // Video center in safe-zone-relative coordinates
-                          // (video is in viewport space, safe zone is offset by sz.x/sz.y)
                           elemCenter = {
                             x: (viewportSize.width / 2 - sz.x) + t.translateX * displayW / 100,
                             y: (viewportSize.height / 2 - sz.y) + t.translateY * displayH / 100,
                           };
-                          // Drag delta must use video display dims, not safe zone dims
                           gizmoCropDims = { width: displayW, height: displayH };
                         } else if (gizmoTarget.type === 'title' && project.titleLayer) {
                           const t2 = project.currentTime - project.titleLayer.startTime;
@@ -8090,48 +8140,27 @@ function App() {
                         }
 
                         return (
-                          <GizmoOverlay
-                            targetType={gizmoTarget.type}
-                            transform={gizmoTransform}
-                            viewportSize={{ width: sz.w, height: sz.h }}
-                            cropDims={gizmoCropDims}
-                            elementBounds={elemBounds}
-                            elementCenter={elemCenter}
-                            zoom={activeRightTab === 'tracking' ? trackingZoom : 1}
-                            isPlaying={project.isPlaying}
-                            onTranslate={handleGizmoTranslate}
-                            onScale={handleGizmoScale}
-                            onRotate={handleGizmoRotate}
-                            onPivotMove={handleGizmoPivotMove}
-                            onDragStart={handleGizmoDragStart}
-                            onDragEnd={handleGizmoDragEnd}
-                          />
+                          <div key="gizmo-overlay" style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none', zIndex: 9000 }}>
+                            <GizmoOverlay
+                              targetType={gizmoTarget.type}
+                              transform={gizmoTransform}
+                              viewportSize={{ width: sz.w, height: sz.h }}
+                              cropDims={gizmoCropDims}
+                              elementBounds={elemBounds}
+                              elementCenter={elemCenter}
+                              zoom={activeRightTab === 'tracking' ? trackingZoom : 1}
+                              isPlaying={project.isPlaying}
+                              onTranslate={handleGizmoTranslate}
+                              onScale={handleGizmoScale}
+                              onRotate={handleGizmoRotate}
+                              onPivotMove={handleGizmoPivotMove}
+                              onDragStart={handleGizmoDragStart}
+                              onDragEnd={handleGizmoDragEnd}
+                            />
+                          </div>
                         );
-                      })()}
-
-                      {/* Auto-pivot progress overlay */}
-                      {autoPivotProgress && (
-                        <div style={{
-                          position: 'absolute', inset: 0, zIndex: 10002,
-                          background: 'rgba(0,0,0,0.7)', display: 'flex',
-                          flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                          pointerEvents: 'auto',
-                        }}>
-                          <div style={{ color: '#fff', fontSize: 14, marginBottom: 12 }}>
-                            {autoPivotProgress.label}
-                          </div>
-                          <div style={{ width: 200, height: 4, background: '#333', borderRadius: 2 }}>
-                            <div style={{
-                              width: `${Math.round(autoPivotProgress.progress * 100)}%`,
-                              height: '100%', background: '#06b6d4', borderRadius: 2,
-                              transition: 'width 0.3s ease',
-                            }} />
-                          </div>
-                        </div>
-                      )}
-
-                    </div>
-                  );
+                    })()
+                  ];
                 })()}
 
               </div>
@@ -8570,7 +8599,14 @@ function App() {
                   <span className="text-xs text-gray-400">Transform Target:</span>
                   <select
                     value={transformTarget}
-                    onChange={(e) => setTransformTarget(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setTransformTarget(val);
+                      // Auto-select the segment so PropertiesPanel shows it (enables Add Volume Key etc.)
+                      if (val !== 'global' && val !== 'title_layer' && !val.startsWith('subtitle_')) {
+                        setSelectedSegmentIds([val]);
+                      }
+                    }}
                     className="bg-[#333] text-xs text-gray-300 border border-[#444] rounded px-2 py-1"
                   >
                     <option value="global">🌐 Global (Root)</option>

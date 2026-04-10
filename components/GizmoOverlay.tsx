@@ -221,7 +221,7 @@ const GizmoOverlay: React.FC<GizmoOverlayProps> = ({
         width: viewportSize.width,
         height: viewportSize.height,
         pointerEvents: 'none',
-        zIndex: 40,
+        zIndex: 201,
       }}
     >
       {/* All gizmo elements rotated around the pivot point */}

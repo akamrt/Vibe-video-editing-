@@ -341,7 +341,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             const color = CHANNEL_COLORS[channel];
             const defaultVal = CHANNEL_DEFAULTS[channel];
             const points = keyframes
-                .filter(kf => kfVal(kf, channel) !== defaultVal) // Hide dots for channels at default value
+                .filter(kf => kfVal(kf, channel) !== defaultVal || kf.keyframeConfig?.[channel]) // Show if non-default OR explicitly keyed
                 .map(kf => ({ time: kf.time, value: kfVal(kf, channel) }))
                 .sort((a, b) => a.time - b.time);
 
@@ -741,7 +741,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
 
                     if (kf) {
                         const value = kfVal(kf, channel);
-                        if (value === chDefault) continue; // Skip handles for default-value channels
+                        if (value === chDefault && !kf.keyframeConfig?.[channel]) continue; // Skip handles for default-value channels unless explicitly keyed
                         const config = kf.keyframeConfig?.[channel];
                         const inTangent = config?.inTangent || { x: -0.3, y: 0 };
                         const outTangent = config?.outTangent || { x: 0.3, y: 0 };
@@ -769,7 +769,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                     const chDefault = CHANNEL_DEFAULTS[channel as ChannelType];
                     for (const kf of keyframes) {
                         const val = kfVal(kf, channel as ChannelType);
-                        if (val === chDefault) continue; // Skip default-value dots
+                        if (val === chDefault && !kf.keyframeConfig?.[channel as ChannelType]) continue; // Skip default-value dots unless explicitly keyed
                         const screen = worldToScreen(kf.time, val);
                         const dist = Math.hypot(x - screen.x, y - screen.y);
                         if (dist < threshold && dist < bestDist) {
@@ -800,7 +800,7 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
                 const chDefault = CHANNEL_DEFAULTS[channel as ChannelType];
                 for (const kf of keyframes) {
                     const marqVal = kfVal(kf, channel as ChannelType);
-                    if (marqVal === chDefault) continue;
+                    if (marqVal === chDefault && !kf.keyframeConfig?.[channel as ChannelType]) continue;
                     const screen = worldToScreen(kf.time, marqVal);
                     if (screen.x >= minX && screen.x <= maxX && screen.y >= minY && screen.y <= maxY) {
                         newSelection.add(getSelectionKey(kf.time, channel as ChannelType));
@@ -990,8 +990,8 @@ const GraphEditor: React.FC<GraphEditorProps> = ({
             keyframeConfig: {}
         };
 
-        // Calculate tangents for each channel
-        const channels: ChannelType[] = ['translateX', 'translateY', 'scale', 'rotation', 'volume'];
+        // Calculate tangents for all active (visible) channels
+        const channels: ChannelType[] = Array.from(activeChannels);
         channels.forEach(channel => {
             const vPrev = prevVals[channel];
             const vNext = nextVals[channel];
