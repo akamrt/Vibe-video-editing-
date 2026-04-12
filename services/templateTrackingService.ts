@@ -931,6 +931,17 @@ export async function scanAndGenerateThresholdKeyframes(
     let frameIdx = 0;
     let lostFrames = 0;
     let goodFrames = 0;
+    let redetectCount = 0;
+    let lastGoodX = startX;
+
+    // For scan-and-center, use a less aggressive recapture threshold than manual tracking.
+    // 95 recaptures nearly every frame, compounding drift. 80 keeps templates stable longer.
+    const SCAN_RECAPTURE_THRESHOLD = 80;
+    // Max pixel jump per frame before treating as outlier (% of video width)
+    const MAX_JUMP_PCT = 0.08; // 8% of video width per 100ms = very fast motion
+    const MAX_JUMP_PX = vw * MAX_JUMP_PCT;
+    // Re-detect person after this many consecutive lost frames
+    const REDETECT_AFTER_LOST = 3;
 
     // Record initial position
     positions.push({ time: segment.startTime, x: startX });
@@ -944,10 +955,16 @@ export async function scanAndGenerateThresholdKeyframes(
         for (const tracker of trackers) {
             const result = findBestMatch(ctx, tracker, tracker.x, tracker.y, templates);
             if (result && result.point.matchScore !== undefined && result.point.matchScore >= DELETE_MATCH_THRESHOLD) {
+                // Velocity sanity check: reject if position jumped too far
+                const jump = Math.abs(result.point.x - tracker.x);
+                if (jump > MAX_JUMP_PX) {
+                    // Likely a false match — don't update this tracker
+                    continue;
+                }
                 tracker.x = result.point.x;
                 tracker.y = result.point.y;
                 tracker.matchScore = result.point.matchScore;
-                if (result.point.matchScore < ADAPTIVE_RECAPTURE_THRESHOLD) {
+                if (result.point.matchScore < SCAN_RECAPTURE_THRESHOLD) {
                     captureTemplate(tracker, ctx, templates);
                 }
                 frameXs.push(tracker.x);
@@ -961,16 +978,56 @@ export async function scanAndGenerateThresholdKeyframes(
             const medX = frameXs.length % 2 === 0
                 ? (frameXs[mid - 1] + frameXs[mid]) / 2
                 : frameXs[mid];
-            positions.push({ time: clampedT, x: medX });
-            lostFrames = 0;
-            goodFrames++;
+            // Additional sanity check: reject if median jumped too far from last good position
+            if (Math.abs(medX - lastGoodX) > MAX_JUMP_PX * 3) {
+                // Suspicious jump — hold last position
+                positions.push({ time: clampedT, x: lastGoodX });
+                lostFrames++;
+            } else {
+                positions.push({ time: clampedT, x: medX });
+                lastGoodX = medX;
+                lostFrames = 0;
+                goodFrames++;
+            }
         } else {
-            // All trackers lost — hold last known position
+            // All trackers lost — hold last known good position
             lostFrames++;
-            positions.push({ time: clampedT, x: trackers[trackers.length - 1].x });
-            if (lostFrames >= 5) {
-                // Re-anchor all trackers at their current positions
-                for (const tracker of trackers) captureTemplate(tracker, ctx, templates);
+            positions.push({ time: clampedT, x: lastGoodX });
+
+            if (lostFrames >= REDETECT_AFTER_LOST) {
+                // Re-detect person using skin/motion analysis instead of blind re-anchor
+                const redetect = await detectPersonInFrame(videoElement, clampedT - 0.05);
+                if (redetect && redetect.confidence > 20) {
+                    console.log(`[ScanCenter] Re-detected person at frame ${frameIdx}: (${redetect.x.toFixed(0)}, ${redetect.y.toFixed(0)}) conf=${redetect.confidence.toFixed(0)}%`);
+                    // Re-anchor trackers at the newly detected position
+                    const newX = redetect.x;
+                    const newY = redetect.y;
+                    // Rebuild trackers near the new detection
+                    const newFeatures = findGoodFeatures(ctx, vw, vh, []);
+                    const nearNew = newFeatures
+                        .map(f => ({ ...f, dist: Math.hypot(f.x - newX, f.y - newY) }))
+                        .filter(f => f.dist < SEARCH_RADIUS)
+                        .sort((a, b) => a.dist - b.dist)
+                        .slice(0, 3);
+                    // Update existing trackers to new positions and recapture
+                    for (let i = 0; i < trackers.length && i < nearNew.length; i++) {
+                        trackers[i].x = nearNew[i].x;
+                        trackers[i].y = nearNew[i].y;
+                        captureTemplate(trackers[i], ctx, templates);
+                    }
+                    // Update the center tracker
+                    const ct = trackers.find(t => t.id === 'person_center');
+                    if (ct) {
+                        ct.x = newX;
+                        ct.y = newY;
+                        captureTemplate(ct, ctx, templates);
+                    }
+                    lastGoodX = newX;
+                    redetectCount++;
+                } else {
+                    // Re-detect failed — just recapture at current positions as fallback
+                    for (const tracker of trackers) captureTemplate(tracker, ctx, templates);
+                }
                 lostFrames = 0;
             }
         }
@@ -1051,8 +1108,8 @@ export async function scanAndGenerateThresholdKeyframes(
         });
     }
 
-    const pctTracked = ((frameIdx - lostFrames) / Math.max(1, frameIdx) * 100).toFixed(0);
-    console.log(`[ScanCenter] Complete: ${keyframes.length} keyframes, ${triggerCount} triggers, ${frameIdx} frames, ${pctTracked}% tracked`);
+    const pctTracked = ((goodFrames) / Math.max(1, frameIdx) * 100).toFixed(0);
+    console.log(`[ScanCenter] Complete: ${keyframes.length} keyframes, ${triggerCount} triggers, ${frameIdx} frames, ${pctTracked}% tracked, ${redetectCount} re-detections`);
     console.log(`[ScanCenter] PersonX range: ${Math.min(...smoothed.map(s=>s.personX)).toFixed(1)}% – ${Math.max(...smoothed.map(s=>s.personX)).toFixed(1)}%`);
     console.log(`[ScanCenter] TranslateX range: ${Math.min(...keyframes.map(k=>k.translateX)).toFixed(1)}% – ${Math.max(...keyframes.map(k=>k.translateX)).toFixed(1)}%`);
 

@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { extractVideoId, getTranscript } = require('./transcript.cjs');
-const { getYtDlpPath, getPythonTrackerPath, getEnvWithBinPath, getFfmpegPath } = require('./binpath.cjs');
+const { getYtDlpPath, getPythonTrackerPath, getTrackerInfo, getEnvWithBinPath, getFfmpegPath } = require('./binpath.cjs');
 const { transcribeFile, assemblyAIToAnalysisEvents } = require('./assemblyai.cjs');
 const localStore = require('./localStore.cjs');
 const saveStore = require('./saveStore.cjs');
@@ -1526,26 +1526,34 @@ app.post('/api/tracking/upload', trackingUpload.single('video'), (req, res) => {
 
 // Check if Python tracker is available
 app.get('/api/tracking/capabilities', (req, res) => {
-    const trackerPath = getPythonTrackerPath();
-    if (!trackerPath) {
-        return res.json({ success: true, available: false, reason: 'vibecut-tracker not installed' });
+    const tracker = getTrackerInfo();
+    if (!tracker) {
+        return res.json({ success: true, available: false, reason: 'vibecut-tracker not installed and Python source not available' });
     }
-    // Just check the binary exists and is accessible — don't actually run it
-    // (running PyInstaller binaries cold can take 5-10 seconds and cause timeouts)
-    try {
-        fs.accessSync(trackerPath, fs.constants.X_OK);
-        console.log(`[Tracking] Tracker binary found: ${trackerPath}`);
-        res.json({ success: true, available: true, capabilities: {} });
-    } catch {
-        console.log(`[Tracking] Tracker binary not executable: ${trackerPath}`);
-        res.json({ success: true, available: false, reason: 'Tracker binary not accessible' });
+    if (tracker.type === 'binary') {
+        // Just check the binary exists and is accessible — don't actually run it
+        // (running PyInstaller binaries cold can take 5-10 seconds and cause timeouts)
+        try {
+            // On Windows, X_OK is unreliable (doesn't map to Windows ACLs properly).
+            const checkFlag = process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK;
+            fs.accessSync(tracker.path, checkFlag);
+            console.log(`[Tracking] Tracker binary found: ${tracker.path}`);
+            res.json({ success: true, available: true, mode: 'binary', capabilities: {} });
+        } catch {
+            console.log(`[Tracking] Tracker binary not accessible: ${tracker.path}`);
+            res.json({ success: true, available: false, reason: 'Tracker binary not accessible' });
+        }
+    } else {
+        // Python source mode — verify dependencies are installed
+        console.log(`[Tracking] Tracker via Python source: ${tracker.python} in ${tracker.pythonDir}`);
+        res.json({ success: true, available: true, mode: 'python-source', capabilities: {} });
     }
 });
 
 // Python-enhanced tracking endpoint
 app.post('/api/tracking/analyze', async (req, res) => {
-    const trackerPath = getPythonTrackerPath();
-    if (!trackerPath) {
+    const tracker = getTrackerInfo();
+    if (!tracker) {
         return res.status(501).json({ success: false, fallback: true, error: 'Python tracker not installed' });
     }
 
@@ -1571,13 +1579,25 @@ app.post('/api/tracking/analyze', async (req, res) => {
 
     // Check the video file exists and log its size
     const videoStat = fs.statSync(videoPath);
-    console.log(`[Tracking] Running Python tracker: ${trackerPath}`);
+
+    // Determine spawn command based on tracker type
+    let spawnCmd, spawnArgs;
+    if (tracker.type === 'binary') {
+        spawnCmd = tracker.path;
+        spawnArgs = [];
+        console.log(`[Tracking] Running Python tracker (binary): ${tracker.path}`);
+    } else {
+        spawnCmd = tracker.python;
+        spawnArgs = ['-m', 'vibecut_tracker.main'];
+        console.log(`[Tracking] Running Python tracker (source): ${tracker.python} -m vibecut_tracker.main`);
+    }
     console.log(`[Tracking] Video: ${videoPath} (${(videoStat.size / 1024 / 1024).toFixed(1)}MB), Time: ${startTime}-${endTime}, Mode: ${mode}`);
 
     try {
-        const child = spawn(trackerPath, [], {
+        const child = spawn(spawnCmd, spawnArgs, {
             stdio: ['pipe', 'pipe', 'pipe'],
             env: { ...process.env },
+            cwd: tracker.type === 'python' ? tracker.pythonDir : undefined,
         });
         activeChildren.add(child);
 
@@ -2584,12 +2604,14 @@ function startServer(port, retryCount = 0) {
         if (isElectron) console.log('[Server] Running in Electron mode');
 
         // Log Python tracker availability at startup
-        const trackerPath = getPythonTrackerPath();
-        if (trackerPath) {
-            console.log(`[Tracking] Python tracker AVAILABLE: ${trackerPath}`);
+        const trackerInfo = getTrackerInfo();
+        if (trackerInfo && trackerInfo.type === 'binary') {
+            console.log(`[Tracking] Python tracker AVAILABLE (binary): ${trackerInfo.path}`);
+        } else if (trackerInfo && trackerInfo.type === 'python') {
+            console.log(`[Tracking] Python tracker AVAILABLE (source): ${trackerInfo.python} in ${trackerInfo.pythonDir}`);
         } else {
             console.log('[Tracking] WARNING: Python tracker NOT FOUND — will fall back to browser tracking');
-            console.log('[Tracking] Expected location: bin/vibecut-tracker' + (process.platform === 'win32' ? '.exe' : ''));
+            console.log('[Tracking] Install: cd python && pip install -r requirements.txt');
         }
     });
 

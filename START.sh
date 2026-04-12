@@ -23,6 +23,28 @@ if [ ! -d "node_modules" ]; then
     echo ""
 fi
 
+# Auto-update: pull latest from GitHub and reinstall if needed
+if command -v git &> /dev/null && git rev-parse --git-dir &> /dev/null; then
+    echo -e "${YELLOW}Checking for updates...${NC}"
+    # Save current package.json hash to detect dependency changes
+    OLD_PKG_HASH=$(md5sum package.json 2>/dev/null || md5 -q package.json 2>/dev/null || echo "")
+
+    git pull --ff-only 2>&1
+    PULL_EXIT=$?
+
+    if [ $PULL_EXIT -eq 0 ]; then
+        NEW_PKG_HASH=$(md5sum package.json 2>/dev/null || md5 -q package.json 2>/dev/null || echo "")
+        if [ "$OLD_PKG_HASH" != "$NEW_PKG_HASH" ]; then
+            echo -e "${YELLOW}Dependencies changed — running npm install...${NC}"
+            npm install
+        fi
+        echo -e "${GREEN}Up to date!${NC}"
+    else
+        echo -e "${YELLOW}Could not auto-update (you may have local changes). Continuing with current version.${NC}"
+    fi
+    echo ""
+fi
+
 # Cleanup function
 cleanup() {
     echo ""

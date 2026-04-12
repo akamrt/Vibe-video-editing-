@@ -34,6 +34,7 @@ import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
 import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes, detectPersonInFrame } from './services/templateTrackingService';
 import { fullScanAndCenter, trackHeadForPivot, headTrackForPivot } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
+import ChannelBox from './components/ChannelBox';
 import { AudioMixerPanel } from './components/AudioMixerPanel';
 import { createDefaultAudioMixer } from './utils/audioMixerDefaults';
 import { buildAudioChain } from './utils/audioProcessingChain';
@@ -376,7 +377,7 @@ function App() {
   const [activeLeftTab, setActiveLeftTab] = useState<'media' | 'stock' | 'properties'>('media');
 
   // Right Panel State
-  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions' | 'render' | 'audio' | 'publish'>('transitions');
+  const [activeRightTab, setActiveRightTab] = useState<'transcript' | 'templates' | 'tracking' | 'transitions' | 'channels' | 'render' | 'audio' | 'publish'>('transitions');
 
   // Publish panel data — populated when a short is exported from the Content Library
   // so the PUBLISH tab can show its social media package for copy-paste.
@@ -3356,7 +3357,7 @@ function App() {
 
   // Determine what the gizmo is targeting and get relevant state
   const getGizmoTarget = (): {
-    type: 'clip' | 'subtitle' | 'title' | null;
+    type: 'clip' | 'subtitle' | 'title' | 'global' | null;
     segmentId?: string;
     mediaId?: string;
     eventIndex?: number;
@@ -3376,13 +3377,20 @@ function App() {
     if (primarySelectedSegment && transformTarget !== 'global') {
       return { type: 'clip', segmentId: primarySelectedSegment.id };
     }
+    // Global — show gizmo if there's an active clip to visualize against
+    if (transformTarget === 'global') {
+      return { type: 'global' };
+    }
     return { type: null };
   };
 
   // onTranslate receives ABSOLUTE translate values (startTranslate + pixelDelta)
   const handleGizmoTranslate = (newTx: number, newTy: number) => {
     const target = getGizmoTarget();
-    if (target.type === 'clip' && target.segmentId) {
+    if (target.type === 'global') {
+      const newKfs = upsertKeyframe(globalKeyframes, project.currentTime, { translateX: newTx, translateY: newTy });
+      handleUpdateKeyframes('global', newKfs, true);
+    } else if (target.type === 'clip' && target.segmentId) {
       const seg = project.segments.find(s => s.id === target.segmentId);
       if (!seg) return;
       const clipTime = project.currentTime - seg.timelineStart;
@@ -3416,7 +3424,10 @@ function App() {
 
   const handleGizmoScale = (newScale: number) => {
     const target = getGizmoTarget();
-    if (target.type === 'clip' && target.segmentId) {
+    if (target.type === 'global') {
+      const newKfs = upsertKeyframe(globalKeyframes, project.currentTime, { scale: newScale });
+      handleUpdateKeyframes('global', newKfs, true);
+    } else if (target.type === 'clip' && target.segmentId) {
       const seg = project.segments.find(s => s.id === target.segmentId);
       if (!seg) return;
       const clipTime = project.currentTime - seg.timelineStart;
@@ -3441,7 +3452,10 @@ function App() {
 
   const handleGizmoRotate = (newRotation: number) => {
     const target = getGizmoTarget();
-    if (target.type === 'clip' && target.segmentId) {
+    if (target.type === 'global') {
+      const newKfs = upsertKeyframe(globalKeyframes, project.currentTime, { rotation: newRotation });
+      handleUpdateKeyframes('global', newKfs, true);
+    } else if (target.type === 'clip' && target.segmentId) {
       const seg = project.segments.find(s => s.id === target.segmentId);
       if (!seg) return;
       const clipTime = project.currentTime - seg.timelineStart;
@@ -3466,7 +3480,18 @@ function App() {
 
   const handleGizmoPivotMove = (newPivotX: number, newPivotY: number) => {
     const target = getGizmoTarget();
-    if (target.type === 'clip' && target.segmentId) {
+    if (target.type === 'global') {
+      const interp = getInterpolatedTransform(globalKeyframes, project.currentTime);
+      const comp = compensatePivotChange(
+        interp.translateX, interp.translateY, interp.scale, interp.rotation,
+        interp.pivotX, interp.pivotY, newPivotX, newPivotY
+      );
+      const newKfs = upsertKeyframe(globalKeyframes, project.currentTime, {
+        pivotX: newPivotX, pivotY: newPivotY,
+        translateX: comp.translateX, translateY: comp.translateY,
+      });
+      handleUpdateKeyframes('global', newKfs, true);
+    } else if (target.type === 'clip' && target.segmentId) {
       const seg = project.segments.find(s => s.id === target.segmentId);
       if (!seg) return;
       const clipTime = project.currentTime - seg.timelineStart;
@@ -3516,7 +3541,9 @@ function App() {
 
   const handleGizmoDragStart = () => {
     const target = getGizmoTarget();
-    if (target.type === 'clip' && target.segmentId) {
+    if (target.type === 'global') {
+      pushUndo({ type: 'keyframes', segmentId: 'global', keyframes: globalKeyframes });
+    } else if (target.type === 'clip' && target.segmentId) {
       const seg = project.segments.find(s => s.id === target.segmentId);
       if (seg) pushUndo({ type: 'keyframes', segmentId: target.segmentId, keyframes: seg.keyframes || [] });
     } else if (target.type === 'title' && project.titleLayer) {
@@ -8092,7 +8119,28 @@ function App() {
                         let elemCenter = { x: sz.w / 2, y: sz.h / 2 };
                         let gizmoCropDims = cropDims;
 
-                        if (gizmoTarget.type === 'clip' && primarySelectedSegment) {
+                        if (gizmoTarget.type === 'global') {
+                          // Global: show gizmo using global keyframes, sized to the active clip
+                          const t = getInterpolatedTransform(globalKeyframes, project.currentTime);
+                          gizmoTransform = { ...t, pivotX: t.pivotX ?? 50, pivotY: t.pivotY ?? 50 };
+                          const topVisual = activeSegments.filter(s => s.type !== 'audio').slice(-1)[0];
+                          if (topVisual) {
+                            const vidEl = videoRefs.current.get(topVisual.id);
+                            const vw = vidEl?.videoWidth || 1920;
+                            const vh = vidEl?.videoHeight || 1080;
+                            const videoAR = vw / vh;
+                            const containerAR = viewportSize.width / (viewportSize.height || 1);
+                            const displayW = containerAR > videoAR ? viewportSize.height * videoAR : viewportSize.width;
+                            const displayH = containerAR > videoAR ? viewportSize.height : viewportSize.width / videoAR;
+                            elemBounds = { width: displayW, height: displayH };
+                            // inset:0 gizmo — center is in full viewport coords
+                            elemCenter = {
+                              x: viewportSize.width / 2 + t.translateX * displayW / 100,
+                              y: viewportSize.height / 2 + t.translateY * displayH / 100,
+                            };
+                            gizmoCropDims = { width: displayW, height: displayH };
+                          }
+                        } else if (gizmoTarget.type === 'clip' && primarySelectedSegment) {
                           const clipTime = project.currentTime - primarySelectedSegment.timelineStart;
                           const t = getCombinedTransform(primarySelectedSegment.keyframes, clipTime, project.currentTime);
                           gizmoTransform = { ...t, pivotX: t.pivotX ?? 50, pivotY: t.pivotY ?? 50 };
@@ -8104,9 +8152,10 @@ function App() {
                           const displayW = containerAR > videoAR ? viewportSize.height * videoAR : viewportSize.width;
                           const displayH = containerAR > videoAR ? viewportSize.height : viewportSize.width / videoAR;
                           elemBounds = { width: displayW, height: displayH };
+                          // inset:0 gizmo — center is in full viewport coords
                           elemCenter = {
-                            x: (viewportSize.width / 2 - sz.x) + t.translateX * displayW / 100,
-                            y: (viewportSize.height / 2 - sz.y) + t.translateY * displayH / 100,
+                            x: viewportSize.width / 2 + t.translateX * displayW / 100,
+                            y: viewportSize.height / 2 + t.translateY * displayH / 100,
                           };
                           gizmoCropDims = { width: displayW, height: displayH };
                         } else if (gizmoTarget.type === 'title' && project.titleLayer) {
@@ -8117,8 +8166,8 @@ function App() {
                           gizmoTransform = { ...tTransform, pivotX: tTransform.pivotX ?? 50, pivotY: tTransform.pivotY ?? 50 };
                           elemBounds = { width: sz.w * 0.8, height: 60 };
                           elemCenter = {
-                            x: sz.w / 2 + tTransform.translateX * sz.w / 100,
-                            y: sz.h / 2 + tTransform.translateY * sz.h / 100,
+                            x: sz.x + sz.w / 2 + tTransform.translateX * sz.w / 100,
+                            y: sz.y + sz.h / 2 + tTransform.translateY * sz.h / 100,
                           };
                         } else if (gizmoTarget.type === 'subtitle' && activeSubtitleEvent) {
                           const subTxG = activeSubtitleEvent.translateX || 0;
@@ -8134,17 +8183,17 @@ function App() {
                           gizmoTransform = { ...subInterp, pivotX: subInterp.pivotX ?? 50, pivotY: subInterp.pivotY ?? 50 };
                           elemBounds = { width: sz.w * 0.6, height: 40 };
                           elemCenter = {
-                            x: sz.w / 2 + (subTxG + subInterp.translateX) * sz.w / 100,
-                            y: sz.h * 0.85 + (subTyG + subInterp.translateY) * sz.h / 100,
+                            x: sz.x + sz.w / 2 + (subTxG + subInterp.translateX) * sz.w / 100,
+                            y: sz.y + sz.h * 0.85 + (subTyG + subInterp.translateY) * sz.h / 100,
                           };
                         }
 
                         return (
-                          <div key="gizmo-overlay" style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none', zIndex: 9000 }}>
+                          <div key="gizmo-overlay" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 9000 }}>
                             <GizmoOverlay
                               targetType={gizmoTarget.type}
                               transform={gizmoTransform}
-                              viewportSize={{ width: sz.w, height: sz.h }}
+                              viewportSize={{ width: viewportSize.width, height: viewportSize.height }}
                               cropDims={gizmoCropDims}
                               elementBounds={elemBounds}
                               elementCenter={elemCenter}
@@ -8302,6 +8351,7 @@ function App() {
                 <button onClick={() => setActiveRightTab('transcript')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'transcript' ? 'bg-[#333] text-blue-400 border-b-2 border-blue-400' : 'text-gray-400'}`}>TRANSCRIPT</button>
                 <button onClick={() => setActiveRightTab('templates')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'templates' ? 'bg-[#333] text-purple-400 border-b-2 border-purple-400' : 'text-gray-400'}`}>TEMPLATES</button>
                 <button onClick={() => setActiveRightTab('transitions')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'transitions' ? 'bg-[#333] text-cyan-400 border-b-2 border-cyan-400' : 'text-gray-400'}`}>TRANS.</button>
+                <button onClick={() => setActiveRightTab('channels')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'channels' ? 'bg-[#333] text-amber-400 border-b-2 border-amber-400' : 'text-gray-400'}`}>CH.BOX</button>
                 <button onClick={() => setActiveRightTab('tracking')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'tracking' ? 'bg-[#333] text-green-400 border-b-2 border-green-400' : 'text-gray-400'}`}>TRACKING</button>
                 <button onClick={() => setActiveRightTab('render')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'render' ? 'bg-[#333] text-orange-400 border-b-2 border-orange-400' : 'text-gray-400'}`}>RENDER</button>
                 <button onClick={() => setActiveRightTab('audio')} className={`flex-1 py-2 text-[10px] font-bold tracking-tight ${activeRightTab === 'audio' ? 'bg-[#333] text-pink-400 border-b-2 border-pink-400' : 'text-gray-400'}`}>AUDIO</button>
@@ -8412,6 +8462,96 @@ function App() {
                     pivotTrackingProgress={pivotTrackingProgress}
                     onAutoPivotToHead={handleAutoPivotToHead}
                     autoPivotProgress={autoPivotProgress}
+                  />
+                )}
+                {activeRightTab === 'channels' && (
+                  <ChannelBox
+                    currentTime={(() => {
+                      if (transformTarget === 'global') return project.currentTime;
+                      if (transformTarget === 'title_layer' && project.titleLayer) return Math.max(0, project.currentTime - project.titleLayer.startTime);
+                      if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        const evt = media?.analysis?.events[idx];
+                        if (evt) {
+                          const topSeg = project.segments.find(s => project.library.find(lib => lib.id === s.mediaId)?.id === mediaId);
+                          const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : project.currentTime;
+                          return Math.max(0, sourceTime - evt.startTime);
+                        }
+                      }
+                      const seg = project.segments.find(s => s.id === transformTarget);
+                      if (seg) return Math.max(0, project.currentTime - seg.timelineStart);
+                      return graphEditorClipTime;
+                    })()}
+                    keyframes={(() => {
+                      if (transformTarget === 'global') return globalKeyframes;
+                      if (transformTarget === 'title_layer') return project.titleLayer?.keyframes || [];
+                      if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        return media?.analysis?.events[idx]?.keyframes || [];
+                      }
+                      return project.segments.find(s => s.id === transformTarget)?.keyframes || primarySelectedSegment?.keyframes;
+                    })()}
+                    targetLabel={(() => {
+                      if (transformTarget === 'global') return 'Global (Root)';
+                      if (transformTarget === 'title_layer') return 'Title Layer';
+                      if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const idx = parseInt(parts[2]);
+                        return `Subtitle #${idx + 1}`;
+                      }
+                      const seg = project.segments.find(s => s.id === transformTarget);
+                      if (seg) {
+                        const media = project.library.find(m => m.id === seg.mediaId);
+                        return media?.name?.slice(0, 30) || seg.id.slice(0, 8);
+                      }
+                      return primarySelectedSegment ? (project.library.find(m => m.id === primarySelectedSegment.mediaId)?.name?.slice(0, 30) || 'Clip') : 'No Target';
+                    })()}
+                    onUpdateKeyframes={(keyframes) => {
+                      if (transformTarget === 'global') {
+                        handleUpdateKeyframes('global', keyframes);
+                      } else if (transformTarget === 'title_layer') {
+                        handleUpdateTitleLayer({ keyframes });
+                      } else if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        const evt = media?.analysis?.events[idx];
+                        if (evt) handleUpdateDialogue(mediaId, idx, { ...evt, keyframes });
+                      } else {
+                        const segId = transformTarget !== 'global' ? transformTarget : primarySelectedSegment?.id;
+                        if (segId) handleUpdateKeyframes(segId, keyframes);
+                      }
+                    }}
+                    onSeek={(time) => {
+                      if (transformTarget === 'global') {
+                        setProject(p => ({ ...p, currentTime: time }));
+                      } else if (transformTarget === 'title_layer' && project.titleLayer) {
+                        setProject(p => ({ ...p, currentTime: (p.titleLayer?.startTime || 0) + time }));
+                      } else if (transformTarget.startsWith('subtitle_')) {
+                        const parts = transformTarget.split('_');
+                        const mediaId = parts[1];
+                        const idx = parseInt(parts[2]);
+                        const media = project.library.find(m => m.id === mediaId);
+                        const evt = media?.analysis?.events[idx];
+                        if (evt) {
+                          const topSeg = project.segments.find(s => project.library.find(lib => lib.id === s.mediaId)?.id === mediaId);
+                          if (topSeg) {
+                            const sourceTime = evt.startTime + time;
+                            setProject(p => ({ ...p, currentTime: topSeg.timelineStart + (sourceTime - topSeg.startTime) }));
+                          }
+                        }
+                      } else {
+                        const seg = project.segments.find(s => s.id === transformTarget) || primarySelectedSegment;
+                        if (seg) setProject(p => ({ ...p, currentTime: seg.timelineStart + time }));
+                      }
+                    }}
                   />
                 )}
                 {activeRightTab === 'render' && (

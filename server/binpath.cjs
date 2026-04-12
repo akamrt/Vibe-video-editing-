@@ -108,6 +108,50 @@ function getPythonTrackerPath() {
 }
 
 /**
+ * Find a working Python 3 executable.
+ * Returns the command name (e.g. 'python3', 'python') or null.
+ */
+function findPython() {
+    const candidates = isWindows() ? ['python', 'python3'] : ['python3', 'python'];
+    for (const cmd of candidates) {
+        try {
+            const version = execSync(`${cmd} --version`, { encoding: 'utf8', stdio: 'pipe' }).trim();
+            if (version.startsWith('Python 3')) return cmd;
+        } catch { /* not found */ }
+    }
+    return null;
+}
+
+/**
+ * Check if the Python source tracker can run (python/ directory + dependencies installed).
+ * Returns { python, modulePath } or null.
+ */
+function getPythonTrackerSource() {
+    const pythonDir = path.join(__dirname, '..', 'python');
+    const mainPy = path.join(pythonDir, 'vibecut_tracker', 'main.py');
+    if (!fs.existsSync(mainPy)) return null;
+
+    const python = findPython();
+    if (!python) return null;
+
+    return { python, pythonDir };
+}
+
+/**
+ * Get tracker info: either a compiled binary path or a Python source fallback.
+ * Returns { type: 'binary', path } | { type: 'python', python, pythonDir } | null
+ */
+function getTrackerInfo() {
+    const binaryPath = getPythonTrackerPath();
+    if (binaryPath) return { type: 'binary', path: binaryPath };
+
+    const pythonSource = getPythonTrackerSource();
+    if (pythonSource) return { type: 'python', ...pythonSource };
+
+    return null;
+}
+
+/**
  * Get the bin directory path (for setting PATH so yt-dlp can find ffmpeg)
  */
 function getBinDir() {
@@ -129,6 +173,7 @@ module.exports = {
     getYtDlpPath,
     getFfmpegPath,
     getPythonTrackerPath,
+    getTrackerInfo,
     getBinDir,
     getEnvWithBinPath
 };

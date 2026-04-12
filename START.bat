@@ -26,6 +26,34 @@ if not exist "node_modules" (
     echo.
 )
 
+:: Auto-update: pull latest from GitHub and reinstall if needed
+where git >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    echo  Checking for updates...
+
+    :: Save current package.json hash
+    set "OLD_HASH="
+    for /f "tokens=*" %%h in ('certutil -hashfile package.json MD5 2^>nul ^| findstr /v "hash MD5"') do (
+        if not defined OLD_HASH set "OLD_HASH=%%h"
+    )
+
+    git pull --ff-only >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        set "NEW_HASH="
+        for /f "tokens=*" %%h in ('certutil -hashfile package.json MD5 2^>nul ^| findstr /v "hash MD5"') do (
+            if not defined NEW_HASH set "NEW_HASH=%%h"
+        )
+        if not "!OLD_HASH!"=="!NEW_HASH!" (
+            echo  Dependencies changed - running npm install...
+            call npm install
+        )
+        echo  Up to date!
+    ) else (
+        echo  Could not auto-update. Continuing with current version.
+    )
+    echo.
+)
+
 :: Check for .env.local
 if not exist ".env.local" (
     echo  [WARNING] No API keys found!
