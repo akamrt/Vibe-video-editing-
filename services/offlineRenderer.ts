@@ -262,6 +262,10 @@ export class OfflineRenderer {
           const audioBuffer = await urlDecodeCache.get(item.url)!;
           if (!audioBuffer) return;
 
+          // Video segments with unlinked audio are muted — their paired audio-type
+          // segment (with the same source) handles the audio track.
+          if (seg.audioLinked === false && seg.type !== 'audio') return;
+
           const source = offlineCtx.createBufferSource();
           source.buffer = audioBuffer;
 
@@ -272,16 +276,24 @@ export class OfflineRenderer {
 
           // Apply volume keyframes via Web Audio automation
           const segStart = Math.max(0, seg.timelineStart);
-          if (seg.keyframes?.length) {
+          const volumeKeyframes = seg.keyframes?.filter(kf => kf.volume != null) ?? [];
+          if (volumeKeyframes.length) {
             // Sort keyframes by time
-            const sorted = [...seg.keyframes].sort((a, b) => a.time - b.time);
+            const sorted = [...volumeKeyframes].sort((a, b) => a.time - b.time);
+            // Anchor: hold at first-keyframe volume from segment start (matches playback
+            // behaviour where getInterpolatedTransform returns first-kf value before t0)
+            segGain.gain.setValueAtTime(sorted[0].volume ?? 1.0, segStart);
             for (const kf of sorted) {
               const vol = kf.volume ?? 1.0;
               const absTime = segStart + kf.time;
-              if (absTime >= 0) {
+              if (absTime >= segStart) {
                 segGain.gain.linearRampToValueAtTime(vol, absTime);
               }
             }
+            // Hold at last keyframe value for the remainder of the segment
+            const lastVol = sorted[sorted.length - 1].volume ?? 1.0;
+            const segEnd = segStart + (seg.endTime - seg.startTime);
+            segGain.gain.setValueAtTime(lastVol, segEnd);
           } else {
             segGain.gain.setValueAtTime(1.0, segStart);
           }
