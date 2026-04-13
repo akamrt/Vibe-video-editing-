@@ -540,9 +540,11 @@ function App() {
   // Audio Context for Export
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourcesRef = useRef<WeakMap<HTMLVideoElement, MediaElementAudioSourceNode>>(new WeakMap());
-  // Audio mixer chain for real-time preview metering
+  // Audio mixer chain for real-time preview & metering
   const audioChainRef = useRef<AudioChain | null>(null);
   const [audioAnalyserNode, setAudioAnalyserNode] = useState<AnalyserNode | null>(null);
+  // Per-segment GainNodes for volume control through Web Audio chain
+  const audioGainNodesRef = useRef<Map<string, GainNode>>(new Map());
 
   const viewportContainerRef = useRef<HTMLDivElement>(null);
   const viewportOuterRef = useRef<HTMLDivElement>(null);
@@ -823,11 +825,13 @@ function App() {
           }
           if (!videoEl.paused) videoEl.pause();
           if (seg.type !== 'audio') videoEl.style.opacity = '0';
-          videoEl.volume = 0;
+          setSegmentVolume(videoEl, seg.id, 0);
           return;
         }
 
         // --- ACTIVE STATE ---
+        // Ensure audio is routed through the Web Audio processing chain
+        ensureAudioRouting(videoEl, seg.id);
         const sourceTime = seg.startTime + (project.currentTime - seg.timelineStart);
 
         if (project.isPlaying) {
@@ -913,7 +917,7 @@ function App() {
           if (relTime < AUDIO_FADE_SEC) audioVolume *= relTime / AUDIO_FADE_SEC;
           if (relTime > duration - AUDIO_FADE_SEC) audioVolume *= Math.max(0, (duration - relTime) / AUDIO_FADE_SEC);
 
-          videoEl.volume = Math.max(0, Math.min(1, audioVolume));
+          setSegmentVolume(videoEl, seg.id, Math.max(0, audioVolume));
           return; // Skip all visual transition logic
         }
 
@@ -1161,9 +1165,9 @@ function App() {
         }
         // If audio is unlinked, mute the video element (audio plays from separate audio segment)
         if (seg.audioLinked === false) {
-          videoEl.volume = 0;
+          setSegmentVolume(videoEl, seg.id, 0);
         } else {
-          videoEl.volume = Math.max(0, Math.min(1, audioVolume));
+          setSegmentVolume(videoEl, seg.id, Math.max(0, audioVolume));
         }
       }
     });
@@ -1756,30 +1760,30 @@ function App() {
     setActiveRightTab('render');
   };
 
-  // Set up real-time audio analyser for the Audio mixer panel metering
+  // Maintain real-time audio processing chain (EQ, compressor, limiter, master volume).
+  // Always active so playback audio is routed through the mixer effects.
   useEffect(() => {
-    if (activeRightTab !== 'audio') {
-      // Clean up when leaving audio tab
-      if (audioChainRef.current) {
-        audioChainRef.current.destroy();
-        audioChainRef.current = null;
-        setAudioAnalyserNode(null);
-      }
-      return;
-    }
-    // Create AudioContext if needed
     if (!audioContextRef.current) {
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
     const ctx = audioContextRef.current;
     const mixer = project.audioMixer || createDefaultAudioMixer();
 
-    // Build processing chain for preview metering
-    if (audioChainRef.current) audioChainRef.current.destroy();
+    // Build new processing chain
+    const oldChain = audioChainRef.current;
     const chain = buildAudioChain(ctx, mixer.effects, mixer.masterVolume);
     chain.output.connect(ctx.destination);
     audioChainRef.current = chain;
     setAudioAnalyserNode(chain.analyser);
+
+    // Reconnect all existing per-segment gain nodes to new chain input
+    for (const [, gain] of audioGainNodesRef.current) {
+      try { gain.disconnect(); } catch { /* already disconnected */ }
+      gain.connect(chain.input);
+    }
+
+    // Destroy old chain (disconnects its internal nodes)
+    if (oldChain) oldChain.destroy();
 
     return () => {
       if (audioChainRef.current) {
@@ -1787,7 +1791,52 @@ function App() {
         audioChainRef.current = null;
       }
     };
-  }, [activeRightTab, project.audioMixer]);
+  }, [project.audioMixer]);
+
+  // Ensure a video element's audio is routed through the Web Audio processing chain.
+  // Returns the per-segment GainNode for volume control (or null if routing failed).
+  const ensureAudioRouting = useCallback((videoEl: HTMLVideoElement, segId: string): GainNode | null => {
+    const ctx = audioContextRef.current;
+    const chain = audioChainRef.current;
+    if (!ctx || !chain) return null;
+
+    // Resume suspended AudioContext (browser autoplay policy)
+    if (ctx.state === 'suspended') ctx.resume();
+
+    // Get or create MediaElementAudioSourceNode (can only be created once per element)
+    let source = audioSourcesRef.current.get(videoEl);
+    if (!source) {
+      try {
+        source = ctx.createMediaElementSource(videoEl);
+        audioSourcesRef.current.set(videoEl, source);
+      } catch (e) {
+        // Already created by another path (e.g. legacy export), or element not ready
+        return audioGainNodesRef.current.get(segId) || null;
+      }
+    }
+
+    // Get or create per-segment GainNode
+    let gain = audioGainNodesRef.current.get(segId);
+    if (!gain) {
+      gain = ctx.createGain();
+      gain.gain.value = 0; // Start silent, playback loop sets actual volume
+      audioGainNodesRef.current.set(segId, gain);
+      source.connect(gain);
+      gain.connect(chain.input);
+    }
+
+    return gain;
+  }, []);
+
+  // Set volume for a segment, using Web Audio GainNode if available, else videoEl.volume fallback
+  const setSegmentVolume = useCallback((videoEl: HTMLVideoElement, segId: string, volume: number) => {
+    const gain = audioGainNodesRef.current.get(segId);
+    if (gain) {
+      gain.gain.value = volume;
+    } else {
+      videoEl.volume = Math.max(0, Math.min(1, volume));
+    }
+  }, []);
 
   // Export video with animations (real-time playback capture) — legacy, kept as fallback
   const handleExportVideo = async (settings: ExportSettings) => {
