@@ -987,7 +987,7 @@ async function callGemini(prompt, model = GEMINI_MODEL, retries = 3) {
 
 // Default editing instructions — injected into both generate-short and build-short-prompt.
 // Callers can pass editingInstructions to override this entirely.
-const DEFAULT_EDITING_INSTRUCTIONS = (duration) => `EDITING RULES (apply to EACH of the 10 shorts):
+const DEFAULT_EDITING_INSTRUCTIONS = (duration, count = 10) => `EDITING RULES (apply to EACH of the ${count} short${count === 1 ? '' : 's'}):
 1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
 2. BUILD & CONDENSE (middle) — Connect the strongest thoughts. AGGRESSIVELY cut dead air, tangents, filler, and restatements. Stitch together the speaker's best points to create a dense, fast-paced narrative. If they take 20 seconds to make a point that can be summarised in their own two 4-second sentences, jump-cut those two sentences together.
 3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
@@ -1001,11 +1001,8 @@ const DEFAULT_EDITING_INSTRUCTIONS = (duration) => `EDITING RULES (apply to EACH
 7. CHRONOLOGICAL — Clips within each short must appear in the order they occur in the source.
 8. TOTAL DURATION — All clips in each short combined ≈ ${duration} seconds.
 9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
-10. KEYWORDS — For each clip, identify 2-4 words PIVOTAL to the narrative arc.
-    These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
-    NOT generic words (avoid "God", "love", "hope" unless they ARE the narrative crux).
-    Pick words the viewer needs to FEEL. Return in lowercase.
-11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
+10. PHRASE ANCHORS (REQUIRED) — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript. These enable precise cut-point alignment — timestamps are approximate but phrases are exact. Do NOT paraphrase or approximate — copy the exact words from the transcript.
+11. KEYWORDS (optional) — If capacity allows, identify 2-4 words per clip that are PIVOTAL to the narrative arc: the turning point, the key insight, the emotional peak. NOT generic words. Lowercase only. Skip if uncertain.
 12. B-ROLL SUGGESTIONS — Identify moments where stock footage or still images would enhance the visual storytelling and help mask jump cuts.
     Be generous — suggest B-roll for any concrete noun, action, place, emotion, or concept the speaker references. Aim for at least one suggestion per clip.
     Do NOT suggest B-roll only when the speaker's raw personal emotion or delivery IS the content.
@@ -1026,7 +1023,10 @@ GENRE-SPECIFIC STRATEGY:
 // Generate Short endpoint
 app.post('/api/ai/generate-short', async (req, res) => {
     try {
-        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts, model, editingInstructions } = req.body;
+        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts, model, editingInstructions, bRollEnabled, shortCount } = req.body;
+        const includeBRoll = bRollEnabled !== false; // default true
+        const count = Math.max(1, Math.min(20, parseInt(shortCount) || 10));
+        const candidateCount = Math.round(count * 1.8); // Phase 1 longlist: ~80% more than requested
 
         if (!transcript || !videoTitle) {
             return res.status(400).json({ error: 'Missing transcript or videoTitle' });
@@ -1050,13 +1050,37 @@ app.post('/api/ai/generate-short', async (req, res) => {
             ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
             : '';
 
-        const resolvedInstructions = (editingInstructions && editingInstructions.trim())
+        let resolvedInstructions = (editingInstructions && editingInstructions.trim())
             ? editingInstructions.trim()
-            : DEFAULT_EDITING_INSTRUCTIONS(duration);
+            : DEFAULT_EDITING_INSTRUCTIONS(duration, count);
 
-        const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
+        // Strip B-roll rule from editing instructions when disabled
+        if (!includeBRoll) {
+            resolvedInstructions = resolvedInstructions.replace(/\n?\d+\.\s*B-ROLL SUGGESTIONS[^\n]*(?:\n\s+[^\n]*)*/gi, '');
+        }
 
-Create 10 different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
+        const bRollSchema = includeBRoll ? `
+      "bRollSuggestions": [
+        { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "descriptive stock footage query", "rationale": "why this helps" }
+      ],` : '';
+
+        const aiPrompt = `You are an expert short-form video editor and social media strategist.
+
+BEFORE producing any JSON, work through these two phases internally:
+
+PHASE 1 — MOMENT DISCOVERY
+Read the ENTIRE transcript end-to-end. Identify ${candidateCount} candidate moments with strong standalone potential. For each, note the approximate timestamp range and one sentence on WHY it's powerful (what makes it scroll-stopping: the hook quality, the emotional peak, the counterintuitive statement). Then rank them and select the top ${count}.
+
+PHASE 2 — PRECISION EDITING
+For each of your top ${count} selected moments, construct the short: exact clip boundaries, jump cuts to condense, startPhrase/endPhrase anchors, keywords. Apply all editing rules below.
+
+Output ONLY the final JSON — do not include your Phase 1 notes in the response.
+
+---
+
+Identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
+
+Create ${count} different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
 
 ${userPromptSection}${refinementSection}${existingShortsSection}
 
@@ -1067,21 +1091,32 @@ ${groupedTranscript.substring(0, 15000)}
 
 ${resolvedInstructions}
 
-Return JSON only — an object with a "shorts" array containing exactly 10 shorts:
+Return JSON only — an object with a "shorts" array containing exactly ${count} short${count === 1 ? '' : 's'}.
+
+FIELD PRIORITY — work in this order:
+1. REQUIRED (nail these for every short before touching anything else):
+   - title, clips (startTime, endTime, startPhrase, endPhrase), totalDuration
+2. OPTIONAL (populate only after all ${count} shorts have precise clips — omit if uncertain):
+   - hookTitle, hook, resolution, keywords per clip${includeBRoll ? ', bRollSuggestions' : ''}
+
+Schema:
 {
   "shorts": [
     {
       "title": "engaging title, max 60 chars",
-      "hookTitle": "MAX 5 WORDS, dramatic and attention-grabbing",
-      "hook": "the opening hook line that grabs attention",
-      "resolution": "the closing payoff line",
+      "totalDuration": number,
       "clips": [
-        { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
-      ],
-      "bRollSuggestions": [
-        { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "descriptive stock footage query", "rationale": "why this helps" }
-      ],
-      "totalDuration": number
+        {
+          "startTime": number,
+          "endTime": number,
+          "startPhrase": "first 4-6 verbatim words of clip",
+          "endPhrase": "last 4-6 verbatim words of clip",
+          "keywords": ["word1", "word2"]
+        }
+      ],${bRollSchema}
+      "hookTitle": "MAX 5 WORDS, dramatic",
+      "hook": "the opening hook line",
+      "resolution": "the closing payoff line"
     }
   ]
 }
@@ -1090,7 +1125,8 @@ CRITICAL JSON RULES:
 1. Return ONLY the raw JSON object. Do not wrap it in \`\`\`json markdown blocks.
 2. Ensure ALL double quotes inside string values are properly escaped (e.g., \\"word\\").
 3. Do not include any trailing commas.
-4. Start immediately with { and end with }`;
+4. Start immediately with { and end with }
+5. Omitted optional fields are fine — never guess or pad them to fill space.`;
 
         // Use a stronger model for creative editorial decisions
         const effectiveModel = model || GEMINI_MODEL;
@@ -1200,7 +1236,10 @@ CRITICAL JSON RULES:
 // Build Short Prompt endpoint (for external AI usage)
 app.post('/api/ai/build-short-prompt', async (req, res) => {
     try {
-        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts, editingInstructions } = req.body;
+        const { transcript, videoTitle, prompt, targetDuration, refinementInstruction, existingShorts, editingInstructions, bRollEnabled, shortCount } = req.body;
+        const includeBRoll = bRollEnabled !== false;
+        const count = Math.max(1, Math.min(20, parseInt(shortCount) || 10));
+        const candidateCount = Math.round(count * 1.8);
 
         if (!transcript || !videoTitle) {
             return res.status(400).json({ error: 'Missing transcript or videoTitle' });
@@ -1226,13 +1265,37 @@ app.post('/api/ai/build-short-prompt', async (req, res) => {
             ? `\nALREADY USED (pick a DIFFERENT moment):\n${existingShorts.map((s, i) => `- "${s.title}" (${s.startTime}-${s.endTime}s)`).join('\n')}`
             : '';
 
-        const resolvedInstructions = (editingInstructions && editingInstructions.trim())
+        let resolvedInstructions = (editingInstructions && editingInstructions.trim())
             ? editingInstructions.trim()
-            : DEFAULT_EDITING_INSTRUCTIONS(duration);
+            : DEFAULT_EDITING_INSTRUCTIONS(duration, count);
 
-        const aiPrompt = `You are an expert short-form video editor and social media strategist. Analyze the transcript below to identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
+        // Strip B-roll rule from editing instructions when disabled
+        if (!includeBRoll) {
+            resolvedInstructions = resolvedInstructions.replace(/\n?\d+\.\s*B-ROLL SUGGESTIONS[^\n]*(?:\n\s+[^\n]*)*/gi, '');
+        }
 
-Create 10 different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
+        const bRollSchema = includeBRoll ? `
+      "bRollSuggestions": [
+        { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "descriptive stock footage query", "rationale": "why this helps" }
+      ],` : '';
+
+        const aiPrompt = `You are an expert short-form video editor and social media strategist.
+
+BEFORE producing any JSON, work through these two phases internally:
+
+PHASE 1 — MOMENT DISCOVERY
+Read the ENTIRE transcript end-to-end. Identify ${candidateCount} candidate moments with strong standalone potential. For each, note the approximate timestamp range and one sentence on WHY it's powerful (what makes it scroll-stopping: the hook quality, the emotional peak, the counterintuitive statement). Then rank them and select the top ${count}.
+
+PHASE 2 — PRECISION EDITING
+For each of your top ${count} selected moments, construct the short: exact clip boundaries, jump cuts to condense, startPhrase/endPhrase anchors, keywords. Apply all editing rules below.
+
+Output ONLY the final JSON — do not include your Phase 1 notes in the response.
+
+---
+
+Identify the content type (sermon, podcast, interview, lecture, motivational talk, etc.) and apply genre-appropriate selection strategies when choosing clips.
+
+Create ${count} different dense, fast-paced ${duration}-second shorts from this content. Each short must use a DIFFERENT moment/section — no overlapping clips between shorts. Rank them from strongest to weakest viral potential.
 
 ${userPromptSection}${refinementSection}${existingShortsSection}
 
@@ -1243,21 +1306,32 @@ ${rawTranscript.substring(0, 50000)}
 
 ${resolvedInstructions}
 
-return JSON only — an object with a "shorts" array containing exactly 10 shorts:
+Return JSON only — an object with a "shorts" array containing exactly ${count} short${count === 1 ? '' : 's'}.
+
+FIELD PRIORITY — work in this order:
+1. REQUIRED (nail these for every short before touching anything else):
+   - title, clips (startTime, endTime, startPhrase, endPhrase), totalDuration
+2. OPTIONAL (populate only after all ${count} shorts have precise clips — omit if uncertain):
+   - hookTitle, hook, resolution, keywords per clip${includeBRoll ? ', bRollSuggestions' : ''}
+
+Schema:
 {
   "shorts": [
     {
       "title": "engaging title, max 60 chars",
-      "hookTitle": "MAX 5 WORDS, dramatic and attention-grabbing",
-      "hook": "the opening hook line that grabs attention",
-      "resolution": "the closing payoff line",
+      "totalDuration": number,
       "clips": [
-        { "startTime": number, "endTime": number, "startPhrase": "first 4-6 verbatim words of clip", "endPhrase": "last 4-6 verbatim words of clip", "keywords": ["word1", "word2"] }
-      ],
-      "bRollSuggestions": [
-        { "clipIndex": 0, "offsetInClip": 5.2, "duration": 3, "searchQuery": "descriptive stock footage query", "rationale": "why this helps" }
-      ],
-      "totalDuration": number
+        {
+          "startTime": number,
+          "endTime": number,
+          "startPhrase": "first 4-6 verbatim words of clip",
+          "endPhrase": "last 4-6 verbatim words of clip",
+          "keywords": ["word1", "word2"]
+        }
+      ],${bRollSchema}
+      "hookTitle": "MAX 5 WORDS, dramatic",
+      "hook": "the opening hook line",
+      "resolution": "the closing payoff line"
     }
   ]
 }
@@ -1266,7 +1340,8 @@ CRITICAL JSON RULES:
 1. Return ONLY the raw JSON object. Do not wrap it in \`\`\`json markdown blocks.
 2. Ensure ALL double quotes inside string values are properly escaped (e.g., \\"word\\").
 3. Do not include any trailing commas.
-4. Start immediately with { and end with }`;
+4. Start immediately with { and end with }
+5. Omitted optional fields are fine — never guess or pad them to fill space.`;
 
         res.json({ prompt: aiPrompt });
 
@@ -1287,18 +1362,23 @@ CRITICAL JSON RULES:
  */
 function buildSocialPackagesPrompt(shorts, videoTitle, sourceVideoUrl, brandSettings) {
     const bs = brandSettings || {};
-    const shortsBlock = (shorts || []).map((s, i) => `
+    const shortsBlock = (shorts || []).map((s, i) => {
+        const hookLine = (s.hook || '').trim();
+        const resolutionLine = (s.resolution || '').trim();
+        const hookTitleLine = (s.hookTitle || '').trim();
+        return `
 ---
 SHORT #${i + 1}
 id: ${s.id}
 title: "${(s.title || '').replace(/"/g, '\\"')}"
-hookTitle (on-screen, ≤5 words): "${(s.hookTitle || '').replace(/"/g, '\\"')}"
-spoken hook: "${(s.hook || '').replace(/"/g, '\\"')}"
-spoken resolution: "${(s.resolution || '').replace(/"/g, '\\"')}"
+hookTitle (on-screen text, ≤5 words)${hookTitleLine ? '' : ' [not provided — derive from clip]'}: "${hookTitleLine.replace(/"/g, '\\"')}"
+spoken hook (opening line)${hookLine ? '' : ' [not provided — derive from clip]'}: "${hookLine.replace(/"/g, '\\"')}"
+spoken resolution (closing line)${resolutionLine ? '' : ' [not provided — derive from clip]'}: "${resolutionLine.replace(/"/g, '\\"')}"
 full clip transcript:
 """
 ${(s.clipText || '').substring(0, 4000)}
-"""`).join('\n');
+"""`;
+    }).join('\n');
 
     return `You are a social media growth strategist producing ready-to-paste copy for a batch of short-form videos that were all cut from the same source video.
 
@@ -1317,6 +1397,7 @@ RULES:
 - Each short is independent; do not cross-reference other shorts in the batch.
 - First line of every caption MUST hook curiosity or emotion.
 - Every caption must feel NATIVE to its platform. Do not reuse the same caption across platforms.
+- If "spoken hook", "spoken resolution", or "hookTitle" are marked [not provided], extract them yourself from the full clip transcript: hook = the most compelling opening line, resolution = the most powerful closing line, hookTitle = ≤5 word distillation of the core idea.
 - Hashtags lowercase, NO '#' prefix in the array values, NO spaces, NO emojis inside hashtags.
 - TikTok caption must be under 150 characters.
 - YouTube titles must create curiosity or promise value; avoid clickbait.

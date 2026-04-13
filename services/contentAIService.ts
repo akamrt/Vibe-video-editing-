@@ -166,7 +166,9 @@ export async function generateShort(
     refinementInstruction?: string,
     existingShorts: ExistingShortContext[] = [],
     model?: string,
-    editingInstructions?: string
+    editingInstructions?: string,
+    bRollEnabled: boolean = true,
+    shortCount: number = 10
 ): Promise<ShortGenerationResult> {
     // 1. Get video and its full transcript with timestamps
     const video = await contentDB.getVideo(videoId);
@@ -208,7 +210,9 @@ export async function generateShort(
                 refinementInstruction,
                 existingShorts,
                 model,
-                editingInstructions
+                editingInstructions,
+                bRollEnabled,
+                shortCount
             })
         });
 
@@ -263,8 +267,8 @@ export async function generateShort(
                 createdAt: new Date()
             };
 
-            // Fetch B-roll suggestions from Pexels if LLM provided them
-            if (rawShort.bRollSuggestions && Array.isArray(rawShort.bRollSuggestions) && rawShort.bRollSuggestions.length > 0) {
+            // Fetch B-roll suggestions from Pexels if LLM provided them (and B-roll is enabled)
+            if (bRollEnabled && rawShort.bRollSuggestions && Array.isArray(rawShort.bRollSuggestions) && rawShort.bRollSuggestions.length > 0) {
                 try {
                     const keysRes = await fetch('/api/keys');
                     const keys = await keysRes.json();
@@ -372,14 +376,20 @@ async function buildSocialPackagesPayload(shorts: GeneratedShort[]) {
     const video = await contentDB.getVideo(firstShort.videoId);
 
     const payload = {
-        shorts: shorts.map(s => ({
-            id: s.id,
-            title: s.title,
-            hookTitle: s.hookTitle,
-            hook: s.hook,
-            resolution: s.resolution,
-            clipText: buildClipTextForShort(s),
-        })),
+        shorts: shorts.map(s => {
+            const clipText = buildClipTextForShort(s);
+            const firstSegText = s.segments[0]?.text?.trim() || '';
+            const lastSegText = s.segments[s.segments.length - 1]?.text?.trim() || '';
+            const titleWords5 = (s.title || '').split(' ').slice(0, 5).join(' ');
+
+            // Detect fallback values (set by contentAIService when the AI skipped optional fields).
+            // Send empty string so the social AI knows to derive them from clipText instead.
+            const hook = (s.hook && s.hook !== firstSegText) ? s.hook : '';
+            const resolution = (s.resolution && s.resolution !== lastSegText) ? s.resolution : '';
+            const hookTitle = (s.hookTitle && s.hookTitle !== titleWords5 && s.hookTitle !== 'Watch This') ? s.hookTitle : '';
+
+            return { id: s.id, title: s.title, hookTitle, hook, resolution, clipText };
+        }),
         videoTitle: video?.title || firstShort.videoTitle || 'Unknown',
         sourceVideoUrl: video?.url || '',
         brandSettings,
@@ -762,7 +772,9 @@ export async function buildShortPrompt(
     targetDuration: number = 60,
     refinementInstruction?: string,
     existingShorts: ExistingShortContext[] = [],
-    editingInstructions?: string
+    editingInstructions?: string,
+    bRollEnabled: boolean = true,
+    shortCount: number = 10
 ): Promise<{ success: boolean; prompt?: string; error?: string }> {
     const video = await contentDB.getVideo(videoId);
     if (!video) return { success: false, error: "Video not found" };
@@ -785,7 +797,9 @@ export async function buildShortPrompt(
                 targetDuration,
                 refinementInstruction,
                 existingShorts,
-                editingInstructions
+                editingInstructions,
+                bRollEnabled,
+                shortCount
             })
         });
 

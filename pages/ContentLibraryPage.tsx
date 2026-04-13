@@ -652,7 +652,9 @@ export const ContentLibraryPage: React.FC<{
     const [refinementPrompt, setRefinementPrompt] = useState('');
     const [selectedModel, setSelectedModel] = useState<string>('gemini-2.5-flash');
     const [socialModel, setSocialModel] = useState<string>('gemini-2.5-flash');
-    const DEFAULT_EDITING_INSTRUCTIONS = `EDITING RULES (apply to EACH of the 10 shorts):
+    const [bRollEnabled, setBRollEnabled] = useState(true);
+    const [shortCount, setShortCount] = useState(10);
+    const DEFAULT_EDITING_INSTRUCTIONS = `EDITING RULES (apply to EACH short):
 1. HOOK (0-3s) — The clip MUST open with a scroll-stopping statement: provocative, emotional, surprising, or counterintuitive. This is the single most important factor. If a viewer wouldn't pause mid-scroll in the first 3 seconds, pick a different moment. Start the clip AT this statement, not before it — cut any preamble ("so", "as I was saying", "you know what", "and I think", throat-clearing).
 2. BUILD & CONDENSE (middle) — Connect the strongest thoughts. AGGRESSIVELY cut dead air, tangents, filler, and restatements. Stitch together the speaker's best points to create a dense, fast-paced narrative. If they take 20 seconds to make a point that can be summarised in their own two 4-second sentences, jump-cut those two sentences together.
 3. PAYOFF (end) — End on the PEAK: the mic-drop line, the emotional crescendo, the key insight landing. Cut IMMEDIATELY after the strongest statement. Never include trailing filler ("so yeah", "amen", "right?", softening, restating). The last 3 seconds should hit as hard as the first 3.
@@ -666,11 +668,9 @@ export const ContentLibraryPage: React.FC<{
 7. CHRONOLOGICAL — Clips within each short must appear in the order they occur in the source.
 8. TOTAL DURATION — All clips in each short combined ≈ target duration seconds.
 9. DO NOT return transcript text — only return start/end times. The text will be filled in automatically.
-10. KEYWORDS — For each clip, identify 2-4 words PIVOTAL to the narrative arc.
-    These must be words that carry the STORY forward — the turning point, the key insight, the emotional peak.
-    NOT generic words. Pick words the viewer needs to FEEL. Return in lowercase.
-11. PHRASE ANCHORS — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript.
-12. B-ROLL SUGGESTIONS — Suggest stock footage for concrete nouns, actions, places, or emotions. Aim for at least one per clip.
+10. PHRASE ANCHORS (REQUIRED) — For each clip, return the VERBATIM first 4-6 words (startPhrase) and last 4-6 words (endPhrase) exactly as they appear in the transcript.
+11. KEYWORDS (optional) — If capacity allows, 2-4 pivotal words per clip: the turning point, key insight, emotional peak. Lowercase. Skip if uncertain.
+12. B-ROLL SUGGESTIONS (optional) — Suggest stock footage for concrete nouns, actions, places, or emotions. Aim for at least one per clip.
 
 PLATFORM STRATEGY:
 Short-form algorithms (TikTok, YouTube Shorts, Reels) rank by retention rate and rewatch ratio. Clips that hook in <3 seconds, maintain tension throughout, and end with impact get promoted. Select moments that are SELF-CONTAINED — a viewer with zero context should immediately understand and be gripped.
@@ -870,7 +870,7 @@ GENRE-SPECIFIC STRATEGY:
                     endTime: s.segments[s.segments.length - 1]?.endTime || 0
                 }));
 
-            const result = await generateShort(shortTargetVideo, shortPrompt, shortDuration, undefined, existingShorts, selectedModel, editingInstructions !== DEFAULT_EDITING_INSTRUCTIONS ? editingInstructions : undefined);
+            const result = await generateShort(shortTargetVideo, shortPrompt, shortDuration, undefined, existingShorts, selectedModel, editingInstructions !== DEFAULT_EDITING_INSTRUCTIONS ? editingInstructions : undefined, bRollEnabled, shortCount);
             if (result.success) {
                 const allGenerated = result.shorts || (result.short ? [result.short] : []);
                 if (allGenerated.length > 0) {
@@ -909,7 +909,7 @@ GENRE-SPECIFIC STRATEGY:
                     endTime: s.segments[s.segments.length - 1]?.endTime || 0
                 }));
 
-            const result = await buildShortPrompt(shortTargetVideo, shortPrompt, shortDuration, refinementPrompt, existingShorts, editingInstructions !== DEFAULT_EDITING_INSTRUCTIONS ? editingInstructions : undefined);
+            const result = await buildShortPrompt(shortTargetVideo, shortPrompt, shortDuration, refinementPrompt, existingShorts, editingInstructions !== DEFAULT_EDITING_INSTRUCTIONS ? editingInstructions : undefined, bRollEnabled, shortCount);
             if (result.success && result.prompt) {
                 // Try Clipboard API first, fall back to execCommand for permission-denied contexts
                 let copied = false;
@@ -2421,12 +2421,12 @@ GENRE-SPECIFIC STRATEGY:
 
                         {generatedShortsPreview.length === 0 && !generatedShort ? (
                             <div className="flex-1 overflow-auto p-6">
-                                <p className="text-sm text-gray-400 mb-4">Generate 10 viral shorts from: <span className="text-white font-medium">{videos.find(v => v.id === shortTargetVideo)?.title}</span></p>
+                                <p className="text-sm text-gray-400 mb-4">Generate viral shorts from: <span className="text-white font-medium">{videos.find(v => v.id === shortTargetVideo)?.title}</span></p>
                                 <div className="space-y-4">
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">What content to find? <span className="text-gray-600">(optional)</span></label>
                                         <input type="text" value={shortPrompt} onChange={e => setShortPrompt(e.target.value)} placeholder="Leave empty for AI to find the most viral moments..." className="w-full bg-[#222] border border-[#333] rounded px-3 py-2 focus:border-indigo-500 outline-none" />
-                                        <p className="text-xs text-gray-600 mt-1">AI will generate 10 different options ranked by viral potential</p>
+                                        <p className="text-xs text-gray-600 mt-1">AI will generate {shortCount} different options ranked by viral potential</p>
                                     </div>
                                     <div>
                                         <label className="block text-sm text-gray-400 mb-1">Target Duration</label>
@@ -2466,8 +2466,37 @@ GENRE-SPECIFIC STRATEGY:
                                         <p className="text-xs text-gray-600 mt-1">OpenAI and Gemini Pro/3 require paid API keys.</p>
                                     </div>
 
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-1">Number of Shorts</label>
+                                        <div className="grid grid-cols-4 gap-1.5">
+                                            {[3, 5, 7, 10].map(n => (
+                                                <button
+                                                    key={n}
+                                                    onClick={() => setShortCount(n)}
+                                                    className={`py-1.5 rounded text-sm font-medium transition-colors ${shortCount === n ? 'bg-purple-600 text-white' : 'bg-[#222] border border-[#333] text-gray-400 hover:border-purple-500'}`}
+                                                >
+                                                    {n}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <p className="text-xs text-gray-600 mt-1">Fewer = more focused reasoning per short. More = wider variety.</p>
+                                    </div>
+
+                                    <div className="flex items-center justify-between bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2.5">
+                                        <div>
+                                            <span className="text-sm text-gray-300">B-Roll Suggestions</span>
+                                            <p className="text-xs text-gray-600 mt-0.5">AI suggests stock footage from Pexels for each clip. Disable to focus purely on clip selection quality.</p>
+                                        </div>
+                                        <button
+                                            onClick={() => setBRollEnabled(!bRollEnabled)}
+                                            className={`relative w-10 h-5 rounded-full transition-colors flex-shrink-0 ml-3 ${bRollEnabled ? 'bg-purple-600' : 'bg-[#444]'}`}
+                                        >
+                                            <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${bRollEnabled ? 'translate-x-5' : ''}`} />
+                                        </button>
+                                    </div>
+
                                     <button onClick={handleGenerateShort} disabled={isGeneratingShort} className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg font-bold">
-                                        {isGeneratingShort ? '🔄 Generating 10 shorts...' : shortPrompt.trim() ? '⚡ Generate 10 Shorts' : '✨ Auto-Generate 10 Best Moments'}
+                                        {isGeneratingShort ? `🔄 Generating ${shortCount} short${shortCount === 1 ? '' : 's'}...` : shortPrompt.trim() ? `⚡ Generate ${shortCount} Shorts` : `✨ Auto-Generate ${shortCount} Best Moments`}
                                     </button>
                                 </div>
 
