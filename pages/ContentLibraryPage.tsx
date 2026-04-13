@@ -27,16 +27,18 @@ interface ImportingVideo {
 function useLocalVideoSrc(videoId: string) {
     const [src, setSrc] = useState<string | null>(null);        // null = checking, '' = not cached
     const [thumbnailUrl, setThumbnailUrl] = useState<string>('');
+    const [checkKey, setCheckKey] = useState(0);
+    const [isDownloading, setIsDownloading] = useState(false);
+    const [downloadError, setDownloadError] = useState<string>('');
 
     useEffect(() => {
         let cancelled = false;
+        setSrc(null);
         (async () => {
             try {
-                // Look up thumbnail from content DB
                 const record = await contentDB.getVideo(videoId);
                 if (!cancelled && record?.thumbnailUrl) setThumbnailUrl(record.thumbnailUrl);
 
-                // Check if video is locally cached
                 const res = await fetch(`/api/local-cache?videoId=${videoId}`);
                 const data = await res.json();
                 if (!cancelled) setSrc(data.hasVideo ? `/api/local-video?videoId=${videoId}` : '');
@@ -45,9 +47,26 @@ function useLocalVideoSrc(videoId: string) {
             }
         })();
         return () => { cancelled = true; };
-    }, [videoId]);
+    }, [videoId, checkKey]);
 
-    return { src, thumbnailUrl };
+    const downloadForPreview = async () => {
+        setIsDownloading(true);
+        setDownloadError('');
+        try {
+            const record = await contentDB.getVideo(videoId);
+            if (!record?.url) throw new Error('Video URL not found');
+            const res = await fetch(`/api/download?url=${encodeURIComponent(record.url)}&_t=${Date.now()}`);
+            if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+            await res.blob(); // ensure fully downloaded/cached
+            setCheckKey(k => k + 1); // re-check cache
+        } catch (e: any) {
+            setDownloadError(e.message || 'Download failed');
+        } finally {
+            setIsDownloading(false);
+        }
+    };
+
+    return { src, thumbnailUrl, isDownloading, downloadError, downloadForPreview };
 }
 
 // ==================== Short Detail Player (expanded preview) ====================
@@ -64,7 +83,7 @@ const ShortDetailPlayer: React.FC<{
     clipBasket?: ClipReference[];
     onToggleBasket?: (segIdx: number) => void;
 }> = ({ short, videoId, omittedClips, onToggleOmit, clipPadOverrides, selectedClipForPad, onSelectClipForPad, onSetClipPad, clipBasket, onToggleBasket }) => {
-    const { src, thumbnailUrl } = useLocalVideoSrc(videoId);
+    const { src, thumbnailUrl, isDownloading, downloadError, downloadForPreview } = useLocalVideoSrc(videoId);
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentClipIdx, setCurrentClipIdx] = useState(0);
@@ -176,9 +195,21 @@ const ShortDetailPlayer: React.FC<{
                 {src === '' && (
                     <>
                         {thumbnailUrl && <img src={thumbnailUrl} className="w-full h-full object-cover opacity-40" alt="" />}
-                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
-                            <span className="text-gray-400 text-xs">Video not cached locally</span>
-                            <span className="text-gray-600 text-[10px]">Will download on export</span>
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+                            {isDownloading ? (
+                                <span className="text-gray-300 text-xs">Downloading for preview...</span>
+                            ) : (
+                                <>
+                                    <button
+                                        onClick={downloadForPreview}
+                                        className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs rounded font-medium shadow-lg"
+                                    >
+                                        ⬇ Download for Preview
+                                    </button>
+                                    {downloadError && <span className="text-red-400 text-[10px]">{downloadError}</span>}
+                                    <span className="text-gray-600 text-[10px]">Not cached — exports fine without this</span>
+                                </>
+                            )}
                         </div>
                     </>
                 )}
@@ -314,7 +345,7 @@ const ShortThumbnailPlayer: React.FC<{
     onSetClipPad: (shortId: string, segIdx: number, before: number, after: number) => void;
     onAddAllToBasket: () => void;
 }> = ({ short, videoId, shortIndex, omittedClips, clipBasket, clipPadOverrides, selectedClipForPad, onToggleOmit, onToggleBasket, onSelectClipForPad, onSetClipPad, onAddAllToBasket }) => {
-    const { src, thumbnailUrl } = useLocalVideoSrc(videoId);
+    const { src, thumbnailUrl, isDownloading, downloadForPreview } = useLocalVideoSrc(videoId);
     const videoRef = useRef<HTMLVideoElement>(null);
     const stripRef = useRef<HTMLDivElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
@@ -445,7 +476,16 @@ const ShortThumbnailPlayer: React.FC<{
             )}
             {src === '' && (
                 <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
-                    <span className="text-[9px] text-gray-300 bg-black/60 px-1.5 py-0.5 rounded">Not cached — exports fine</span>
+                    {isDownloading ? (
+                        <span className="text-[9px] text-gray-300 bg-black/70 px-2 py-1 rounded">Downloading...</span>
+                    ) : (
+                        <button
+                            onClick={e => { e.stopPropagation(); downloadForPreview(); }}
+                            className="text-[9px] text-white bg-indigo-600/90 hover:bg-indigo-500 px-2 py-1 rounded shadow"
+                        >
+                            ⬇ Download for Preview
+                        </button>
+                    )}
                 </div>
             )}
 
