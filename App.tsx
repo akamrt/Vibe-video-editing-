@@ -818,6 +818,12 @@ function App() {
           videoEl.load();
         }
 
+        // Ensure audio is routed through the Web Audio processing chain for ALL
+        // rendered segments (including preloading), so the GainNode exists before
+        // the segment becomes active. This prevents videoEl.volume=0 (set during
+        // preloading) from silencing the MediaElementSource when it's captured.
+        ensureAudioRouting(videoEl, seg.id);
+
         if (!isActive) {
           // --- PRELOADING STATE ---
           if (Math.abs(videoEl.currentTime - seg.startTime) > 0.1) {
@@ -830,8 +836,6 @@ function App() {
         }
 
         // --- ACTIVE STATE ---
-        // Ensure audio is routed through the Web Audio processing chain
-        ensureAudioRouting(videoEl, seg.id);
         const sourceTime = seg.startTime + (project.currentTime - seg.timelineStart);
 
         if (project.isPlaying) {
@@ -1805,19 +1809,31 @@ function App() {
 
     // Get or create MediaElementAudioSourceNode (can only be created once per element)
     let source = audioSourcesRef.current.get(videoEl);
+    let isNewSource = false;
     if (!source) {
       try {
         source = ctx.createMediaElementSource(videoEl);
         audioSourcesRef.current.set(videoEl, source);
+        isNewSource = true;
       } catch (e) {
         // Already created by another path (e.g. legacy export), or element not ready
         return audioGainNodesRef.current.get(segId) || null;
       }
     }
 
+    // Once audio is captured by Web Audio, native volume must stay at 1.0 —
+    // volume control is handled entirely by the GainNode below.
+    // (Preloading may have set videoEl.volume = 0 before routing was established.)
+    videoEl.volume = 1;
+
     // Get or create per-segment GainNode
     let gain = audioGainNodesRef.current.get(segId);
-    if (!gain) {
+    if (!gain || isNewSource) {
+      // If the video element was recreated (e.g. React re-mount), the old gain node
+      // is connected to a dead source — replace it with a fresh one.
+      if (gain) {
+        try { gain.disconnect(); } catch { /* ok */ }
+      }
       gain = ctx.createGain();
       gain.gain.value = 0; // Start silent, playback loop sets actual volume
       audioGainNodesRef.current.set(segId, gain);
