@@ -98,7 +98,8 @@ class RenderQueueManager {
     if (!job || !job.outputUrl) return;
 
     const safeName = job.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const filename = `${safeName}_${Date.now()}.webm`;
+    const ext = job.settings.format === 'mp4' ? 'mp4' : 'webm';
+    const filename = `${safeName}_${Date.now()}.${ext}`;
 
     const a = document.createElement('a');
     a.href = job.outputUrl;

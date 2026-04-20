@@ -29,13 +29,14 @@ const ExportModal: React.FC<ExportModalProps> = ({
     const [resolution, setResolution] = useState<'720p' | '1080p' | '4K'>('1080p');
     const [bitrateMbps, setBitrateMbps] = useState(8);
     const [fps, setFps] = useState(30);
+    const [format, setFormat] = useState<'mp4' | 'webm'>('mp4');
     if (!isOpen) return null;
 
     const handleExport = () => {
         const settings: ExportSettings = {
             aspectRatio,
             resolution,
-            format: 'webm',
+            format,
             bitrateMbps,
             fps
         };
@@ -146,6 +147,40 @@ const ExportModal: React.FC<ExportModalProps> = ({
                         </div>
                     </div>
 
+                    {/* Format */}
+                    <div>
+                        <label style={{ display: 'block', marginBottom: 12, fontSize: 12, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>
+                            Format
+                        </label>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                            {([
+                                { id: 'mp4' as const, label: 'MP4', sub: 'TikTok / Universal' },
+                                { id: 'webm' as const, label: 'WebM', sub: 'Web / Smaller' },
+                            ]).map(opt => (
+                                <button
+                                    key={opt.id}
+                                    onClick={() => setFormat(opt.id)}
+                                    style={{
+                                        padding: '12px 8px',
+                                        borderRadius: 8,
+                                        border: opt.id === format ? '2px solid #3b82f6' : '1px solid #444',
+                                        backgroundColor: opt.id === format ? 'rgba(59, 130, 246, 0.15)' : '#252525',
+                                        color: opt.id === format ? '#3b82f6' : '#ccc',
+                                        cursor: 'pointer',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        alignItems: 'center',
+                                        gap: 4,
+                                        transition: 'all 0.2s'
+                                    }}
+                                >
+                                    <span style={{ fontSize: 14, fontWeight: 600 }}>{opt.label}</span>
+                                    <span style={{ fontSize: 10, opacity: 0.7 }}>{opt.sub}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
                     {/* Resolution & FPS */}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                         <div>
@@ -236,7 +271,7 @@ const ExportModal: React.FC<ExportModalProps> = ({
                                     {outputDims.width} × {outputDims.height}
                                 </div>
                                 <div style={{ fontSize: 12, color: '#888' }}>
-                                    WebM • {fps} fps • ~{Math.round(duration * bitrateMbps / 8)} MB
+                                    {format === 'mp4' ? 'MP4 (H.264/AAC)' : 'WebM (VP9/Opus)'} • {fps} fps • ~{Math.round(duration * bitrateMbps / 8)} MB
                                 </div>
                             </div>
                             <div style={{

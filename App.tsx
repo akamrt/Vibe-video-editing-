@@ -1955,7 +1955,7 @@ function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `export_${settings.aspectRatio.replace(':', 'x')}_${Date.now()}.webm`;
+      a.download = `export_${settings.aspectRatio.replace(':', 'x')}_${Date.now()}.${settings.format === 'mp4' ? 'mp4' : 'webm'}`;
       a.click();
       URL.revokeObjectURL(url);
 

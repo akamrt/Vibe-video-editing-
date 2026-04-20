@@ -15,7 +15,7 @@ export interface ExportSettings {
   customAspectRatio?: { width: number; height: number };
   resolution: '720p' | '1080p' | '4K' | 'custom';
   customResolution?: { width: number; height: number };
-  format: 'webm';
+  format: 'mp4' | 'webm';
   bitrateMbps: number;
   fps: number;
 }

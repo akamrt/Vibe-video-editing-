@@ -10,7 +10,8 @@
  *  - OfflineAudioContext decodes audio from source files without real-time playback → correct audio
  */
 
-import { Muxer, ArrayBufferTarget } from 'webm-muxer';
+import { Muxer as WebmMuxer, ArrayBufferTarget as WebmTarget } from 'webm-muxer';
+import { Muxer as Mp4Muxer, ArrayBufferTarget as Mp4Target } from 'mp4-muxer';
 import { getInterpolatedTransform, ASPECT_RATIO_PRESETS } from '../utils/interpolation';
 import { renderTransition as renderTransitionCanvas } from '../utils/transitionRenderer';
 import { drawSubtitleOnCanvas } from '../utils/canvasSubtitleRenderer';
@@ -327,35 +328,60 @@ export class OfflineRenderer {
       return;
     }
 
-    const muxerTarget = new ArrayBufferTarget();
-    const muxer = new Muxer({
-      target: muxerTarget,
-      video: { codec: 'V_VP9', width: outputWidth, height: outputHeight, frameRate: fps },
-      ...(renderedAudioBuffer ? { audio: { codec: 'A_OPUS', sampleRate: AUDIO_SAMPLE_RATE, numberOfChannels: AUDIO_CHANNELS } } : {}),
-      firstTimestampBehavior: 'offset',
-    });
+    const isMp4 = settings.format === 'mp4';
+
+    // Even output dims required by H.264
+    if (isMp4) {
+      if (outputWidth % 2) outputWidth -= 1;
+      if (outputHeight % 2) outputHeight -= 1;
+      canvas.width = outputWidth; canvas.height = outputHeight;
+      tmpCanvas.width = outputWidth; tmpCanvas.height = outputHeight;
+      lastGoodFrame.width = outputWidth; lastGoodFrame.height = outputHeight;
+    }
+
+    let muxer: WebmMuxer<WebmTarget> | Mp4Muxer<Mp4Target>;
+    let muxerTarget: WebmTarget | Mp4Target;
+    if (isMp4) {
+      muxerTarget = new Mp4Target();
+      muxer = new Mp4Muxer({
+        target: muxerTarget as Mp4Target,
+        video: { codec: 'avc', width: outputWidth, height: outputHeight },
+        ...(renderedAudioBuffer ? { audio: { codec: 'aac', sampleRate: AUDIO_SAMPLE_RATE, numberOfChannels: AUDIO_CHANNELS } } : {}),
+        fastStart: 'in-memory',
+        firstTimestampBehavior: 'offset',
+      });
+    } else {
+      muxerTarget = new WebmTarget();
+      muxer = new WebmMuxer({
+        target: muxerTarget as WebmTarget,
+        video: { codec: 'V_VP9', width: outputWidth, height: outputHeight, frameRate: fps },
+        ...(renderedAudioBuffer ? { audio: { codec: 'A_OPUS', sampleRate: AUDIO_SAMPLE_RATE, numberOfChannels: AUDIO_CHANNELS } } : {}),
+        firstTimestampBehavior: 'offset',
+      });
+    }
 
     let videoEncoderError: Error | null = null;
     const videoEncoder = new VideoEncoder({
-      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta as any),
+      output: (chunk, meta) => (muxer as any).addVideoChunk(chunk, meta as any),
       error: (e) => { videoEncoderError = e; },
     });
     videoEncoder.configure({
-      codec: 'vp09.00.41.08',
+      codec: isMp4 ? 'avc1.640028' : 'vp09.00.41.08',
       width: outputWidth,
       height: outputHeight,
       bitrate: settings.bitrateMbps * 1_000_000,
       framerate: fps,
+      ...(isMp4 ? { avc: { format: 'avc' } } : {}),
     });
 
     let audioEncoder: AudioEncoder | null = null;
     if (renderedAudioBuffer && typeof AudioEncoder !== 'undefined') {
       audioEncoder = new AudioEncoder({
-        output: (chunk, meta) => muxer.addAudioChunk(chunk, meta as any),
+        output: (chunk, meta) => (muxer as any).addAudioChunk(chunk, meta as any),
         error: (e) => console.warn('[OfflineRenderer] AudioEncoder error:', e),
       });
       audioEncoder.configure({
-        codec: 'opus',
+        codec: isMp4 ? 'mp4a.40.2' : 'opus',
         numberOfChannels: AUDIO_CHANNELS,
         sampleRate: AUDIO_SAMPLE_RATE,
         bitrate: 128_000,
@@ -576,7 +602,7 @@ export class OfflineRenderer {
     // ── Finalize and return blob ──────────────────────────────────────────
     try {
       muxer.finalize();
-      const blob = new Blob([muxerTarget.buffer], { type: 'video/webm' });
+      const blob = new Blob([(muxerTarget as any).buffer], { type: isMp4 ? 'video/mp4' : 'video/webm' });
       callbacks.onComplete(blob);
     } catch (err: any) {
       callbacks.onError(err instanceof Error ? err : new Error(String(err)));
