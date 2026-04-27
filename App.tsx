@@ -59,7 +59,7 @@ import { listSavedProjects, saveProjectToFile, loadProjectFromFile, deleteProjec
 
 const INITIAL_SUBTITLE_STYLE: SubtitleStyle = {
   fontFamily: 'Arial',
-  fontSize: 16,
+  fontSize: 57,
   color: '#ffffff',
   backgroundColor: '#000000',
   backgroundOpacity: 0.8,
@@ -4187,8 +4187,10 @@ function App() {
       };
 
       // 6. Add to library — persist blob immediately so it survives save+refresh
+      // Reset to a fresh scene: replace library/segments rather than appending,
+      // so existing timeline clips don't overlap the imported short.
       if (newMediaItem.file) contentDB.saveMediaBlob(newMediaItem.id, newMediaItem.file).catch(e => console.warn('[MediaBlob] save failed:', e));
-      setProject(prev => ({ ...prev, library: [...prev.library, newMediaItem] }));
+      setProject(prev => ({ ...prev, library: [newMediaItem], segments: [] }));
 
       // 7. Create timeline segments from the short clips
       // startTime/endTime = position in SOURCE VIDEO (for playback)
@@ -4324,8 +4326,8 @@ function App() {
 
       setProject(prev => ({
         ...prev,
-        library: [...prev.library, ...bRollMediaItems],
-        segments: [...prev.segments, ...newSegments, ...bRollSegments],
+        library: [newMediaItem, ...bRollMediaItems],
+        segments: [...newSegments, ...bRollSegments],
         titleLayer: titleLayer,
         ...(defaultSubtitleTemplate ? { activeSubtitleTemplate: defaultSubtitleTemplate } : {}),
       }));
@@ -8377,7 +8379,7 @@ function App() {
                     /* Viewport Gizmo Overlay — rendered outside safe zone so it's above all masks */
                     (() => {
                         const gizmoTarget = getGizmoTarget();
-                        if (!gizmoTarget.type || activeRightTab === 'tracking') return null;
+                        if (!gizmoTarget.type || activeRightTab === 'tracking' || !showGizmos) return null;
 
                         let gizmoTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0, pivotX: 50, pivotY: 50 };
                         let elemBounds = { width: sz.w, height: sz.h };
@@ -8385,7 +8387,10 @@ function App() {
                         let gizmoCropDims = cropDims;
 
                         if (gizmoTarget.type === 'global') {
-                          // Global: show gizmo using global keyframes, sized to the active clip
+                          // Global: show gizmo using global keyframes, sized to the active clip.
+                          // Use COVER fit (matches the actual rendered video — see fitW/fitH at the
+                          // segment render block) so the gizmo wraps the real clip perimeter,
+                          // not just the safe-zone-inscribed contain rect.
                           const t = getInterpolatedTransform(globalKeyframes, project.currentTime);
                           gizmoTransform = { ...t, pivotX: t.pivotX ?? 50, pivotY: t.pivotY ?? 50 };
                           const topVisual = activeSegments.filter(s => s.type !== 'audio').slice(-1)[0];
@@ -8394,15 +8399,15 @@ function App() {
                             const vw = vidEl?.videoWidth || 1920;
                             const vh = vidEl?.videoHeight || 1080;
                             const videoAR = vw / vh;
-                            const containerAR = sz.w / (sz.h || 1);
-                            const displayW = containerAR > videoAR ? sz.h * videoAR : sz.w;
-                            const displayH = containerAR > videoAR ? sz.h : sz.w / videoAR;
-                            elemBounds = { width: displayW, height: displayH };
+                            const safeAR = sz.w / (sz.h || 1);
+                            const fitW = videoAR >= safeAR ? sz.h * videoAR : sz.w;
+                            const fitH = videoAR >= safeAR ? sz.h : sz.w / videoAR;
+                            elemBounds = { width: fitW, height: fitH };
                             elemCenter = {
-                              x: sz.w / 2 + t.translateX * displayW / 100,
-                              y: sz.h / 2 + t.translateY * displayH / 100,
+                              x: sz.w / 2 + t.translateX * fitW / 100,
+                              y: sz.h / 2 + t.translateY * fitH / 100,
                             };
-                            gizmoCropDims = { width: displayW, height: displayH };
+                            gizmoCropDims = { width: fitW, height: fitH };
                           }
                         } else if (gizmoTarget.type === 'clip' && primarySelectedSegment) {
                           const clipTime = project.currentTime - primarySelectedSegment.timelineStart;
@@ -8412,15 +8417,15 @@ function App() {
                           const vw = vidEl?.videoWidth || 1920;
                           const vh = vidEl?.videoHeight || 1080;
                           const videoAR = vw / vh;
-                          const containerAR = sz.w / (sz.h || 1);
-                          const displayW = containerAR > videoAR ? sz.h * videoAR : sz.w;
-                          const displayH = containerAR > videoAR ? sz.h : sz.w / videoAR;
-                          elemBounds = { width: displayW, height: displayH };
+                          const safeAR = sz.w / (sz.h || 1);
+                          const fitW = videoAR >= safeAR ? sz.h * videoAR : sz.w;
+                          const fitH = videoAR >= safeAR ? sz.h : sz.w / videoAR;
+                          elemBounds = { width: fitW, height: fitH };
                           elemCenter = {
-                            x: sz.w / 2 + t.translateX * displayW / 100,
-                            y: sz.h / 2 + t.translateY * displayH / 100,
+                            x: sz.w / 2 + t.translateX * fitW / 100,
+                            y: sz.h / 2 + t.translateY * fitH / 100,
                           };
-                          gizmoCropDims = { width: displayW, height: displayH };
+                          gizmoCropDims = { width: fitW, height: fitH };
                         } else if (gizmoTarget.type === 'title' && project.titleLayer) {
                           const t2 = project.currentTime - project.titleLayer.startTime;
                           const tTransform = project.titleLayer.keyframes?.length

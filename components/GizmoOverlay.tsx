@@ -214,12 +214,14 @@ const GizmoOverlay: React.FC<GizmoOverlayProps> = ({
   return (
     <svg
       ref={svgRef}
+      overflow="visible"
       style={{
         position: 'absolute',
         top: 0,
         left: 0,
         width: viewportSize.width,
         height: viewportSize.height,
+        overflow: 'visible',
         pointerEvents: 'none',
         zIndex: 201,
       }}
