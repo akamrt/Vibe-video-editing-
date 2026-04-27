@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VibeCut AI — Mac Setup Guide</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    background: #1a1a2e;
+    min-height: 100vh;
+    padding: 40px 20px 80px;
+    color: #fff;
+  }
+
+  .page-title {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+  .page-title h1 {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 8px;
+  }
+  .page-title p {
+    font-size: 16px;
+    color: #a0aec0;
+  }
+  .badge {
+    display: inline-block;
+    background: #e53e3e;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 2px 10px;
+    border-radius: 20px;
+    margin-bottom: 12px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  .steps-container {
+    max-width: 800px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 48px;
+  }
+
+  /* ── Step card ── */
+  .step {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .step-number {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
+  .step-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+  }
+  .step-subtitle {
+    font-size: 14px;
+    color: #a0aec0;
+    margin-top: 2px;
+  }
+
+  /* ── Mac window chrome ── */
+  .mac-window {
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.08);
+  }
+  .mac-titlebar {
+    background: #3a3a3c;
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: relative;
+  }
+  .mac-titlebar.light { background: #e8e8ea; }
+  .dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+  .dot-red   { background: #ff5f57; }
+  .dot-yellow{ background: #febc2e; }
+  .dot-green { background: #28c840; }
+  .titlebar-text {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    font-weight: 600;
+    color: #999;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .titlebar-text.dark { color: #ccc; }
+
+  /* ── Finder ── */
+  .finder-body {
+    background: #f0f0f0;
+    display: flex;
+    min-height: 220px;
+  }
+  .finder-sidebar {
+    width: 130px;
+    background: #e0e0e2;
+    padding: 12px 8px;
+    border-right: 1px solid #ccc;
+    flex-shrink: 0;
+  }
+  .finder-sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 5px;
+    font-size: 11px;
+    color: #444;
+    cursor: default;
+  }
+  .finder-sidebar-item.active { background: #0071e3; color: #fff; }
+  .sidebar-icon { font-size: 13px; }
+  .finder-content {
+    flex: 1;
+    padding: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-content: flex-start;
+  }
+  .finder-file {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    width: 70px;
+    cursor: default;
+    padding: 6px 4px;
+    border-radius: 6px;
+  }
+  .finder-file:hover { background: rgba(0,0,0,0.06); }
+  .finder-file.selected { background: #0071e3; }
+  .finder-file.selected .file-label { color: #fff; }
+  .file-icon { font-size: 36px; line-height: 1; }
+  .file-label {
+    font-size: 10px;
+    color: #222;
+    text-align: center;
+    word-break: break-word;
+    line-height: 1.2;
+  }
+
+  /* Context menu */
+  .context-menu {
+    background: rgba(240,240,240,0.97);
+    backdrop-filter: blur(20px);
+    border-radius: 9px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3), 0 0 0 0.5px rgba(0,0,0,0.12);
+    padding: 4px 0;
+    width: 220px;
+    font-size: 13px;
+  }
+  .ctx-item {
+    padding: 6px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #1d1d1f;
+    cursor: default;
+    gap: 8px;
+  }
+  .ctx-item:hover { background: #0071e3; color: #fff; }
+  .ctx-item.highlighted { background: #0071e3; color: #fff; border-radius: 5px; margin: 0 4px; }
+  .ctx-item .arrow { color: #999; font-size: 11px; }
+  .ctx-item.highlighted .arrow { color: rgba(255,255,255,0.7); }
+  .ctx-divider { height: 1px; background: rgba(0,0,0,0.1); margin: 3px 0; }
+
+  /* Spotlight */
+  .spotlight-overlay {
+    background: rgba(30,30,30,0.85);
+    backdrop-filter: blur(30px);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.7);
+  }
+  .spotlight-input-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .spotlight-icon { font-size: 20px; opacity: 0.6; }
+  .spotlight-input {
+    font-size: 22px;
+    font-weight: 400;
+    color: #fff;
+    background: none;
+    border: none;
+    outline: none;
+    flex: 1;
+    caret-color: #0071e3;
+  }
+  .spotlight-results { padding: 8px; }
+  .spotlight-section { font-size: 10px; color: #888; font-weight: 600; text-transform: uppercase; padding: 4px 8px; letter-spacing: 0.5px; }
+  .spotlight-result {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: default;
+  }
+  .spotlight-result.selected { background: #0071e3; }
+  .result-icon-wrapper {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+  .result-icon-wrapper.terminal-bg { background: #1e1e1e; }
+  .result-text strong { font-size: 13px; display: block; color: #fff; }
+  .result-text span { font-size: 11px; color: rgba(255,255,255,0.55); }
+  .spotlight-result.selected .result-text span { color: rgba(255,255,255,0.75); }
+
+  /* Terminal window */
+  .terminal-body {
+    background: #1e1e1e;
+    padding: 14px 16px;
+    font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    min-height: 180px;
+  }
+  .t-prompt { color: #5af78e; }
+  .t-path { color: #57c7ff; }
+  .t-cmd { color: #f1f1f0; }
+  .t-cursor {
+    display: inline-block;
+    width: 8px;
+    height: 15px;
+    background: #f1f1f0;
+    vertical-align: text-bottom;
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+  .t-output { color: #a0aec0; }
+  .t-success { color: #5af78e; }
+  .t-highlight {
+    background: rgba(90,247,142,0.15);
+    border-left: 3px solid #5af78e;
+    padding: 6px 10px;
+    margin: 4px 0;
+    border-radius: 0 4px 4px 0;
+  }
+
+  /* ── Callout box ── */
+  .callout {
+    border-radius: 10px;
+    padding: 14px 18px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .callout.info  { background: rgba(66,153,225,0.15); border: 1px solid rgba(66,153,225,0.3); }
+  .callout.warn  { background: rgba(237,137,54,0.15); border: 1px solid rgba(237,137,54,0.3); }
+  .callout.good  { background: rgba(72,187,120,0.15); border: 1px solid rgba(72,187,120,0.35); }
+  .callout-icon  { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+  .callout strong { display: block; margin-bottom: 2px; }
+
+  /* ── Key badge ── */
+  .key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #3a3a3c;
+    border: 1px solid #555;
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 2px 9px;
+    color: #eee;
+    min-width: 28px;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.4);
+  }
+
+  /* ── Copy command box ── */
+  .copy-box {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 16px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .copy-box code {
+    font-family: "SF Mono", "Menlo", monospace;
+    font-size: 13px;
+    color: #58a6ff;
+    flex: 1;
+    word-break: break-all;
+  }
+
+  /* ── Section divider ── */
+  .divider {
+    text-align: center;
+    color: #4a5568;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .divider::before, .divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: #2d3748;
+  }
+
+  /* ── Success banner ── */
+  .success-banner {
+    background: linear-gradient(135deg, #1a472a, #22543d);
+    border: 1px solid #276749;
+    border-radius: 12px;
+    padding: 20px 24px;
+    text-align: center;
+  }
+  .success-banner h3 { font-size: 18px; margin-bottom: 6px; }
+  .success-banner p  { color: #9ae6b4; font-size: 14px; }
+
+  .annotation {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #fc8181;
+    font-weight: 600;
+  }
+  .annotation::before { content: '▶'; font-size: 10px; }
+
+  /* ── After-that section ── */
+  .after-that {
+    max-width: 800px;
+    margin: 0 auto;
+    margin-top: 48px;
+  }
+  .after-that h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    text-align: center;
+    color: #e2e8f0;
+  }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 600px) { .two-col { grid-template-columns: 1fr; } }
+
+  .info-card {
+    background: #16213e;
+    border: 1px solid #2d3748;
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .info-card h4 { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+  .info-card p  { font-size: 13px; color: #a0aec0; line-height: 1.6; }
+
+  .overlay-wrapper {
+    position: relative;
+    display: inline-block;
+  }
+  .floating-label {
+    position: absolute;
+    background: #fc8181;
+    color: #000;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 3px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    z-index: 10;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  }
+  .floating-label::after {
+    content: '';
+    position: absolute;
+    border: 5px solid transparent;
+  }
+  .floating-label.arrow-down::after {
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border-top-color: #fc8181;
+  }
+  .floating-label.arrow-left::after {
+    right: 100%;
+    top: 50%;
+    transform: translateY(-50%);
+    border-right-color: #fc8181;
+  }
+
+  .step-connector {
+    display: flex;
+    justify-content: center;
+    color: #4a5568;
+    font-size: 22px;
+  }
+</style>
+</head>
+<body>
+
+<div class="page-title">
+  <div class="badge">One-time setup</div>
+  <h1>🎬 Starting VibeCut AI on Mac</h1>
+  <p>Follow these steps carefully — you only need to do this <strong>once</strong>.</p>
+  <p style="color:#718096; font-size:13px; margin-top:6px;">After this, just double-click the app to open it.</p>
+</div>
+
+<div class="steps-container">
+
+  <!-- ═══════════════════════════════════════════
+       STEP 1 — Spotlight
+  ════════════════════════════════════════════ -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-number">1</div>
+      <div>
+        <div class="step-title">Open Spotlight Search</div>
+        <div class="step-subtitle">This is how you find and open apps on a Mac</div>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">⌨️</div>
+      <div>
+        <strong>Press these two keys at the same time:</strong>
+        <span class="key">⌘ Command</span> &nbsp;+&nbsp; <span class="key">Space</span>
+        &nbsp;&nbsp;A small search box will appear in the centre of your screen.
+      </div>
+    </div>
+
+    <!-- Spotlight mock -->
+    <div class="spotlight-overlay" style="max-width:560px; margin:0 auto;">
+      <div class="spotlight-input-row">
+        <div class="spotlight-icon">🔍</div>
+        <div class="spotlight-input">Terminal<span class="t-cursor"></span></div>
+      </div>
+      <div class="spotlight-results">
+        <div class="spotlight-section">Applications</div>
+        <div class="spotlight-result selected">
+          <div class="result-icon-wrapper terminal-bg">💻</div>
+          <div class="result-text">
+            <strong>Terminal</strong>
+            <span>Application · Utilities</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:4px;">
+      <div class="annotation" style="margin-bottom:6px;">Type the word <strong style="color:#fff; margin-left:4px;">&nbsp;Terminal&nbsp;</strong>&nbsp; — it appears highlighted in blue above</div>
+      <div class="annotation">Then press <span class="key" style="margin-left:6px; margin-right:4px;">Return ↩</span> to open it</div>
+    </div>
+  </div>
+
+  <!-- connector -->
+  <div class="step-connector">↓</div>
+
+  <!-- ═══════════════════════════════════════════
+       STEP 2 — Terminal opens
+  ════════════════════════════════════════════ -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-number">2</div>
+      <div>
+        <div class="step-title">Terminal opens</div>
+        <div class="step-subtitle">It looks like this — a black window with white text</div>
+      </div>
+    </div>
+
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+        <div class="titlebar-text dark">Terminal — zsh — 80×24</div>
+      </div>
+      <div class="terminal-body">
+        <span class="t-prompt">yourname@Mac</span> <span class="t-path">~ %</span> <span class="t-cursor"></span>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">💡</div>
+      <div>This is normal — you have not broken anything. Terminal is just a way to type instructions to your Mac. You only need to paste <strong>one line</strong> into it.</div>
+    </div>
+  </div>
+
+  <!-- connector -->
+  <div class="step-connector">↓</div>
+
+  <!-- ═══════════════════════════════════════════
+       STEP 3 — Paste the command
+  ════════════════════════════════════════════ -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-number">3</div>
+      <div>
+        <div class="step-title">Paste this command &amp; press Return</div>
+        <div class="step-subtitle">Copy the line below, click inside Terminal, paste it, then press Return ↩</div>
+      </div>
+    </div>
+
+    <!-- Command to copy -->
+    <div class="copy-box">
+      <code>cd "$(dirname "$(find ~/Desktop ~/Downloads ~/Documents -name 'Start Vibe.command' -maxdepth 4 2>/dev/null | head -1)")" && chmod +x *.sh *.command && open -a Terminal "Start Vibe.command"</code>
+    </div>
+
+    <div class="callout warn">
+      <div class="callout-icon">⚠️</div>
+      <div>
+        <strong>How to copy &amp; paste:</strong>
+        Select <em>all</em> of the grey text above (click once on it, then <span class="key">⌘</span>+<span class="key">A</span>), copy it (<span class="key">⌘</span>+<span class="key">C</span>), click inside the Terminal window, then paste (<span class="key">⌘</span>+<span class="key">V</span>) and press <span class="key">Return ↩</span>.
+      </div>
+    </div>
+
+    <!-- Terminal with command pasted -->
+    <div class="mac-window">
+      <div class="mac-titlebar">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+        <div class="titlebar-text dark">Terminal — zsh — 80×24</div>
+      </div>
+      <div class="terminal-body">
+        <div class="t-prompt" style="display:inline">yourname@Mac</div> <span class="t-path">~ %</span><br>
+        <div class="t-highlight">
+          <span style="color:#ccc; font-size:12px;">↓ Paste goes here (it may look long — that's fine)</span><br>
+          <span class="t-cmd">cd "$(dirname "$(find ~/Desktop ~/Downloads ~/Documents -name 'Start Vibe.command' -maxdepth 4 2>/dev/null | head -1)")" &amp;&amp; chmod +x *.sh *.command &amp;&amp; open -a Terminal "Start Vibe.command"</span>
+        </div>
+        <br>
+        <span class="t-output">Checking for updates...</span><br>
+        <span class="t-success">✓ Up to date!</span><br>
+        <span class="t-output">Starting backend server...</span><br>
+        <span class="t-output">Starting frontend...</span><br>
+        <span class="t-output">Waiting for app to be ready..........</span><br>
+        <span class="t-success">✓ App is ready! Opening browser...</span>
+      </div>
+    </div>
+
+    <div class="callout info">
+      <div class="callout-icon">⏱️</div>
+      <div><strong>The first time this runs it may take 2–5 minutes</strong> — it is downloading and installing everything it needs. Let it run, don't close the window. Your browser will open automatically when it is ready.</div>
+    </div>
+  </div>
+
+  <!-- connector -->
+  <div class="step-connector">↓</div>
+
+  <!-- ═══════════════════════════════════════════
+       STEP 4 — Browser opens
+  ════════════════════════════════════════════ -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-number">4</div>
+      <div>
+        <div class="step-title">Your browser opens automatically</div>
+        <div class="step-subtitle">VibeCut AI is running — you're ready to go!</div>
+      </div>
+    </div>
+
+    <!-- Browser mock -->
+    <div class="mac-window">
+      <div class="mac-titlebar light" style="padding: 10px 80px 10px 14px;">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+        <div style="flex:1; background:#fff; border-radius:7px; padding:4px 12px; margin-left:16px; display:flex; align-items:center; gap:6px; font-size:12px; color:#555; border: 1px solid #ddd;">
+          <span>🔒</span>
+          <span style="color:#222; font-weight:500;">localhost:3000</span>
+        </div>
+      </div>
+      <div style="background: linear-gradient(135deg, #0f0c29, #302b63, #24243e); height:200px; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px;">
+        <div style="font-size:42px;">🎬</div>
+        <div style="font-size:22px; font-weight:700; color:#fff;">VibeCut AI</div>
+        <div style="font-size:13px; color:rgba(255,255,255,0.5);">AI-powered video editor</div>
+        <div style="margin-top:8px; background:rgba(255,255,255,0.1); border:1px solid rgba(255,255,255,0.2); border-radius:8px; padding:8px 20px; font-size:12px; color:#fff;">Loading your workspace...</div>
+      </div>
+    </div>
+
+    <div class="callout good">
+      <div class="callout-icon">✅</div>
+      <div>
+        <strong>Important: keep the Terminal window open while using the app.</strong>
+        The Terminal is running the app in the background. If you close it, the app stops. You can minimise it — just don't quit it.
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════
+       SUCCESS
+  ════════════════════════════════════════════ -->
+  <div class="success-banner">
+    <div style="font-size:36px; margin-bottom:8px;">🎉</div>
+    <h3>That's it — setup complete!</h3>
+    <p>From now on, just double-click <strong>"Start Vibe.command"</strong> to open the app.</p>
+    <p style="margin-top:6px; opacity:0.7;">No Terminal needed next time.</p>
+  </div>
+
+</div><!-- end steps -->
+
+<!-- ═══════════════════════════════════════════
+     AFTER-THAT / TROUBLESHOOTING
+════════════════════════════════════════════ -->
+<div class="after-that">
+  <div class="divider" style="margin-bottom:32px;">From next time onwards</div>
+
+  <div style="max-width:800px; margin:0 auto;">
+
+    <!-- What to do each time -->
+    <div class="mac-window" style="margin-bottom:24px;">
+      <div class="mac-titlebar">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+        <div class="titlebar-text dark">Finder — Vibe-video-editing- folder</div>
+      </div>
+      <div class="finder-body">
+        <div class="finder-sidebar">
+          <div class="finder-sidebar-item"><span class="sidebar-icon">🗂</span> Recents</div>
+          <div class="finder-sidebar-item active"><span class="sidebar-icon">💻</span> Desktop</div>
+          <div class="finder-sidebar-item"><span class="sidebar-icon">📁</span> Downloads</div>
+          <div class="finder-sidebar-item"><span class="sidebar-icon">📄</span> Documents</div>
+        </div>
+        <div class="finder-content">
+          <div class="finder-file selected">
+            <div class="file-icon">🖥️</div>
+            <div class="file-label">Start Vibe.command</div>
+          </div>
+          <div class="finder-file">
+            <div class="file-icon">📄</div>
+            <div class="file-label">START.sh</div>
+          </div>
+          <div class="finder-file">
+            <div class="file-icon">📁</div>
+            <div class="file-label">components</div>
+          </div>
+          <div class="finder-file">
+            <div class="file-icon">📦</div>
+            <div class="file-label">node_modules</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="annotation" style="margin-bottom:24px; justify-content:center;">Double-click <strong style="color:#fff; margin:0 4px;">"Start Vibe.command"</strong> — the app opens by itself</div>
+
+    <!-- Troubleshooting cards -->
+    <h2 style="font-size:18px; font-weight:700; color:#e2e8f0; text-align:center; margin-bottom:16px;">If something goes wrong</h2>
+    <div class="two-col">
+      <div class="info-card">
+        <h4>🔲 Blank white page in browser</h4>
+        <p>Wait 15 seconds and press <strong>⌘ + R</strong> to refresh. The app might still be starting up.</p>
+        <p style="margin-top:8px;">If it stays blank: close the Terminal window, then double-click "Start Vibe.command" again. It will clean up and restart.</p>
+      </div>
+      <div class="info-card">
+        <h4>📄 Still opens as a text file</h4>
+        <p>Open <strong>Terminal</strong> again (Step 1 above) and paste the same command from Step 3 again. This re-applies the fix.</p>
+      </div>
+      <div class="info-card">
+        <h4>❌ "command not found" error</h4>
+        <p>The VibeCut folder was not found in Downloads, Documents, or Desktop. Move the folder to your <strong>Downloads</strong> folder, then paste the command again.</p>
+      </div>
+      <div class="info-card">
+        <h4>⏳ App is very slow to start</h4>
+        <p>Normal on the first run — it is installing everything (can take 5 minutes). After the first time it will start in seconds.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

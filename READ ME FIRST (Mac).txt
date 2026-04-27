@@ -1,0 +1,51 @@
+==========================================================
+  VibeCut AI - First Time Setup on Mac
+==========================================================
+
+If "Start Vibe.command" opens as a TEXT FILE instead of
+launching the app, do this ONE TIME ONLY:
+
+  1. Press   Cmd + Space   to open Spotlight Search.
+
+  2. Type   Terminal   and press Return.
+     (A black/white window opens.)
+
+  3. Copy the line below (triple-click to select all),
+     then paste into the Terminal window and press Return:
+
+        cd ~/Downloads/Vibe-video-editing- && chmod +x *.sh *.command && ./Start\ Vibe.command
+
+     IMPORTANT:
+       - If you put the project folder somewhere other than
+         your Downloads folder, change "~/Downloads/..."
+         to wherever the folder lives.
+       - If the folder name has different capitalization or
+         a "-main" / "-master" suffix (e.g. when downloaded
+         as a ZIP from GitHub), match it exactly.
+
+  4. The first run will take a few minutes — it downloads
+     and installs everything it needs. After that it will
+     just open quickly.
+
+==========================================================
+  Every time after this:
+==========================================================
+
+  Just double-click   "Start Vibe.command"
+
+  It will:
+    - Close any old copy still running in the background
+    - Wait for the app to be ready
+    - Open your browser automatically
+
+==========================================================
+  If the browser shows a blank page:
+==========================================================
+
+  Wait 10-15 seconds and refresh the page (Cmd + R).
+  The app is still starting up the first time.
+
+  If it is still blank after a minute, close the Terminal
+  window completely and double-click "Start Vibe.command"
+  again. The launcher will clean up any stuck processes
+  before it restarts.
