@@ -1,6 +1,14 @@
-import React, { useState, useEffect } from 'react';
-import type { SubtitleTemplate, TextAnimation, SubtitleStyle } from '../../types';
+import React, { useState, useEffect, useCallback } from 'react';
+import type { SubtitleTemplate, TextAnimation, SubtitleStyle, HyperframesVariable } from '../../types';
 import AnimationControls from '../AnimationControls';
+import HyperframesVariableForm from '../hyperframes/HyperframesVariableForm';
+import {
+  HYPERFRAMES_COMPOSITIONS,
+  loadCompositionSchema,
+  buildDefaultConfig,
+  buildFullSchema,
+  type HyperframesCompositionMeta,
+} from '../../utils/hyperframesUtils';
 
 const STORAGE_KEY = 'vibecut_subtitle_templates';
 
@@ -311,9 +319,128 @@ const TemplateManager: React.FC<TemplateManagerProps> = ({
   const [editingTemplate, setEditingTemplate] = useState<string | null>(null);
   const [showPresets, setShowPresets] = useState(true);
 
+  // ── Main tab ──────────────────────────────────────────────────────────────
+  const [mainTab, setMainTab] = useState<'animations' | 'hyperframes'>('animations');
+
+  // ── Hyperframes state ─────────────────────────────────────────────────────
+  const [hfSelected, setHfSelected] = useState<HyperframesCompositionMeta | null>(null);
+  const [hfSchemas, setHfSchemas] = useState<Record<string, HyperframesVariable[]>>({});
+  const [hfVariables, setHfVariables] = useState<Record<string, string | number | boolean>>({});
+  const [hfLoading, setHfLoading] = useState(false);
+
+  const hfParsedSchema = hfSelected ? (hfSchemas[hfSelected.src] ?? []) : [];
+  // Merge parsed HTML schema with inferred entries from meta.defaults — this is
+  // what the form actually renders (so extended vars show up even without HTML declaration)
+  const hfSchema = hfSelected ? buildFullSchema(hfParsedSchema, hfSelected.defaults) : [];
+
+  /** When a composition is selected, load its variable schema */
+  /** Build and immediately apply a Hyperframes template */
+  const applyHyperframesTemplate = useCallback((
+    meta: HyperframesCompositionMeta,
+    schema: HyperframesVariable[],
+    overrideVars: Record<string, string | number | boolean> = {}
+  ) => {
+    const config = buildDefaultConfig(meta, schema);
+    config.variables = { ...config.variables, ...overrideVars };
+
+    const template: SubtitleTemplate = {
+      id: `hf_${meta.id}`,          // stable id so undo stack doesn't spam
+      name: `HF: ${meta.name}`,
+      style: {
+        fontFamily: currentSubtitleStyle.fontFamily,
+        fontSize: currentSubtitleStyle.fontSize,
+        color: currentSubtitleStyle.color,
+      },
+      animation: {
+        id: 'hf_noop',
+        name: 'Hyperframes',
+        duration: 1,
+        scope: 'element',
+        stagger: 0,
+        effects: [],
+      },
+      hyperframes: config,
+    };
+    console.log('[HF] Applying template:', template.name, '| hyperframes:', !!template.hyperframes, '| src:', config.compositionSrc);
+    onApply(template);
+  }, [currentSubtitleStyle, onApply]);
+
+  /** Select a composition card — loads schema and auto-applies immediately */
+  const handleSelectComposition = useCallback(async (meta: HyperframesCompositionMeta) => {
+    setHfSelected(meta);
+
+    // Seed variable state from the composition's hardcoded defaults.
+    // Reset fully when switching composition so stale vars from another composition
+    // don't bleed through. Defaults are always present via meta.defaults.
+    const seededVars = { ...meta.defaults };
+    setHfVariables(seededVars);
+
+    // Apply right away with whatever schema/vars we already have so export works immediately
+    const existingSchema = hfSchemas[meta.src] ?? [];
+    applyHyperframesTemplate(meta, existingSchema, seededVars);
+
+    if (hfSchemas[meta.src]) return;   // schema already cached — we're done
+    setHfLoading(true);
+    try {
+      const schema = await loadCompositionSchema(meta.src);
+      setHfSchemas(prev => ({ ...prev, [meta.src]: schema }));
+      // Re-apply now that we have the real schema with defaults
+      applyHyperframesTemplate(meta, schema, seededVars);
+    } catch (e) {
+      console.warn('[HF] Failed to load schema:', e);
+    } finally {
+      setHfLoading(false);
+    }
+  }, [hfSchemas, hfVariables, applyHyperframesTemplate]);
+
+  /** Called when the user tweaks a variable — live-updates the active template */
+  const handleVariableChange = useCallback((name: string, val: string | number | boolean) => {
+    const newVars = { ...hfVariables, [name]: val };
+    setHfVariables(newVars);
+    if (hfSelected) {
+      const schema = hfSchemas[hfSelected.src] ?? [];
+      applyHyperframesTemplate(hfSelected, schema, newVars);
+    }
+  }, [hfVariables, hfSelected, hfSchemas, applyHyperframesTemplate]);
+
+  /** Manual re-apply button (kept for users who want to explicitly confirm) */
+  const handleApplyHyperframes = useCallback(() => {
+    if (!hfSelected) return;
+    const schema = hfSchemas[hfSelected.src] ?? [];
+    applyHyperframesTemplate(hfSelected, schema, hfVariables);
+  }, [hfSelected, hfSchemas, hfVariables, applyHyperframesTemplate]);
+
   useEffect(() => {
     setTemplates(loadTemplates());
   }, []);
+
+  // ── Restore HF selection from the already-applied active template ─────────
+  // When a project is loaded (or the panel re-opens), activeTemplate may already
+  // contain a Hyperframes config. Sync hfSelected + hfVariables from it so the
+  // form shows the correct controls immediately without requiring the user to
+  // re-click the composition card.
+  useEffect(() => {
+    if (!activeTemplate?.hyperframes) return;
+    const srcPath = activeTemplate.hyperframes.compositionSrc;
+    const match = HYPERFRAMES_COMPOSITIONS.find(m => m.src === srcPath);
+    if (!match) return;
+    // Already synced — don't thrash
+    if (hfSelected?.src === srcPath) return;
+
+    setMainTab('hyperframes');
+    setHfSelected(match);
+    // Merge stored variables on top of defaults (so any user customisations are preserved)
+    setHfVariables({ ...match.defaults, ...activeTemplate.hyperframes.variables });
+
+    if (!hfSchemas[match.src]) {
+      setHfLoading(true);
+      loadCompositionSchema(match.src)
+        .then(schema => setHfSchemas(prev => ({ ...prev, [match.src]: schema })))
+        .catch(e => console.warn('[HF] Schema restore load error:', e))
+        .finally(() => setHfLoading(false));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTemplate?.hyperframes?.compositionSrc]);
 
   const filteredPresets = activeCategory === 'All'
     ? PRESET_ANIMATIONS
@@ -394,8 +521,128 @@ const TemplateManager: React.FC<TemplateManagerProps> = ({
     }
   };
 
+  // ── Shared mini-styles ────────────────────────────────────────────────────
+  const sectionLabelStyle: React.CSSProperties = {
+    fontSize: 10, fontWeight: 700, color: '#6060a0',
+    textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6,
+  };
+  const clearBtnStyle: React.CSSProperties = {
+    background: 'none', border: '1px solid #444', color: '#888',
+    borderRadius: 4, fontSize: 9, cursor: 'pointer', padding: '1px 8px',
+  };
+
+  // ── Hyperframes panel ─────────────────────────────────────────────────────
+  const HyperframesPanel = (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '8px 0' }}>
+
+      {/* Active HF indicator */}
+      {activeTemplate?.hyperframes && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px',
+          background: '#6c63ff18', border: '1px solid #6c63ff50', borderRadius: 5,
+        }}>
+          <span style={{ fontSize: 9, fontWeight: 700, color: '#a89fff' }}>⚡ HF ACTIVE:</span>
+          <span style={{ fontSize: 10, color: '#c4b5fd', flex: 1 }}>{activeTemplate.name}</span>
+          <button onClick={onClear} style={clearBtnStyle}>Clear</button>
+        </div>
+      )}
+
+      {/* Composition picker grid */}
+      <div>
+        <div style={sectionLabelStyle}>Choose Composition</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+          {HYPERFRAMES_COMPOSITIONS.map(meta => {
+            const isSelected = hfSelected?.id === meta.id;
+            const isActiveHF = activeTemplate?.hyperframes?.compositionSrc === meta.src;
+            return (
+              <div
+                key={meta.id}
+                onClick={() => handleSelectComposition(meta)}
+                style={{
+                  padding: '7px 9px', borderRadius: 6, cursor: 'pointer',
+                  background: isSelected ? '#6c63ff22' : '#1a1a2e',
+                  border: `1px solid ${isActiveHF ? '#6c63ff' : isSelected ? '#6c63ff80' : '#2a2a3a'}`,
+                  transition: 'border-color 0.15s',
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 700, color: isSelected ? '#a89fff' : '#d0d0e8', marginBottom: 2 }}>
+                  {isActiveHF && <span style={{ color: '#6c63ff', marginRight: 4 }}>⚡</span>}
+                  {meta.name}
+                </div>
+                <div style={{ fontSize: 9, color: '#606080', lineHeight: 1.35 }}>{meta.description}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Variable form for selected composition */}
+      {hfSelected && (
+        <div style={{ borderTop: '1px solid #2a2a3a', paddingTop: 10 }}>
+          <div style={{ ...sectionLabelStyle, marginBottom: 8 }}>
+            {hfSelected.name} — Options
+            {hfLoading && <span style={{ color: '#6c63ff', marginLeft: 6, fontSize: 9 }}>Loading…</span>}
+          </div>
+
+          {hfSchema.length > 0 ? (
+            <HyperframesVariableForm
+              schema={hfSchema}
+              values={hfVariables}
+              onChange={handleVariableChange}
+            />
+          ) : !hfLoading && (
+            <div style={{ fontSize: 10, color: '#505070' }}>No options for this composition.</div>
+          )}
+
+          <button
+            onClick={handleApplyHyperframes}
+            style={{
+              marginTop: 12, width: '100%', padding: '7px 0',
+              borderRadius: 6, border: 'none', cursor: 'pointer',
+              background: '#6c63ff', color: '#fff', fontSize: 12, fontWeight: 700,
+            }}
+          >
+            ⚡ Re-apply / Confirm
+          </button>
+        </div>
+      )}
+
+      {!hfSelected && (
+        <div style={{ fontSize: 10, color: '#404060', textAlign: 'center', padding: '10px 0' }}>
+          Click a composition above to apply it.
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8, height: '100%', overflowY: 'auto' }}>
+
+      {/* ── Main tab switcher ── */}
+      <div style={{ display: 'flex', gap: 0, borderRadius: 6, overflow: 'hidden', border: '1px solid #2a2a3a', flexShrink: 0 }}>
+        {(['animations', 'hyperframes'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setMainTab(tab)}
+            style={{
+              flex: 1, padding: '5px 0', border: 'none', cursor: 'pointer', fontSize: 10, fontWeight: 700,
+              background: mainTab === tab ? (tab === 'hyperframes' ? '#6c63ff' : '#4f46e5') : '#1a1a2e',
+              color: mainTab === tab ? '#fff' : '#606080',
+              textTransform: 'uppercase', letterSpacing: 0.6,
+              transition: 'background 0.15s',
+            }}
+          >
+            {tab === 'animations' ? '✦ Animations' : '⚡ Hyperframes'}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Hyperframes tab content ── */}
+      {mainTab === 'hyperframes' && HyperframesPanel}
+
+      {/* ── Animations tab content ── */}
+      {mainTab === 'animations' && <>
+
       {/* ── Keyword Animation Indicator ── */}
       {activeKeywordAnimation && (
         <div style={{
@@ -634,6 +881,9 @@ const TemplateManager: React.FC<TemplateManagerProps> = ({
           >Save</button>
         </div>
       </div>
+
+      {/* ── end animations tab ── */}
+      </>}
     </div>
   );
 };

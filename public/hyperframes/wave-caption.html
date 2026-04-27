@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: transparent !important; }
+  body { overflow: hidden; width: 1920px; height: 1080px; }
+  #root {
+    position: absolute;
+    bottom: var(--bottom, 80px);
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    max-width: 1600px;
+    width: 100%;
+    padding: 0 60px;
+    font-family: var(--font-family, 'Arial, sans-serif');
+    font-weight: var(--weight, 700);
+    letter-spacing: var(--letter-spacing, 0px);
+    text-transform: var(--text-transform, none);
+  }
+  .word {
+    display: inline-block;
+    font-size: var(--size, 72px);
+    color: var(--color, #ffffff);
+    margin: 0 6px;
+    will-change: transform;
+  }
+</style>
+</head>
+<body>
+<div id="root"
+  data-composition-id="wave-caption"
+  data-width="1920"
+  data-height="1080"
+  data-var-text="string"
+  data-var-color="color"
+  data-var-size="number"
+  data-var-shadow-color="color"
+  data-var-shadow-blur="number"
+  data-var-wave-amplitude="number"
+  data-var-wave-speed="number"
+  data-var-wave-phase-gap="number"
+  data-var-bottom="number"
+  data-var-font-family="font"
+  data-var-weight="string"
+  data-var-letter-spacing="number"
+  data-var-text-transform="select"
+  data-var-duration="number"
+></div>
+<script>
+  const p = new URLSearchParams(location.search);
+  const baseColor   = p.get('color')           || '#ffffff';
+  const shadowColor = p.get('shadow-color')    || 'rgba(0,0,0,0.8)';
+  const shadowBlur  = p.get('shadow-blur')     || '8';
+  const amplitude   = parseFloat(p.get('wave-amplitude') || '15');
+  const speed       = parseFloat(p.get('wave-speed')     || '1.2');
+  const phaseGap    = parseFloat(p.get('wave-phase-gap') || '0.5');
+  const duration    = parseFloat(p.get('duration')       || '0.4');
+
+  const hlEnabled   = p.get('highlight-enabled') !== 'false';
+  const hlColor     = p.get('highlight-color')   || '#00ffff';
+  const hlGlow      = p.get('highlight-glow')    || '#00ffff';
+  const hlGlowBlur  = parseFloat(p.get('highlight-glow-blur') || '14');
+  const baseShadow  = `0 0 ${shadowBlur}px ${shadowColor}`;
+  const activeGlowSh = hlEnabled && hlGlowBlur > 0 && hlGlow !== 'transparent'
+    ? `0 0 ${hlGlowBlur}px ${hlGlow}, ${baseShadow}` : baseShadow;
+
+  const root = document.getElementById('root');
+  root.style.setProperty('--color',          baseColor);
+  root.style.setProperty('--size',           (p.get('size') ?? '72') + 'px');
+  root.style.setProperty('--bottom',         (p.get('bottom') ?? '80') + 'px');
+  root.style.setProperty('--font-family',    p.get('font-family')    ?? 'Arial, sans-serif');
+  root.style.setProperty('--weight',         p.get('weight')         ?? '700');
+  root.style.setProperty('--letter-spacing', (p.get('letter-spacing') ?? '0') + 'px');
+  root.style.setProperty('--text-transform', p.get('text-transform') ?? 'none');
+
+  let currentTl    = null;
+  let wordElsModule = [];
+
+  function applyHighlight(activeIdx) {
+    wordElsModule.forEach((el, i) => {
+      if (i === activeIdx) {
+        el.style.color      = hlEnabled ? hlColor : baseColor;
+        el.style.textShadow = hlEnabled ? activeGlowSh : baseShadow;
+        el.style.opacity    = '1';
+      } else if (i < activeIdx) {
+        el.style.color      = baseColor;
+        el.style.textShadow = baseShadow;
+        el.style.opacity    = '0.6';
+      } else {
+        el.style.color      = '';
+        el.style.textShadow = baseShadow;
+        el.style.opacity    = '';
+      }
+    });
+  }
+
+  function init(text) {
+    root.innerHTML = '';
+
+    const wordList = (text || '').split(/\s+/).filter(Boolean);
+    wordElsModule = wordList.map(w => {
+      const el = document.createElement('span');
+      el.className = 'word';
+      el.textContent = w;
+      el.style.textShadow = baseShadow;
+      root.appendChild(el);
+      root.appendChild(document.createTextNode(' '));
+      return el;
+    });
+
+    if (currentTl) currentTl.kill();
+    const tl = gsap.timeline({ paused: true });
+    if (wordElsModule.length) {
+      // opacity removed — applyHighlight owns it; use scale pop instead
+      tl.from(wordElsModule, { scale: 0.3, duration, stagger: 0.04, ease: 'back.out(2)' }, 0);
+    }
+    tl.to({}, { duration: 1.0 }, 0);
+
+    // onUpdate: ONLY drives wave bob transform — highlight handled by __hySetActiveWord
+    tl.eventCallback('onUpdate', () => {
+      if (!wordElsModule.length) return;
+      const t = tl.time();
+      wordElsModule.forEach((el, i) => {
+        const phase = t * speed * Math.PI * 2 + i * phaseGap;
+        el.style.transform = 'translateY(' + (Math.sin(phase) * amplitude) + 'px)';
+      });
+    });
+
+    currentTl = tl;
+    window.__timelines = window.__timelines || {};
+    window.__timelines['wave-caption'] = tl;
+  }
+
+  init(p.get('text') || '');
+
+  window.__hyInit          = init;
+  window.__hySetActiveWord = applyHighlight;
+</script>
+</body>
+</html>

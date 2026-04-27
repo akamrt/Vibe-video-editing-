@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: transparent !important; }
+  body { overflow: hidden; width: 1920px; height: 1080px; }
+  #root {
+    position: absolute;
+    bottom: var(--bottom, 80px);
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    max-width: 1600px;
+    width: 100%;
+    padding: 0 60px;
+  }
+  .caption-text {
+    display: inline-block;
+    font-family: var(--font-family, 'Courier New, monospace');
+    font-size: var(--size, 70px);
+    font-weight: var(--weight, 700);
+    letter-spacing: var(--letter-spacing, 0px);
+    text-transform: var(--text-transform, none);
+    color: var(--color, #ffffff);
+    text-shadow: 0 2px 8px var(--shadow-color, rgba(0,0,0,0.9));
+    background: var(--bg-color, transparent);
+    padding: var(--bg-padding, 10px 24px);
+    border-radius: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    will-change: clip-path;
+  }
+  .cursor {
+    display: inline-block;
+    width: 0.1em;
+    height: 1em;
+    background: var(--color, #ffffff);
+    margin-left: 4px;
+    vertical-align: text-bottom;
+    will-change: opacity;
+  }
+</style>
+</head>
+<body>
+<div id="root"
+  data-composition-id="typewriter-caption"
+  data-width="1920"
+  data-height="1080"
+  data-var-text="string"
+  data-var-color="color"
+  data-var-size="number"
+  data-var-weight="select:400,600,700"
+  data-var-shadow-color="color"
+  data-var-bg-color="color"
+  data-var-duration="number"
+  data-var-cursor="boolean"
+  data-var-bottom="number"
+  data-var-font-family="font"
+  data-var-letter-spacing="number"
+  data-var-text-transform="select"
+></div>
+<script>
+  const p = new URLSearchParams(location.search);
+  const duration   = parseFloat(p.get('duration') || '1.5');
+  const showCursor = p.get('cursor') !== 'false';
+
+  const root = document.getElementById('root');
+  root.style.setProperty('--color',          p.get('color')           ?? '#ffffff');
+  root.style.setProperty('--size',           (p.get('size') ?? '70') + 'px');
+  root.style.setProperty('--weight',         p.get('weight')          ?? '700');
+  root.style.setProperty('--shadow-color',   p.get('shadow-color')    ?? 'rgba(0,0,0,0.9)');
+  root.style.setProperty('--bg-color',       p.get('bg-color')        ?? 'transparent');
+  root.style.setProperty('--bottom',         (p.get('bottom') ?? '80') + 'px');
+  root.style.setProperty('--font-family',    p.get('font-family')     ?? 'Courier New, monospace');
+  root.style.setProperty('--letter-spacing', (p.get('letter-spacing') ?? '0') + 'px');
+  root.style.setProperty('--text-transform', p.get('text-transform')  ?? 'none');
+
+  let currentTl = null;
+
+  function init(text) {
+    root.innerHTML = '';
+
+    const el = document.createElement('span');
+    el.className = 'caption-text';
+    el.textContent = text || '';
+    root.appendChild(el);
+
+    const cursor = document.createElement('span');
+    cursor.className = 'cursor';
+    if (!showCursor) cursor.style.display = 'none';
+    root.appendChild(cursor);
+
+    if (currentTl) currentTl.kill();
+    const tl = gsap.timeline({ paused: true });
+    if (text) {
+      tl.fromTo(el,
+        { clipPath: 'inset(0 100% 0 0)' },
+        { clipPath: 'inset(0 0% 0 0)', duration, ease: 'steps(' + text.length + ')' }
+      );
+      if (showCursor) {
+        tl.to(cursor, { opacity: 0, duration: 0.5, repeat: -1, yoyo: true, ease: 'steps(1)' }, 0);
+      }
+    }
+
+    currentTl = tl;
+    window.__timelines = window.__timelines || {};
+    window.__timelines['typewriter-caption'] = tl;
+  }
+
+  init(p.get('text') || '');
+
+  window.__hyInit          = init;
+  window.__hySetActiveWord = function() {}; // no per-word highlight for typewriter
+</script>
+</body>
+</html>

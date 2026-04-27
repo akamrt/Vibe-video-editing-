@@ -20,6 +20,7 @@ import TemplateManager from './components/remotion/TemplateManager';
 import TransitionPanel from './components/TransitionPanel';
 import { renderTransition as renderTransitionCanvas } from './utils/transitionRenderer';
 import AnimatedText from './components/remotion/AnimatedText';
+import HyperframesCaptionOverlay from './components/hyperframes/HyperframesCaptionOverlay';
 import { analyzeVideoContent, generateVibeEdit, chatWithVideoContext, transcribeAudio, performDeepAnalysis, detectPersonPosition, detectFillerWords, detectFillersFromTranscript, redetectFillerWords, redetectFillersFromTranscript, FillerDetection } from './services/geminiService';
 import FillerConfirmModal from './components/FillerConfirmModal';
 import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
@@ -31,6 +32,7 @@ import { generateSocialPackages } from './services/contentAIService';
 import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion, getInterpolatedPivot, compensatePivotChange } from './utils/interpolation';
 import { resolveGradientStops, buildGradientCSS } from './utils/gradientUtils';
 import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
+import { drawHyperframesCaption } from './utils/hyperframesCanvasRenderer';
 import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes, detectPersonInFrame } from './services/templateTrackingService';
 import { fullScanAndCenter, trackHeadForPivot, headTrackForPivot } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
@@ -549,21 +551,41 @@ function App() {
   const viewportContainerRef = useRef<HTMLDivElement>(null);
   const viewportOuterRef = useRef<HTMLDivElement>(null);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+  const [canvasZoom, setCanvasZoom] = useState(1);
+  const [canvasPan, setCanvasPan] = useState({ x: 0, y: 0 });
+  const userHasZoomedRef = useRef(false);
+  const canvasPanStartRef = useRef<{ startX: number; startY: number; startPanX: number; startPanY: number } | null>(null);
 
-  // Effective crop region dimensions (accounts for aspect ratio letterboxing)
+  // Fixed logical canvas dimensions based on the aspect-ratio preset.
+  // The canvas is always its native output resolution (e.g. 1080x1920 for 9:16);
+  // canvasZoom scales it down to fit the viewport container.
   const cropDims = useMemo(() => {
-    if (viewportSize.width === 0 || viewportSize.height === 0) return viewportSize;
     const arPreset = viewportSettings.previewAspectRatio !== 'custom'
       ? ASPECT_RATIO_PRESETS[viewportSettings.previewAspectRatio]
       : null;
-    if (!arPreset) return viewportSize;
-    const cr = viewportSize.width / viewportSize.height;
-    if (cr > arPreset.ratio) {
-      return { width: viewportSize.height * arPreset.ratio, height: viewportSize.height };
-    } else {
-      return { width: viewportSize.width, height: viewportSize.width / arPreset.ratio };
-    }
+    if (arPreset) return { width: arPreset.width, height: arPreset.height };
+    if (viewportSize.width === 0 || viewportSize.height === 0) return { width: 1920, height: 1080 };
+    return viewportSize;
   }, [viewportSize, viewportSettings.previewAspectRatio]);
+
+  // safeZone: the export AR region. Centered inside the larger canvas pad so the user
+  // can see video extending beyond the export crop.
+  const safeZone = useMemo(() => ({
+    w: cropDims.width,
+    h: cropDims.height,
+    x: 0,
+    y: 0,
+  }), [cropDims]);
+
+  // canvasDims: the full pannable canvas. Larger than safeZone so overflowing video
+  // (e.g. when dragged) is visible behind the stationary safe-zone overlay.
+  // Square canvas with dim = 2× the larger safe-zone side. Big enough to contain
+  // any video sized to cover the safe zone, plus pan-room. Square shape ensures
+  // the safe zone forms a visible "porthole" with dark mask around it.
+  const canvasDims = useMemo(() => {
+    const m = Math.max(safeZone.w, safeZone.h) * 2;
+    return { w: m, h: m };
+  }, [safeZone]);
 
   // Computed Sequence Info
   const contentDuration = useMemo(() => {
@@ -1289,6 +1311,23 @@ function App() {
     return () => ro.disconnect();
   }, [activePage]); // Re-run when page changes
 
+  // Reset to auto-fit when aspect ratio changes
+  useEffect(() => { userHasZoomedRef.current = false; }, [viewportSettings.previewAspectRatio]);
+
+  // Auto-fit canvas to viewport whenever size changes — until the user manually zooms/pans.
+  // Portrait: snap to height. Landscape: fit to screen.
+  // Uses actual rendered container size (getBoundingClientRect) to avoid ResizeObserver timing skew.
+  useEffect(() => {
+    if (userHasZoomedRef.current || safeZone.w <= 0 || safeZone.h <= 0) return;
+    const rect = viewportContainerRef.current?.getBoundingClientRect();
+    const cw = rect?.width ?? viewportSize.width;
+    const ch = rect?.height ?? viewportSize.height;
+    if (cw <= 0 || ch <= 0) return;
+    const fitZoom = ch / safeZone.h;
+    setCanvasZoom(fitZoom);
+    setCanvasPan({ x: 0, y: 0 });
+  }, [safeZone, viewportSize]);
+
   // Push an undo action onto the stack
   const pushUndo = (action: UndoAction) => {
     setUndoStack(prev => [...prev.slice(-49), action]);
@@ -1574,8 +1613,8 @@ function App() {
   const handleViewportMouseMove = (e: React.MouseEvent) => {
     // Subtitle drag takes priority — use crop region dims for 1:1 mapping
     if (subtitleDragState && cropDims.width > 0) {
-      const dx = (e.clientX - subtitleDragState.startX) / cropDims.width * 100;
-      const dy = (e.clientY - subtitleDragState.startY) / cropDims.height * 100;
+      const dx = (e.clientX - subtitleDragState.startX) / canvasZoom / cropDims.width * 100;
+      const dy = (e.clientY - subtitleDragState.startY) / canvasZoom / cropDims.height * 100;
       const media = project.library.find(m => m.id === subtitleDragState.mediaId);
       const evt = media?.analysis?.events[subtitleDragState.index];
       if (evt) {
@@ -1590,8 +1629,8 @@ function App() {
 
     // Title drag — update keyframe at current time
     if (titleDragState && cropDims.width > 0 && project.titleLayer) {
-      const dx = (e.clientX - titleDragState.startX) / cropDims.width * 100;
-      const dy = (e.clientY - titleDragState.startY) / cropDims.height * 100;
+      const dx = (e.clientX - titleDragState.startX) / canvasZoom / cropDims.width * 100;
+      const dy = (e.clientY - titleDragState.startY) / canvasZoom / cropDims.height * 100;
       const newTx = titleDragState.origTx + dx;
       const newTy = titleDragState.origTy + dy;
       const t = project.currentTime - project.titleLayer.startTime;
@@ -1609,8 +1648,9 @@ function App() {
 
     if (!isViewportDragging || viewportSize.width === 0) return;
 
-    const dx = e.clientX - viewportDragStart.x;
-    const dy = e.clientY - viewportDragStart.y;
+    // Divide screen-space delta by canvasZoom to get canvas-space delta
+    const dx = (e.clientX - viewportDragStart.x) / canvasZoom;
+    const dy = (e.clientY - viewportDragStart.y) / canvasZoom;
 
     // Convert pixel delta to percentage of video display area (object-contain),
     // matching the coordinate space used by tracking keyframes (% of video native dims)
@@ -1618,9 +1658,9 @@ function App() {
     const dragVW = dragVideoEl?.videoWidth || 1920;
     const dragVH = dragVideoEl?.videoHeight || 1080;
     const dragVideoAR = dragVW / dragVH;
-    const dragContainerAR = viewportSize.width / (viewportSize.height || 1);
-    const dragDisplayW = dragContainerAR > dragVideoAR ? viewportSize.height * dragVideoAR : viewportSize.width;
-    const dragDisplayH = dragContainerAR > dragVideoAR ? viewportSize.height : viewportSize.width / dragVideoAR;
+    const dragContainerAR = safeZone.w / (safeZone.h || 1);
+    const dragDisplayW = dragContainerAR > dragVideoAR ? safeZone.h * dragVideoAR : safeZone.w;
+    const dragDisplayH = dragContainerAR > dragVideoAR ? safeZone.h : safeZone.w / dragVideoAR;
     const deltaX = (dx / dragDisplayW) * 100;
     const deltaY = (dy / dragDisplayH) * 100;
 
@@ -1741,6 +1781,44 @@ function App() {
       window.addEventListener('mouseup', handleUp);
     }
   }, [activeRightTab, trackingZoom, trackingPan]);
+
+  // Canvas pan (middle-mouse or Alt+left) — active in non-tracking tabs
+  const handleCanvasPanStart = useCallback((e: React.MouseEvent) => {
+    if (activeRightTab === 'tracking') return;
+    if (e.button !== 1 && !(e.button === 0 && e.altKey)) return;
+    e.preventDefault();
+    userHasZoomedRef.current = true;
+    canvasPanStartRef.current = { startX: e.clientX, startY: e.clientY, startPanX: canvasPan.x, startPanY: canvasPan.y };
+    const handleMove = (me: MouseEvent) => {
+      if (!canvasPanStartRef.current) return;
+      setCanvasPan({
+        x: canvasPanStartRef.current.startPanX + (me.clientX - canvasPanStartRef.current.startX),
+        y: canvasPanStartRef.current.startPanY + (me.clientY - canvasPanStartRef.current.startY),
+      });
+    };
+    const handleUp = () => {
+      canvasPanStartRef.current = null;
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('mouseup', handleUp);
+    };
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('mouseup', handleUp);
+  }, [activeRightTab, canvasPan]);
+
+  // Canvas wheel zoom — zoom about the mouse cursor position
+  const handleViewportWheel = useCallback((e: React.WheelEvent) => {
+    if (activeRightTab === 'tracking') { handleTrackingWheel(e); return; }
+    e.preventDefault();
+    userHasZoomedRef.current = true;
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    const newZoom = Math.max(0.05, Math.min(20, canvasZoom * factor));
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const mx = e.clientX - rect.left - viewportSize.width / 2;
+    const my = e.clientY - rect.top - viewportSize.height / 2;
+    const ratio = newZoom / canvasZoom;
+    setCanvasPan(p => ({ x: mx - ratio * (mx - p.x), y: my - ratio * (my - p.y) }));
+    setCanvasZoom(newZoom);
+  }, [activeRightTab, handleTrackingWheel, canvasZoom, viewportSize]);
 
   // Get current clip time for graph editor (time within the selected segment)
   const graphEditorClipTime = useMemo(() => {
@@ -2033,6 +2111,7 @@ function App() {
     let prevSegmentCanvas: HTMLCanvasElement | null = null;
 
     let exportFrameCount = 0;
+    let hfSubtitleDrawCount = 0;  // counts how many times the HF canvas path has been taken
 
     const renderLoop = () => {
       // Use monotonic clock for smooth, jitter-free timing
@@ -2061,6 +2140,11 @@ function App() {
 
       // Diagnostic logging (first 5 frames + every 60th frame)
       const shouldLog = exportFrameCount <= 5 || exportFrameCount % 60 === 0;
+      if (exportFrameCount === 1) {
+        // Full template dump on frame 1 — tells us definitively if hyperframes is present
+        const tpl = projectRef.current.activeSubtitleTemplate;
+        console.log(`[Export START] activeSubtitleTemplate=${tpl?.name || 'null'} | hasHF=${!!tpl?.hyperframes} | hfSrc=${tpl?.hyperframes?.compositionSrc || 'n/a'} | varCount=${tpl?.hyperframes ? Object.keys(tpl.hyperframes.variables).length : 0}`);
+      }
       if (shouldLog) {
         console.log(`[Export Frame ${exportFrameCount}] t=${currentTime.toFixed(3)}s, activeSegs=${activeSegments.length}, template=${projectRef.current.activeSubtitleTemplate?.name || 'NONE'}`);
       }
@@ -2228,7 +2312,12 @@ function App() {
             if (subtitle) {
               const subTemplate = subtitle.templateOverride || projectRef.current.activeSubtitleTemplate;
               const kwAnim = subtitle.keywordAnimation || subTemplate?.keywordAnimation || projectRef.current.activeKeywordAnimation || null;
-              console.log(`[Export] Subtitle: "${subtitle.details.slice(0, 50)}" | template=${subTemplate?.name || 'NONE'} | anim=${subTemplate?.animation?.effects?.length || 0} effects (scope=${subTemplate?.animation?.scope || 'N/A'}) | kwAnim=${kwAnim ? kwAnim.effects.length + ' effects' : 'NONE'} | wordEmphases=${subtitle.wordEmphases?.filter(w => w.enabled).length || 0} | frame=${Math.round((mediaTime - subtitle.startTime) * settings.fps)}`);
+              const hasOverride = !!subtitle.templateOverride;
+              const overrideHasHF = !!subtitle.templateOverride?.hyperframes;
+              const globalTpl = projectRef.current.activeSubtitleTemplate;
+              const globalHasHF = !!globalTpl?.hyperframes;
+              const templateSource = hasOverride ? 'EVENT_OVERRIDE' : (globalTpl ? 'GLOBAL' : 'NONE');
+              console.log(`[Export] Subtitle: "${subtitle.details.slice(0, 50)}" | src=${templateSource} | template=${subTemplate?.name || 'NONE'} | hf=${!!subTemplate?.hyperframes} | override(has=${hasOverride}, hf=${overrideHasHF}, name=${subtitle.templateOverride?.name || '-'}) | global(name=${globalTpl?.name || '-'}, hf=${globalHasHF}) | hfSrc=${subTemplate?.hyperframes?.compositionSrc?.split('/').pop() || '-'} | frame=${Math.round((mediaTime - subtitle.startTime) * settings.fps)}`);
             } else {
               console.log(`[Export] No subtitle at mediaTime=${mediaTime.toFixed(3)}, events=${media.analysis.events.filter(e => e.type === 'dialogue').length}`);
             }
@@ -2239,48 +2328,117 @@ function App() {
             const subTemplate = subtitle.templateOverride || projectRef.current.activeSubtitleTemplate;
             const sourceStyle = subtitle.styleOverride || projectRef.current.subtitleStyle;
 
-            // Calculate interpolated transform for this frame
-            let kfTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
-            if (subtitle.keyframes && subtitle.keyframes.length > 0) {
-              const sourceTime = activeSeg.startTime + clipTime;
-              const subTime = sourceTime - subtitle.startTime;
-              kfTransform = getInterpolatedTransform(subtitle.keyframes, subTime);
-            }
-
-            // Base offsets
-            const evtTx = subtitle.translateX || 0;
-            const evtTy = subtitle.translateY || 0;
-
             // Animation frame (local to subtitle event)
             const sourceTime = activeSeg.startTime + clipTime;
             const localFrame = Math.round((sourceTime - subtitle.startTime) * settings.fps);
-            const subAnim = subTemplate?.animation || null;
+            const timeOffset  = sourceTime - subtitle.startTime;
 
-            // Resolve keyword animation (same cascade as viewport: per-event → template → global)
-            const kwAnim = subtitle.keywordAnimation || subTemplate?.keywordAnimation || projectRef.current.activeKeywordAnimation || null;
+            // ── Hyperframes canvas renderer ─────────────────────────────
+            if (subTemplate?.hyperframes) {
+              hfSubtitleDrawCount++;
+              // Diagnostic: log first 5 HF renders (independent of frame number)
+              if (hfSubtitleDrawCount <= 5) {
+                console.log(`[HF Export #${hfSubtitleDrawCount}] frame=${exportFrameCount} subtitle="${subtitle.details.slice(0,30)}" | src=${subTemplate.hyperframes.compositionSrc.split('/').pop()} | timeOffset=${timeOffset.toFixed(3)} | mediaTime=${mediaTime.toFixed(3)}`);
+                // TEMP DEBUG: yellow bar at TOP of frame — doesn't cover subtitle area.
+                // Visible in exported video → confirms HF draw path IS being entered.
+                // If you see yellow at the top but no captions at the bottom: renderer bug.
+                // If you don't see yellow: subTemplate.hyperframes is falsy (template issue).
+                ctx.save();
+                ctx.resetTransform();
+                ctx.globalAlpha = 1;
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.fillStyle = '#ffff00';
+                ctx.fillRect(0, 0, outputWidth, 40); // top 40px strip
+                ctx.restore();
+              }
+              try {
+                drawHyperframesCaption({
+                  ctx,
+                  text: subtitle.details,
+                  config: subTemplate.hyperframes,
+                  timeOffset,
+                  mediaTime,
+                  subtitleStart: subtitle.startTime,
+                  subtitleEnd: subtitle.endTime,
+                  wordTimings: subtitle.wordTimings,
+                  outputWidth,
+                  outputHeight,
+                });
+                // Pixel check: verify text was drawn in subtitle area
+                if (hfSubtitleDrawCount <= 3) {
+                  try {
+                    const sampleX = Math.max(0, Math.round(outputWidth / 2 - 100));
+                    const sampleY = Math.max(0, outputHeight - 200);
+                    const pixels = ctx.getImageData(sampleX, sampleY, 200, 150);
+                    let brightPixels = 0;
+                    for (let pi = 0; pi < pixels.data.length; pi += 4) {
+                      // Count bright (likely text) pixels: R>150 && G>150 && B>150
+                      if (pixels.data[pi] > 150 && pixels.data[pi+1] > 150 && pixels.data[pi+2] > 150) brightPixels++;
+                    }
+                    console.log(`[HF Export #${hfSubtitleDrawCount}] Pixel check: ${brightPixels} bright pixels in subtitle zone (${sampleX},${sampleY} 200x150) — ${brightPixels > 0 ? 'TEXT VISIBLE ✓' : 'INVISIBLE ✗'}`);
+                  } catch (_pixErr) { /* canvas may be tainted */ }
+                }
+              } catch (hfErr) {
+                console.error('[HF Export] drawHyperframesCaption threw:', hfErr);
+                // Fallback: draw plain text so subtitle is never invisible
+                ctx.save();
+                ctx.globalAlpha = 1;
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.font = `bold ${Math.round(outputHeight * 0.074)}px Impact, Arial`;
+                ctx.fillStyle = '#ffffff';
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = Math.round(outputHeight * 0.003);
+                ctx.lineJoin = 'round';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'alphabetic';
+                ctx.shadowColor = '#000000';
+                ctx.shadowBlur = 8;
+                ctx.strokeText(subtitle.details, outputWidth / 2, outputHeight - Math.round(outputHeight * 0.074));
+                ctx.fillText(subtitle.details, outputWidth / 2, outputHeight - Math.round(outputHeight * 0.074));
+                ctx.restore();
+              }
+            } else {
+              // ── Standard canvas subtitle renderer ───────────────────────
 
-            drawSubtitleOnCanvas({
-              ctx,
-              text: subtitle.details,
-              style: sourceStyle,
-              templateStyle: subTemplate?.style || null,
-              animation: subAnim,
-              frame: localFrame,
-              fps: settings.fps,
-              outputWidth,
-              outputHeight,
-              viewportSafeZoneHeight: safeZoneHeight,
-              totalTx: evtTx + kfTransform.translateX,
-              totalTy: evtTy + kfTransform.translateY,
-              totalScale: kfTransform.scale,
-              totalRotation: kfTransform.rotation,
-              wordEmphases: subtitle.wordEmphases,
-              keywordAnimation: kwAnim,
-              wordTimings: subtitle.wordTimings,
-              sourceTime,
-              eventStartTime: subtitle.startTime,
-              eventEndTime: subtitle.endTime,
-            });
+              // Calculate interpolated transform for this frame
+              let kfTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
+              if (subtitle.keyframes && subtitle.keyframes.length > 0) {
+                const subTime = sourceTime - subtitle.startTime;
+                kfTransform = getInterpolatedTransform(subtitle.keyframes, subTime);
+              }
+
+              // Base offsets
+              const evtTx = subtitle.translateX || 0;
+              const evtTy = subtitle.translateY || 0;
+
+              const subAnim = subTemplate?.animation || null;
+
+              // Resolve keyword animation cascade
+              const kwAnim = subtitle.keywordAnimation || subTemplate?.keywordAnimation || projectRef.current.activeKeywordAnimation || null;
+
+              drawSubtitleOnCanvas({
+                ctx,
+                text: subtitle.details,
+                style: sourceStyle,
+                templateStyle: subTemplate?.style || null,
+                animation: subAnim,
+                frame: localFrame,
+                fps: settings.fps,
+                outputWidth,
+                outputHeight,
+                viewportSafeZoneHeight: safeZoneHeight,
+                totalTx: evtTx + kfTransform.translateX,
+                totalTy: evtTy + kfTransform.translateY,
+                totalScale: kfTransform.scale,
+                totalRotation: kfTransform.rotation,
+                wordEmphases: subtitle.wordEmphases,
+                keywordAnimation: kwAnim,
+                wordTimings: subtitle.wordTimings,
+                sourceTime,
+                eventStartTime: subtitle.startTime,
+                eventEndTime: subtitle.endTime,
+              });
+            }
           }
         }
       });
@@ -6630,7 +6788,9 @@ function App() {
   };
 
   // Helper to generate dynamic styles for subtitle
-  const getSubtitleStyles = (s: SubtitleStyle | undefined) => {
+  // displayScale = sz.h / 1080 in the viewport so text/borders scale with the safe zone.
+  // The canonical reference is 1080px: fontSize=72 means 72px at 1080p height.
+  const getSubtitleStyles = (s: SubtitleStyle | undefined, displayScale = 1) => {
     if (!s) return { container: {} as React.CSSProperties, text: {} as React.CSSProperties, blendLayers: [] as React.CSSProperties[] };
 
     const base: React.CSSProperties = {
@@ -6653,30 +6813,30 @@ function App() {
 
     const textStyle: React.CSSProperties = {
       fontFamily: s.fontFamily,
-      fontSize: `${s.fontSize}px`,
+      fontSize: `${s.fontSize * displayScale}px`,
       color: s.color,
       fontWeight: s.bold ? 'bold' : 'normal',
       fontStyle: s.italic ? 'italic' : 'normal',
       textTransform: (s.textTransform && s.textTransform !== 'none') ? s.textTransform : undefined,
       lineHeight: 1.4,
-      padding: '8px 16px',
+      padding: `${8 * displayScale}px ${16 * displayScale}px`,
       whiteSpace: 'pre-wrap',
       ...mainEffects,
     };
 
     if (s.backgroundType === 'box') {
       textStyle.backgroundColor = hexToRgba(s.backgroundColor, s.backgroundOpacity);
-      textStyle.border = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
-      textStyle.borderRadius = `${s.boxBorderRadius}px`;
+      textStyle.border = `${s.boxBorderWidth * displayScale}px solid ${s.boxBorderColor}`;
+      textStyle.borderRadius = `${s.boxBorderRadius * displayScale}px`;
     } else if (s.backgroundType === 'rounded') {
       textStyle.backgroundColor = hexToRgba(s.backgroundColor, s.backgroundOpacity);
-      textStyle.borderRadius = `${s.boxBorderRadius}px`;
-      textStyle.border = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
+      textStyle.borderRadius = `${s.boxBorderRadius * displayScale}px`;
+      textStyle.border = `${s.boxBorderWidth * displayScale}px solid ${s.boxBorderColor}`;
     } else if (s.backgroundType === 'stripe') {
       textStyle.backgroundColor = hexToRgba(s.backgroundColor, s.backgroundOpacity);
       textStyle.width = '100%';
-      textStyle.borderTop = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
-      textStyle.borderBottom = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
+      textStyle.borderTop = `${s.boxBorderWidth * displayScale}px solid ${s.boxBorderColor}`;
+      textStyle.borderBottom = `${s.boxBorderWidth * displayScale}px solid ${s.boxBorderColor}`;
       base.paddingLeft = 0;
       base.paddingRight = 0;
     } else if (s.backgroundType === 'outline') {
@@ -6730,7 +6890,7 @@ function App() {
     return { container: base, text: textStyle, blendLayers };
   };
 
-  const getTitleStyles = (s: TitleStyle | undefined, opacity: number) => {
+  const getTitleStyles = (s: TitleStyle | undefined, opacity: number, displayScale = 1) => {
     if (!s) return { container: {} as React.CSSProperties, text: {} as React.CSSProperties, blendLayers: [] as React.CSSProperties[] };
 
     const base: React.CSSProperties = {
@@ -6754,30 +6914,30 @@ function App() {
 
     const textStyle: React.CSSProperties = {
       fontFamily: s.fontFamily,
-      fontSize: `${s.fontSize}px`,
+      fontSize: `${s.fontSize * displayScale}px`,
       color: s.color,
       fontWeight: s.bold ? 'bold' : 'normal',
       fontStyle: s.italic ? 'italic' : 'normal',
       textTransform: (s.textTransform && s.textTransform !== 'none') ? s.textTransform : undefined,
       lineHeight: 1.4,
-      padding: '12px 24px',
+      padding: `${12 * displayScale}px ${24 * displayScale}px`,
       whiteSpace: 'pre-wrap',
       ...mainEffects,
     };
 
     if (s.backgroundType === 'box') {
       textStyle.backgroundColor = hexToRgba(s.backgroundColor, s.backgroundOpacity);
-      textStyle.border = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
-      textStyle.borderRadius = `${s.boxBorderRadius}px`;
+      textStyle.border = `${s.boxBorderWidth * displayScale}px solid ${s.boxBorderColor}`;
+      textStyle.borderRadius = `${s.boxBorderRadius * displayScale}px`;
     } else if (s.backgroundType === 'rounded') {
       textStyle.backgroundColor = hexToRgba(s.backgroundColor, s.backgroundOpacity);
-      textStyle.borderRadius = `${s.boxBorderRadius}px`;
-      textStyle.border = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
+      textStyle.borderRadius = `${s.boxBorderRadius * displayScale}px`;
+      textStyle.border = `${s.boxBorderWidth * displayScale}px solid ${s.boxBorderColor}`;
     } else if (s.backgroundType === 'stripe') {
       textStyle.backgroundColor = hexToRgba(s.backgroundColor, s.backgroundOpacity);
       textStyle.width = '100%';
-      textStyle.borderTop = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
-      textStyle.borderBottom = `${s.boxBorderWidth}px solid ${s.boxBorderColor}`;
+      textStyle.borderTop = `${s.boxBorderWidth * displayScale}px solid ${s.boxBorderColor}`;
+      textStyle.borderBottom = `${s.boxBorderWidth * displayScale}px solid ${s.boxBorderColor}`;
       base.paddingLeft = 0;
       base.paddingRight = 0;
     } else if (s.backgroundType === 'outline') {
@@ -7638,20 +7798,44 @@ function App() {
               <div ref={viewportOuterRef} className="flex-1 relative overflow-hidden flex items-center justify-center bg-black">
               <div
                 ref={viewportContainerRef}
-                className="relative overflow-hidden group"
+                className="relative overflow-hidden group w-full h-full"
                 style={{
-                  width: viewportSize.width || '100%',
-                  height: viewportSize.height || '100%',
-                  maxWidth: '100%',
-                  maxHeight: '100%',
-                  cursor: (trackingMode === 'placing-stabilizer' || trackingMode === 'placing-parent') ? 'crosshair' : (transformTarget === 'global' || primarySelectedSegment) ? (isViewportDragging ? 'grabbing' : 'grab') : 'default',
+                  cursor: (trackingMode === 'placing-stabilizer' || trackingMode === 'placing-parent') ? 'crosshair' : canvasPanStartRef.current ? 'grabbing' : (transformTarget === 'global' || primarySelectedSegment) ? (isViewportDragging ? 'grabbing' : 'grab') : 'default',
                 }}
-                onMouseDown={(e: React.MouseEvent) => { handleTrackingPanStart(e); handleViewportMouseDown(e); }}
+                onMouseDown={(e: React.MouseEvent) => { handleCanvasPanStart(e); handleTrackingPanStart(e); handleViewportMouseDown(e); }}
                 onMouseMove={handleViewportMouseMove}
                 onMouseUp={handleViewportMouseUp}
                 onMouseLeave={handleViewportMouseUp}
-                onWheel={handleTrackingWheel}
+                onWheel={handleViewportWheel}
               >
+                {/* Canvas div — larger pannable region. Safe zone (export AR) is centered inside.
+                    Panned and zoomed via CSS transform. */}
+                <div
+                  style={{
+                    position: 'absolute',
+                    left: '50%',
+                    top: '50%',
+                    width: canvasDims.w,
+                    height: canvasDims.h,
+                    transform: `translate(calc(-50% + ${canvasPan.x}px), calc(-50% + ${canvasPan.y}px)) scale(${canvasZoom})`,
+                    transformOrigin: 'center center',
+                    overflow: 'visible',
+                  }}
+                >
+
+                {/* Safe zone wrapper — centered inside canvas, this is the export AR region.
+                    Video segments live in here so dragging them overflows visibly into the canvas pad. */}
+                <div
+                  className="absolute"
+                  style={{
+                    left: (canvasDims.w - safeZone.w) / 2,
+                    top: (canvasDims.h - safeZone.h) / 2,
+                    width: safeZone.w,
+                    height: safeZone.h,
+                    overflow: 'visible',
+                  }}
+                >
+
                 {/* Zoom wrapper — scales video + tracker overlay together when in tracking tab */}
                 <div
                   className="absolute inset-0"
@@ -7676,9 +7860,9 @@ function App() {
                       const vw = videoEl?.videoWidth || 1920;
                       const vh = videoEl?.videoHeight || 1080;
                       const videoAR = vw / vh;
-                      const containerAR = viewportSize.width / (viewportSize.height || 1);
-                      const displayW = containerAR > videoAR ? viewportSize.height * videoAR : viewportSize.width;
-                      const displayH = containerAR > videoAR ? viewportSize.height : viewportSize.width / videoAR;
+                      const containerAR = safeZone.w / (safeZone.h || 1);
+                      const displayW = containerAR > videoAR ? safeZone.h * videoAR : safeZone.w;
+                      const displayH = containerAR > videoAR ? safeZone.h : safeZone.w / videoAR;
 
                       const txParts: string[] = [];
                       if (transform.translateX !== 0 || transform.translateY !== 0) {
@@ -7701,8 +7885,17 @@ function App() {
                         );
                       }
 
+                      // Size the video element to COVER the safe zone using natural AR.
+                      // Larger dim exceeds safe zone → video overflows into the canvas pad,
+                      // visible behind the stationary safe-zone overlay when panned.
+                      const safeAR = safeZone.w / (safeZone.h || 1);
+                      const fitW = videoAR >= safeAR ? safeZone.h * videoAR : safeZone.w;
+                      const fitH = videoAR >= safeAR ? safeZone.h : safeZone.w / videoAR;
+                      const fitLeft = (safeZone.w - fitW) / 2;
+                      const fitTop = (safeZone.h - fitH) / 2;
+
                       return (
-                        <div key={seg.id} className="absolute inset-0 w-full h-full" style={{ zIndex: segmentZIndices.get(seg.id) ?? (seg.track || 0) * 10 }}>
+                        <div key={seg.id} className="absolute" style={{ left: fitLeft, top: fitTop, width: fitW, height: fitH, zIndex: segmentZIndices.get(seg.id) ?? (seg.track || 0) * 10 }}>
                           {seg.type === 'blank' ? (
                             <div
                               className="w-full h-full flex items-center justify-center p-8 text-center"
@@ -7785,7 +7978,7 @@ function App() {
                       segmentTimelineStart={primarySelectedSegment.timelineStart}
                       videoWidth={videoRefs.current.get(primarySelectedSegment.id)?.videoWidth || 1920}
                       videoHeight={videoRefs.current.get(primarySelectedSegment.id)?.videoHeight || 1080}
-                      viewportSize={viewportSize}
+                      viewportSize={{ width: safeZone.w, height: safeZone.h }}
                       selectedTrackerId={selectedTrackerId}
                       trackingMode={trackingMode}
                       onTrackerClick={setSelectedTrackerId}
@@ -7796,38 +7989,23 @@ function App() {
                   ) : null}
                 </div>
 
-                {/* Viewport Aspect Ratio Overlay — stays outside zoom wrapper */}
-                <ViewportOverlay
-                  containerWidth={viewportSize.width}
-                  containerHeight={viewportSize.height}
-                  aspectRatio={viewportSettings.previewAspectRatio}
-                  opacity={viewportSettings.overlayOpacity}
-                  visible={viewportSettings.showOverlay}
-                />
+                {/* Viewport Aspect Ratio Overlay — moved below to cover full canvas (porthole effect) */}
 
                 {/* Safe zone wrapper — constrains subtitles & titles to aspect ratio */}
                 {(() => {
-                  const arPreset = viewportSettings.previewAspectRatio !== 'custom'
-                    ? ASPECT_RATIO_PRESETS[viewportSettings.previewAspectRatio]
-                    : null;
-                  let sz = { x: 0, y: 0, w: viewportSize.width, h: viewportSize.height };
-                  if (arPreset && viewportSize.width > 0 && viewportSize.height > 0) {
-                    const cr = viewportSize.width / viewportSize.height;
-                    if (cr > arPreset.ratio) {
-                      sz.h = viewportSize.height;
-                      sz.w = viewportSize.height * arPreset.ratio;
-                      sz.x = (viewportSize.width - sz.w) / 2;
-                    } else {
-                      sz.w = viewportSize.width;
-                      sz.h = viewportSize.width / arPreset.ratio;
-                      sz.y = (viewportSize.height - sz.h) / 2;
-                    }
-                  }
+                  // viewportContainerRef is sized to safeZone.w × safeZone.h (locked),
+                  // so all overlays inside use x=0, y=0 — no offset needed within the container.
+                  const sz = { w: safeZone.w, h: safeZone.h, x: 0, y: 0 };
                   return [
                     <div key="safe-zone" ref={safeZoneRef} style={{ position: 'absolute', left: sz.x, top: sz.y, width: sz.w, height: sz.h, pointerEvents: 'none', zIndex: 500 }}>
 
                       {/* Animated Subtitle Overlay */}
                       {activeSubtitleEvent && project.dialogueLayerVisible && (() => {
+                        // Scale all px values (font size, borders, padding) so the viewport
+                        // preview is proportional to the 1080px canonical reference.
+                        // This makes the preview match the export at any window size.
+                        const displayScale = sz.h / 1080;
+                        const scaledStyles = getSubtitleStyles(displayStyle, displayScale);
                         const subTemplate = activeSubtitleEvent.templateOverride || project.activeSubtitleTemplate;
                         const subAnim = subTemplate?.animation;
                         const subTx = activeSubtitleEvent.translateX || 0;
@@ -7906,7 +8084,7 @@ function App() {
                         }
 
                         const containerStyle = {
-                          ...styles.container,
+                          ...scaledStyles.container,
                           transform: fullSubTransform,
                           transformOrigin: subPivotOrigin ?? `${subPivotX}% ${subPivotY}%`,
                           pointerEvents: 'auto' as const,
@@ -7916,15 +8094,37 @@ function App() {
                         // Resolve keyword animation cascade
                         const kwAnim = activeSubtitleEvent.keywordAnimation || subTemplate?.keywordAnimation || project.activeKeywordAnimation || null;
 
+                        // ── Hyperframes caption branch ────────────────────
+                        if (subTemplate?.hyperframes) {
+                          const hfSourceTime = activeDialogueSeg
+                            ? activeDialogueSeg.startTime + (project.currentTime - activeDialogueSeg.timelineStart)
+                            : 0;
+                          return (
+                            <HyperframesCaptionOverlay
+                              config={subTemplate.hyperframes}
+                              text={activeSubtitleEvent.details}
+                              sourceTime={hfSourceTime}
+                              eventStartTime={activeSubtitleEvent.startTime}
+                              eventEndTime={activeSubtitleEvent.endTime}
+                              wordTimings={activeSubtitleEvent.wordTimings}
+                              isPlaying={project.isPlaying}
+                              containerWidth={sz.w}
+                              containerHeight={sz.h}
+                              onMouseDown={handleSubtitleMouseDown}
+                              divRef={subtitleGizmoRef}
+                            />
+                          );
+                        }
+
                         if (subAnim && subAnim.effects.length > 0) {
                           const sourceTime = activeDialogueSeg ? activeDialogueSeg.startTime + (project.currentTime - activeDialogueSeg.timelineStart) : 0;
                           const localFrame = Math.round((sourceTime - activeSubtitleEvent.startTime) * REMOTION_FPS);
                           const { fontSize: _tfs, ...tplStyleNoSize } = subTemplate?.style || {};
-                          const mergedStyle = subTemplate ? { ...tplStyleNoSize, ...styles.text } : styles.text;
+                          const mergedStyle = subTemplate ? { ...tplStyleNoSize, ...scaledStyles.text } : scaledStyles.text;
                           return (
                             <div ref={subtitleGizmoRef} style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
                               <div style={{ display: 'grid' }}>
-                                {styles.blendLayers.map((layerStyle, i) => (
+                                {scaledStyles.blendLayers.map((layerStyle, i) => (
                                   <AnimatedText
                                     key={`blend-${i}`}
                                     text={activeSubtitleEvent.details}
@@ -7966,7 +8166,7 @@ function App() {
                               <AnimatedText
                                 text={activeSubtitleEvent.details}
                                 animation={noOpAnim}
-                                style={styles.text}
+                                style={scaledStyles.text}
                                 frame={0}
                                 fps={REMOTION_FPS}
                                 wordEmphases={activeSubtitleEvent.wordEmphases}
@@ -7981,7 +8181,7 @@ function App() {
                           );
                         }
                         // Extract gradient for per-word application (can't use backgroundClip on box element)
-                        const textGradientVal = (styles.text as any)['--text-gradient'] as string | undefined;
+                        const textGradientVal = (scaledStyles.text as any)['--text-gradient'] as string | undefined;
                         const gradientFill: React.CSSProperties = textGradientVal ? {
                           backgroundImage: textGradientVal,
                           WebkitBackgroundClip: 'text',
@@ -7992,14 +8192,14 @@ function App() {
                         return (
                           <div style={containerStyle} onMouseDown={handleSubtitleMouseDown}>
                             <div style={{ display: 'grid' }}>
-                              {styles.blendLayers.map((layerStyle, i) => (
+                              {scaledStyles.blendLayers.map((layerStyle, i) => (
                                 <div key={`blend-${i}`} style={layerStyle}>
                                   {activeSubtitleEvent.details.split(/(\s+)/).map((token, k) => (
                                     <span key={k}>{token}</span>
                                   ))}
                                 </div>
                               ))}
-                              <div style={{ ...styles.text, gridArea: '1 / 1 / 2 / 2' }}>
+                              <div style={{ ...scaledStyles.text, gridArea: '1 / 1 / 2 / 2' }}>
                                 {activeSubtitleEvent.details.split(/(\s+)/).map((token, i) => {
                                   if (/^\s+$/.test(token)) return <span key={i}>{token}</span>;
                                   const wordIdx = activeSubtitleEvent.details.split(/(\s+)/)
@@ -8038,7 +8238,7 @@ function App() {
                         }
 
                         const titleStyle = project.titleLayer.style || project.titleStyle;
-                        const computedStyles = getTitleStyles(titleStyle, fadeOpacity);
+                        const computedStyles = getTitleStyles(titleStyle, fadeOpacity, sz.h / 1080);
 
                         // Apply transforms if keyframes exist — use pixel values for crop-region-relative positioning
                         let transform = { translateX: 0, translateY: 0, scale: 1, rotation: 0, pivotX: 50, pivotY: 50 };
@@ -8194,14 +8394,13 @@ function App() {
                             const vw = vidEl?.videoWidth || 1920;
                             const vh = vidEl?.videoHeight || 1080;
                             const videoAR = vw / vh;
-                            const containerAR = viewportSize.width / (viewportSize.height || 1);
-                            const displayW = containerAR > videoAR ? viewportSize.height * videoAR : viewportSize.width;
-                            const displayH = containerAR > videoAR ? viewportSize.height : viewportSize.width / videoAR;
+                            const containerAR = sz.w / (sz.h || 1);
+                            const displayW = containerAR > videoAR ? sz.h * videoAR : sz.w;
+                            const displayH = containerAR > videoAR ? sz.h : sz.w / videoAR;
                             elemBounds = { width: displayW, height: displayH };
-                            // inset:0 gizmo — center is in full viewport coords
                             elemCenter = {
-                              x: viewportSize.width / 2 + t.translateX * displayW / 100,
-                              y: viewportSize.height / 2 + t.translateY * displayH / 100,
+                              x: sz.w / 2 + t.translateX * displayW / 100,
+                              y: sz.h / 2 + t.translateY * displayH / 100,
                             };
                             gizmoCropDims = { width: displayW, height: displayH };
                           }
@@ -8213,14 +8412,13 @@ function App() {
                           const vw = vidEl?.videoWidth || 1920;
                           const vh = vidEl?.videoHeight || 1080;
                           const videoAR = vw / vh;
-                          const containerAR = viewportSize.width / (viewportSize.height || 1);
-                          const displayW = containerAR > videoAR ? viewportSize.height * videoAR : viewportSize.width;
-                          const displayH = containerAR > videoAR ? viewportSize.height : viewportSize.width / videoAR;
+                          const containerAR = sz.w / (sz.h || 1);
+                          const displayW = containerAR > videoAR ? sz.h * videoAR : sz.w;
+                          const displayH = containerAR > videoAR ? sz.h : sz.w / videoAR;
                           elemBounds = { width: displayW, height: displayH };
-                          // inset:0 gizmo — center is in full viewport coords
                           elemCenter = {
-                            x: viewportSize.width / 2 + t.translateX * displayW / 100,
-                            y: viewportSize.height / 2 + t.translateY * displayH / 100,
+                            x: sz.w / 2 + t.translateX * displayW / 100,
+                            y: sz.h / 2 + t.translateY * displayH / 100,
                           };
                           gizmoCropDims = { width: displayW, height: displayH };
                         } else if (gizmoTarget.type === 'title' && project.titleLayer) {
@@ -8258,11 +8456,11 @@ function App() {
                             <GizmoOverlay
                               targetType={gizmoTarget.type}
                               transform={gizmoTransform}
-                              viewportSize={{ width: viewportSize.width, height: viewportSize.height }}
+                              viewportSize={{ width: sz.w, height: sz.h }}
                               cropDims={gizmoCropDims}
                               elementBounds={elemBounds}
                               elementCenter={elemCenter}
-                              zoom={activeRightTab === 'tracking' ? trackingZoom : 1}
+                              zoom={canvasZoom * (activeRightTab === 'tracking' ? trackingZoom : 1)}
                               isPlaying={project.isPlaying}
                               onTranslate={handleGizmoTranslate}
                               onScale={handleGizmoScale}
@@ -8276,6 +8474,36 @@ function App() {
                     })()
                   ];
                 })()}
+
+                </div>{/* end safe zone wrapper */}
+
+                {/* Aspect ratio mask — covers full canvas with a porthole over the safe zone.
+                    Darkens video that overflows the export crop region. */}
+                {viewportSettings.showOverlay && viewportSettings.previewAspectRatio !== 'custom' && (() => {
+                  const szLeft = (canvasDims.w - safeZone.w) / 2;
+                  const szTop = (canvasDims.h - safeZone.h) / 2;
+                  return (
+                    <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 200 }}>
+                      <svg width={canvasDims.w} height={canvasDims.h} style={{ position: 'absolute', top: 0, left: 0 }}>
+                        <defs>
+                          <mask id="canvas-porthole-mask">
+                            <rect x="0" y="0" width={canvasDims.w} height={canvasDims.h} fill="white" />
+                            <rect x={szLeft} y={szTop} width={safeZone.w} height={safeZone.h} fill="black" />
+                          </mask>
+                        </defs>
+                        <rect x="0" y="0" width={canvasDims.w} height={canvasDims.h}
+                          fill={`rgba(0,0,0,${viewportSettings.overlayOpacity})`} mask="url(#canvas-porthole-mask)" />
+                      </svg>
+                      <div style={{
+                        position: 'absolute', left: szLeft, top: szTop,
+                        width: safeZone.w, height: safeZone.h,
+                        border: '2px solid rgba(255,255,255,0.8)', boxSizing: 'border-box',
+                        boxShadow: '0 0 0 1px rgba(0,0,0,0.5)',
+                      }} />
+                    </div>
+                  );
+                })()}
+                </div>{/* end canvas div */}
 
               </div>
               </div>

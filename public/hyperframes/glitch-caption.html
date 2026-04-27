@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: transparent !important; }
+  body { overflow: hidden; width: 1920px; height: 1080px; }
+  #root {
+    position: absolute;
+    bottom: var(--bottom, 100px);
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    max-width: 1600px;
+    width: 100%;
+    padding: 0 60px;
+    font-family: var(--font-family, 'Impact, Arial Black, sans-serif');
+    font-weight: var(--weight, 900);
+    letter-spacing: var(--letter-spacing, 2px);
+    text-transform: var(--text-transform, uppercase);
+  }
+  .stack {
+    position: relative;
+    display: inline-block;
+    font-size: var(--size, 84px);
+    line-height: 1;
+  }
+  .layer { display: block; }
+  .layer.red, .layer.blue {
+    position: absolute; top: 0; left: 0; width: 100%;
+    mix-blend-mode: screen; will-change: transform;
+  }
+  .layer.red  { color: var(--red-channel,  #ff0044); }
+  .layer.blue { color: var(--blue-channel, #00ddff); }
+  .layer.main { color: var(--color, #ffffff);
+                text-shadow: 0 0 var(--shadow-blur, 0px) var(--shadow-color, transparent);
+                position: relative; }
+</style>
+</head>
+<body>
+<div id="root"
+  data-composition-id="glitch-caption"
+  data-width="1920"
+  data-height="1080"
+  data-var-text="string"
+  data-var-color="color"
+  data-var-red-channel="color"
+  data-var-blue-channel="color"
+  data-var-size="number"
+  data-var-split-amount="number"
+  data-var-jitter-amount="number"
+  data-var-jitter-freq="number"
+  data-var-shadow-color="color"
+  data-var-shadow-blur="number"
+  data-var-bottom="number"
+  data-var-font-family="font"
+  data-var-weight="string"
+  data-var-letter-spacing="number"
+  data-var-text-transform="select"
+  data-var-duration="number"
+></div>
+<script>
+  const p = new URLSearchParams(location.search);
+  const split    = parseFloat(p.get('split-amount')  || '6');
+  const jitter   = parseFloat(p.get('jitter-amount') || '3');
+  const freq     = parseFloat(p.get('jitter-freq')   || '8');
+  const duration = parseFloat(p.get('duration')      || '0.3');
+
+  const root = document.getElementById('root');
+  root.style.setProperty('--color',          p.get('color')           ?? '#ffffff');
+  root.style.setProperty('--red-channel',    p.get('red-channel')     ?? '#ff0044');
+  root.style.setProperty('--blue-channel',   p.get('blue-channel')    ?? '#00ddff');
+  root.style.setProperty('--size',           (p.get('size') ?? '84') + 'px');
+  root.style.setProperty('--shadow-color',   p.get('shadow-color')    ?? 'transparent');
+  root.style.setProperty('--shadow-blur',    (p.get('shadow-blur') ?? '0') + 'px');
+  root.style.setProperty('--bottom',         (p.get('bottom') ?? '100') + 'px');
+  root.style.setProperty('--font-family',    p.get('font-family')     ?? 'Impact, Arial Black, sans-serif');
+  root.style.setProperty('--weight',         p.get('weight')          ?? '900');
+  root.style.setProperty('--letter-spacing', (p.get('letter-spacing') ?? '2') + 'px');
+  root.style.setProperty('--text-transform', p.get('text-transform')  ?? 'uppercase');
+
+  let currentTl = null;
+  let redEl = null, blueEl = null;
+
+  function init(text) {
+    root.innerHTML = '';
+
+    const stack = document.createElement('div');
+    stack.className = 'stack';
+    redEl  = document.createElement('span'); redEl.className  = 'layer red';  redEl.textContent  = text || '';
+    blueEl = document.createElement('span'); blueEl.className = 'layer blue'; blueEl.textContent = text || '';
+    const main = document.createElement('span'); main.className = 'layer main'; main.textContent = text || '';
+    stack.appendChild(redEl); stack.appendChild(blueEl); stack.appendChild(main);
+    root.appendChild(stack);
+
+    if (currentTl) currentTl.kill();
+    const tl = gsap.timeline({ paused: true });
+    if (text) {
+      tl.from(stack, { opacity: 0, scale: 0.9, duration, ease: 'power2.out' }, 0);
+    }
+    tl.to({}, { duration: 1 }, 0);
+
+    tl.eventCallback('onUpdate', () => {
+      if (!text || !redEl) return;
+      const t = tl.time();
+      const jx = Math.sin(t * freq * 7.13) * jitter;
+      const jy = Math.cos(t * freq * 5.71) * jitter;
+      redEl.style.transform  = 'translate(' + (-split + jx) + 'px,' + jy  + 'px)';
+      blueEl.style.transform = 'translate(' + ( split - jx) + 'px,' + (-jy) + 'px)';
+    });
+
+    currentTl = tl;
+    window.__timelines = window.__timelines || {};
+    window.__timelines['glitch-caption'] = tl;
+  }
+
+  init(p.get('text') || '');
+
+  window.__hyInit          = init;
+  window.__hySetActiveWord = function() {}; // no per-word highlight for glitch
+</script>
+</body>
+</html>

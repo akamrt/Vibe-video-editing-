@@ -909,9 +909,10 @@ export function drawSubtitleOnCanvas(opts: DrawSubtitleOptions): void {
     // Apply text transform (canvas doesn't support CSS textTransform)
     const text = applyTextTransform(rawText, (style as any).textTransform);
 
-    // Scale factor: maps viewport CSS pixels to export canvas pixels
-    // e.g. viewport is 360px tall, export is 1080px → scale = 3x
-    const scaleFactor = outputHeight / viewportSafeZoneHeight;
+    // Scale factor: maps canonical 1080px reference to export canvas pixels.
+    // Both viewport (sz.h / 1080) and export (outputHeight / 1080) use the same
+    // 1080px base so font sizes are consistent at any window size or resolution.
+    const scaleFactor = outputHeight / 1080;
     const rawFontSize = style.fontSize || 16;
     const fontSize = rawFontSize * scaleFactor;
 

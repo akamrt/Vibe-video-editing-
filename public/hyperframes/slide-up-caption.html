@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: transparent !important; }
+  body { overflow: hidden; width: 1920px; height: 1080px; }
+  #root {
+    position: absolute;
+    bottom: var(--bottom, 80px);
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    max-width: 1600px;
+    width: 100%;
+    padding: 0 60px;
+    overflow: hidden;
+  }
+  .line-wrap { overflow: hidden; display: block; }
+  .line {
+    display: block;
+    font-family: var(--font-family, 'Arial, sans-serif');
+    font-size: var(--size, 72px);
+    font-weight: var(--weight, 700);
+    color: var(--color, #ffffff);
+    text-shadow: 0 2px 12px var(--shadow-color, rgba(0,0,0,0.8));
+    letter-spacing: var(--letter-spacing, -0.5px);
+    text-transform: var(--text-transform, none);
+    line-height: 1.15;
+    will-change: transform, opacity;
+  }
+  .bg-stripe {
+    background: var(--bg-color, transparent);
+    padding: var(--bg-padding, 8px 20px);
+    display: inline-block;
+  }
+</style>
+</head>
+<body>
+<div id="root"
+  data-composition-id="slide-up-caption"
+  data-width="1920"
+  data-height="1080"
+  data-var-text="string"
+  data-var-color="color"
+  data-var-size="number"
+  data-var-weight="select:400,600,700,900"
+  data-var-shadow-color="color"
+  data-var-bg-color="color"
+  data-var-duration="number"
+  data-var-stagger="number"
+  data-var-bottom="number"
+  data-var-font-family="font"
+  data-var-letter-spacing="number"
+  data-var-text-transform="select"
+></div>
+<script>
+  const p = new URLSearchParams(location.search);
+  const color       = p.get('color')        || '#ffffff';
+  const weight      = p.get('weight')       || '700';
+  const shadowColor = p.get('shadow-color') || 'rgba(0,0,0,0.8)';
+  const bgColor     = p.get('bg-color')     || 'transparent';
+  const duration    = parseFloat(p.get('duration') || '0.55');
+  const stagger     = parseFloat(p.get('stagger')  || '0.1');
+
+  const hlEnabled   = p.get('highlight-enabled') !== 'false';
+  const hlColor     = p.get('highlight-color')   || '#FFD700';
+  const hlGlow      = p.get('highlight-glow')    || 'transparent';
+  const hlGlowBlur  = parseFloat(p.get('highlight-glow-blur') || '0');
+  const baseShadow  = `0 2px 12px ${shadowColor}`;
+  const activeGlowSh = hlEnabled && hlGlowBlur > 0 && hlGlow !== 'transparent'
+    ? `0 0 ${hlGlowBlur}px ${hlGlow}, ${baseShadow}` : baseShadow;
+
+  const root = document.getElementById('root');
+  root.style.setProperty('--color',          color);
+  root.style.setProperty('--size',           (p.get('size') ?? '72') + 'px');
+  root.style.setProperty('--weight',         weight);
+  root.style.setProperty('--shadow-color',   shadowColor);
+  root.style.setProperty('--bg-color',       bgColor);
+  root.style.setProperty('--bottom',         (p.get('bottom') ?? '80') + 'px');
+  root.style.setProperty('--font-family',    p.get('font-family')    ?? 'Arial, sans-serif');
+  root.style.setProperty('--letter-spacing', (p.get('letter-spacing') ?? '-0.5') + 'px');
+  root.style.setProperty('--text-transform', p.get('text-transform') ?? 'none');
+
+  let currentTl     = null;
+  let lineElsModule = [];
+  let lineWordRanges = []; // [{start, end}] — cumulative word index per line
+
+  // Map a word index (from AssemblyAI) to a line index
+  function wordToLine(wordIdx) {
+    if (wordIdx < 0 || !lineWordRanges.length) return -1;
+    for (let i = 0; i < lineWordRanges.length; i++) {
+      if (wordIdx <= lineWordRanges[i].end) return i;
+    }
+    return lineWordRanges.length - 1;
+  }
+
+  function applyHighlight(wordIdx) {
+    const lineIdx = wordToLine(wordIdx);
+    lineElsModule.forEach((el, i) => {
+      if (i === lineIdx) {
+        el.style.color      = hlEnabled ? hlColor : color;
+        el.style.textShadow = hlEnabled ? activeGlowSh : baseShadow;
+        el.style.opacity    = '1';
+      } else if (i < lineIdx) {
+        el.style.color      = color;
+        el.style.textShadow = baseShadow;
+        el.style.opacity    = '0.6';
+      } else {
+        el.style.color      = '';
+        el.style.textShadow = baseShadow;
+        el.style.opacity    = '';
+      }
+    });
+  }
+
+  function splitLines(text) {
+    const ws = (text || '').split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = '';
+    for (const w of ws) {
+      if (cur.length + w.length + 1 > 40 && cur) { lines.push(cur.trim()); cur = w + ' '; }
+      else cur += w + ' ';
+    }
+    if (cur.trim()) lines.push(cur.trim());
+    return lines;
+  }
+
+  function init(text) {
+    root.innerHTML = '';
+    lineWordRanges = [];
+
+    const lines = splitLines(text);
+    let wordCount = 0;
+    lineElsModule = lines.map(l => {
+      const lineWordCount = l.split(/\s+/).filter(Boolean).length;
+      lineWordRanges.push({ start: wordCount, end: wordCount + lineWordCount - 1 });
+      wordCount += lineWordCount;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'line-wrap';
+      const stripe = document.createElement('div');
+      stripe.className = 'bg-stripe';
+      const line = document.createElement('span');
+      line.className = 'line';
+      line.textContent = l;
+      line.style.textShadow = baseShadow;
+      stripe.appendChild(line);
+      wrap.appendChild(stripe);
+      root.appendChild(wrap);
+      return line;
+    });
+
+    if (currentTl) currentTl.kill();
+    const tl = gsap.timeline({ paused: true });
+    if (lineElsModule.length) {
+      // opacity removed — applyHighlight owns it; overflow:hidden clips during slide anyway
+      tl.from(lineElsModule, { y: '100%', duration, stagger, ease: 'power3.out' });
+      tl.to({}, { duration: Math.max(0.001, stagger * lines.length + 0.3) }, 0);
+    }
+
+    currentTl = tl;
+    window.__timelines = window.__timelines || {};
+    window.__timelines['slide-up-caption'] = tl;
+  }
+
+  init(p.get('text') || '');
+
+  window.__hyInit          = init;
+  window.__hySetActiveWord = applyHighlight;
+</script>
+</body>
+</html>

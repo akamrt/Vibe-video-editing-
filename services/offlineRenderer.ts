@@ -15,6 +15,7 @@ import { Muxer as Mp4Muxer, ArrayBufferTarget as Mp4Target } from 'mp4-muxer';
 import { getInterpolatedTransform, ASPECT_RATIO_PRESETS } from '../utils/interpolation';
 import { renderTransition as renderTransitionCanvas } from '../utils/transitionRenderer';
 import { drawSubtitleOnCanvas } from '../utils/canvasSubtitleRenderer';
+import { drawHyperframesCaption } from '../utils/hyperframesCanvasRenderer';
 import { buildAudioChain, normalizeLoudness, processBufferThroughRNNoise } from '../utils/audioProcessingChain';
 import type {
   ExportSettings,
@@ -111,6 +112,10 @@ export class OfflineRenderer {
 
   async render(): Promise<void> {
     const { settings, deps, callbacks } = this;
+
+    // Reset per-render HF log gate so each export logs the first HF subtitle again
+    (globalThis as any).__hfOfflineLogged = false;
+    console.log(`[OfflineRenderer] Start | activeSubtitleTemplate=${deps.activeSubtitleTemplate?.name || 'null'} | globalHasHF=${!!(deps.activeSubtitleTemplate as any)?.hyperframes} | hfSrc=${(deps.activeSubtitleTemplate as any)?.hyperframes?.compositionSrc || 'n/a'}`);
 
     deps.setIsExporting(true);
     await sleep(500);
@@ -495,15 +500,57 @@ export class OfflineRenderer {
               let kfTransform = { translateX: 0, translateY: 0, scale: 1, rotation: 0 };
               if (subtitle.keyframes?.length) kfTransform = getInterpolatedTransform(subtitle.keyframes, (activeSeg.startTime + clipTime) - subtitle.startTime);
               const sourceTime = activeSeg.startTime + clipTime;
-              drawSubtitleOnCanvas({
-                ctx, text: subtitle.details, style: sourceStyle, templateStyle: subTemplate?.style || null,
-                animation: subTemplate?.animation || null, frame: Math.round((sourceTime - subtitle.startTime) * fps), fps,
-                outputWidth, outputHeight, viewportSafeZoneHeight: deps.safeZoneHeight,
-                totalTx: (subtitle.translateX || 0) + kfTransform.translateX, totalTy: (subtitle.translateY || 0) + kfTransform.translateY,
-                totalScale: kfTransform.scale, totalRotation: kfTransform.rotation,
-                wordEmphases: subtitle.wordEmphases, keywordAnimation: subtitle.keywordAnimation || subTemplate?.keywordAnimation || deps.activeKeywordAnimation || null,
-                wordTimings: subtitle.wordTimings, sourceTime, eventStartTime: subtitle.startTime, eventEndTime: subtitle.endTime,
-              });
+
+              // ── Hyperframes canvas renderer ─────────────────────────────
+              if (subTemplate?.hyperframes) {
+                if (!(globalThis as any).__hfOfflineLogged) {
+                  (globalThis as any).__hfOfflineLogged = true;
+                  console.log(`[OfflineRenderer HF] First HF subtitle: "${subtitle.details.slice(0,40)}" | src=${subTemplate.hyperframes.compositionSrc} | varCount=${Object.keys(subTemplate.hyperframes.variables || {}).length}`);
+                }
+                try {
+                  drawHyperframesCaption({
+                    ctx,
+                    text: subtitle.details,
+                    config: subTemplate.hyperframes,
+                    timeOffset: sourceTime - subtitle.startTime,
+                    mediaTime,
+                    subtitleStart: subtitle.startTime,
+                    subtitleEnd: subtitle.endTime,
+                    wordTimings: subtitle.wordTimings,
+                    outputWidth,
+                    outputHeight,
+                  });
+                } catch (hfErr) {
+                  console.error('[OfflineRenderer] drawHyperframesCaption threw:', hfErr);
+                  // Fallback: plain text so subtitle is never invisible
+                  ctx.save();
+                  ctx.globalAlpha = 1;
+                  ctx.globalCompositeOperation = 'source-over';
+                  ctx.font = `bold ${Math.round(outputHeight * 0.074)}px Impact, Arial`;
+                  ctx.fillStyle = '#ffffff';
+                  ctx.strokeStyle = '#000000';
+                  ctx.lineWidth = Math.round(outputHeight * 0.003);
+                  ctx.lineJoin = 'round';
+                  ctx.textAlign = 'center';
+                  ctx.textBaseline = 'alphabetic';
+                  ctx.shadowColor = '#000000';
+                  ctx.shadowBlur = 8;
+                  ctx.strokeText(subtitle.details, outputWidth / 2, outputHeight - Math.round(outputHeight * 0.074));
+                  ctx.fillText(subtitle.details, outputWidth / 2, outputHeight - Math.round(outputHeight * 0.074));
+                  ctx.restore();
+                }
+              } else {
+                // ── Standard canvas subtitle renderer ───────────────────────
+                drawSubtitleOnCanvas({
+                  ctx, text: subtitle.details, style: sourceStyle, templateStyle: subTemplate?.style || null,
+                  animation: subTemplate?.animation || null, frame: Math.round((sourceTime - subtitle.startTime) * fps), fps,
+                  outputWidth, outputHeight, viewportSafeZoneHeight: deps.safeZoneHeight,
+                  totalTx: (subtitle.translateX || 0) + kfTransform.translateX, totalTy: (subtitle.translateY || 0) + kfTransform.translateY,
+                  totalScale: kfTransform.scale, totalRotation: kfTransform.rotation,
+                  wordEmphases: subtitle.wordEmphases, keywordAnimation: subtitle.keywordAnimation || subTemplate?.keywordAnimation || deps.activeKeywordAnimation || null,
+                  wordTimings: subtitle.wordTimings, sourceTime, eventStartTime: subtitle.startTime, eventEndTime: subtitle.endTime,
+                });
+              }
             }
           }
         }

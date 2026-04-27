@@ -639,12 +639,32 @@ export interface TextAnimation {
 // Backwards compatibility wrapper (if needed) or just replace AnimationPreset
 export type AnimationPreset = TextAnimation;
 
+export interface HyperframesVariable {
+  name: string;
+  type: 'string' | 'color' | 'number' | 'boolean' | 'select' | 'font';
+  /** Optional grouping (e.g. 'Text', 'Animation', 'Effects', 'Karaoke') for form sections */
+  group?: 'Text' | 'Animation' | 'Effects' | 'Karaoke';
+  label?: string;
+  defaultValue?: string | number | boolean;
+  options?: string[];   // for 'select' type
+  min?: number;         // for 'number' type
+  max?: number;
+  step?: number;
+}
+
+export interface HyperframesConfig {
+  compositionSrc: string;                           // e.g. '/hyperframes/bounce-caption.html'
+  variables: Record<string, string | number | boolean>;  // current user values
+  variableSchema: HyperframesVariable[];            // parsed from composition data-var-* attrs
+}
+
 export interface SubtitleTemplate {
   id: string;
   name: string;
   style: CSSProperties;
   animation: TextAnimation; // Updated to use the new rich type
   keywordAnimation?: TextAnimation; // optional keyword-specific animation bundled with template
+  hyperframes?: HyperframesConfig; // when set, Hyperframes renders the caption overlay
 }
 
 export const REMOTION_FPS = 30;

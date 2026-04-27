@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: transparent !important; }
+  body { overflow: hidden; width: 1920px; height: 1080px; }
+  #root {
+    position: absolute;
+    bottom: var(--bottom, 80px);
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    max-width: 1600px;
+    width: 100%;
+    padding: 0 60px;
+  }
+  .word {
+    display: inline-block;
+    font-family: var(--font-family, 'Impact, Arial Black, sans-serif');
+    font-size: var(--size, 80px);
+    font-weight: var(--weight, 900);
+    letter-spacing: var(--letter-spacing, 0px);
+    text-transform: var(--text-transform, uppercase);
+    color: var(--color, #ffffff);
+    text-shadow:
+      0 4px 0 var(--shadow-color, #000000),
+      0 0 20px rgba(0,0,0,0);
+    -webkit-text-stroke: var(--stroke-width, 3px) var(--stroke-color, #000000);
+    margin: 0 8px;
+    will-change: transform, opacity;
+  }
+  .bg-box {
+    display: inline-block;
+    background: var(--bg-color, transparent);
+    border-radius: var(--bg-radius, 8px);
+    padding: var(--bg-padding, 12px 24px);
+  }
+</style>
+</head>
+<body>
+<div id="root"
+  data-composition-id="bounce-caption"
+  data-width="1920"
+  data-height="1080"
+  data-var-text="string"
+  data-var-color="color"
+  data-var-size="number"
+  data-var-shadow-color="color"
+  data-var-stroke-color="color"
+  data-var-stroke-width="number"
+  data-var-bg-color="color"
+  data-var-bg-radius="number"
+  data-var-duration="number"
+  data-var-stagger="number"
+  data-var-bottom="number"
+  data-var-font-family="font"
+  data-var-weight="string"
+  data-var-letter-spacing="number"
+  data-var-text-transform="select"
+></div>
+<script>
+  const p = new URLSearchParams(location.search);
+  const color       = p.get('color')        || '#ffffff';
+  const shadowColor = p.get('shadow-color') || '#000000';
+  const strokeColor = p.get('stroke-color') || '#000000';
+  const strokeWidth = p.get('stroke-width') || '3';
+  const bgColor     = p.get('bg-color')     || 'transparent';
+  const bgRadius    = p.get('bg-radius')    || '8';
+  const duration    = parseFloat(p.get('duration') || '0.5');
+  const stagger     = parseFloat(p.get('stagger')  || '0.06');
+
+  const hlEnabled   = p.get('highlight-enabled') !== 'false';
+  const hlColor     = p.get('highlight-color')   || '#FFD700';
+  const hlGlow      = p.get('highlight-glow')    || 'transparent';
+  const hlGlowBlur  = parseFloat(p.get('highlight-glow-blur') || '0');
+  const baseShadow  = `0 4px 0 ${shadowColor}`;
+  const activeGlowSh = hlEnabled && hlGlowBlur > 0 && hlGlow !== 'transparent'
+    ? `0 0 ${hlGlowBlur}px ${hlGlow}, ${baseShadow}` : baseShadow;
+
+  const root = document.getElementById('root');
+  root.style.setProperty('--color',          color);
+  root.style.setProperty('--size',           (p.get('size') ?? '80') + 'px');
+  root.style.setProperty('--shadow-color',   shadowColor);
+  root.style.setProperty('--stroke-color',   strokeColor);
+  root.style.setProperty('--stroke-width',   strokeWidth + 'px');
+  root.style.setProperty('--bg-color',       bgColor);
+  root.style.setProperty('--bg-radius',      bgRadius + 'px');
+  root.style.setProperty('--bottom',         (p.get('bottom') ?? '80') + 'px');
+  root.style.setProperty('--font-family',    p.get('font-family')    ?? 'Impact, Arial Black, sans-serif');
+  root.style.setProperty('--weight',         p.get('weight')         ?? '900');
+  root.style.setProperty('--letter-spacing', (p.get('letter-spacing') ?? '0') + 'px');
+  root.style.setProperty('--text-transform', p.get('text-transform') ?? 'uppercase');
+
+  let currentTl = null;
+  let wordElsModule = [];
+
+  function applyHighlight(activeIdx) {
+    wordElsModule.forEach((el, i) => {
+      if (i === activeIdx) {
+        el.style.color      = hlEnabled ? hlColor : color;
+        el.style.textShadow = hlEnabled ? activeGlowSh : baseShadow;
+        el.style.opacity    = '1';
+      } else if (i < activeIdx) {
+        el.style.color      = color;
+        el.style.textShadow = baseShadow;
+        el.style.opacity    = '0.6';
+      } else {
+        el.style.color      = '';
+        el.style.textShadow = baseShadow;
+        el.style.opacity    = '';
+      }
+    });
+  }
+
+  function init(text) {
+    root.innerHTML = '';
+
+    const box = document.createElement('div');
+    box.className = 'bg-box';
+    root.appendChild(box);
+
+    const wordList = (text || '').split(/\s+/).filter(Boolean);
+    wordElsModule = wordList.map(w => {
+      const el = document.createElement('span');
+      el.className = 'word';
+      el.textContent = w;
+      el.style.textShadow = baseShadow;
+      box.appendChild(el);
+      return el;
+    });
+
+    if (currentTl) currentTl.kill();
+    const tl = gsap.timeline({ paused: true });
+    if (wordElsModule.length) {
+      // opacity removed — applyHighlight owns it; scale:0.4 is already near-invisible
+      tl.from(wordElsModule, {
+        y: -60, scale: 0.4, rotation: -15,
+        duration, stagger, ease: 'back.out(2)',
+      });
+    }
+    tl.to({}, { duration: Math.max(0.001, stagger * wordElsModule.length + 0.3) }, 0);
+
+    currentTl = tl;
+    window.__timelines = window.__timelines || {};
+    window.__timelines['bounce-caption'] = tl;
+  }
+
+  init(p.get('text') || '');
+
+  window.__hyInit         = init;
+  window.__hySetActiveWord = applyHighlight;
+</script>
+</body>
+</html>

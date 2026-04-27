@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: transparent !important; }
+  body { overflow: hidden; width: 1920px; height: 1080px; }
+  #root {
+    position: absolute;
+    bottom: var(--bottom, 80px);
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    max-width: 1600px;
+    width: 100%;
+    padding: 0 60px;
+  }
+  .caption-text {
+    display: inline-block;
+    font-family: var(--font-family, 'Arial, sans-serif');
+    font-size: var(--size, 80px);
+    font-weight: var(--weight, 900);
+    text-transform: var(--text-transform, none);
+    letter-spacing: var(--letter-spacing, 2px);
+    color: var(--color, #ffffff);
+    text-shadow:
+      0 0 7px  var(--glow, #fff),
+      0 0 10px var(--glow, #fff),
+      0 0 21px var(--glow, #fff),
+      0 0 42px var(--glow-outer, #ff00ff),
+      0 0 82px var(--glow-outer, #ff00ff),
+      0 0 92px var(--glow-outer, #ff00ff);
+    will-change: opacity, transform;
+  }
+</style>
+</head>
+<body>
+<div id="root"
+  data-composition-id="neon-caption"
+  data-width="1920"
+  data-height="1080"
+  data-var-text="string"
+  data-var-color="color"
+  data-var-glow="color"
+  data-var-glow-outer="color"
+  data-var-size="number"
+  data-var-duration="number"
+  data-var-bottom="number"
+  data-var-font-family="font"
+  data-var-weight="string"
+  data-var-letter-spacing="number"
+  data-var-text-transform="select"
+></div>
+<script>
+  const p = new URLSearchParams(location.search);
+  const duration = parseFloat(p.get('duration') || '0.6');
+
+  const root = document.getElementById('root');
+  root.style.setProperty('--color',          p.get('color')           ?? '#ffffff');
+  root.style.setProperty('--glow',           p.get('glow')            ?? '#ffffff');
+  root.style.setProperty('--glow-outer',     p.get('glow-outer')      ?? '#ff00ff');
+  root.style.setProperty('--size',           (p.get('size') ?? '80') + 'px');
+  root.style.setProperty('--bottom',         (p.get('bottom') ?? '80') + 'px');
+  root.style.setProperty('--font-family',    p.get('font-family')     ?? 'Arial, sans-serif');
+  root.style.setProperty('--weight',         p.get('weight')          ?? '900');
+  root.style.setProperty('--letter-spacing', (p.get('letter-spacing') ?? '2') + 'px');
+  root.style.setProperty('--text-transform', p.get('text-transform')  ?? 'none');
+
+  let currentTl = null;
+  let elRef = null;
+
+  function init(text) {
+    root.innerHTML = '';
+
+    const el = document.createElement('span');
+    el.className = 'caption-text';
+    el.textContent = text || '';
+    root.appendChild(el);
+    elRef = el;
+
+    if (currentTl) currentTl.kill();
+    const tl = gsap.timeline({ paused: true });
+    if (text) {
+      tl.from(el, { opacity: 0, duration: duration * 0.3, ease: 'power2.in' })
+        .to(el, { opacity: 0.4, duration: duration * 0.1 })
+        .to(el, { opacity: 1,   duration: duration * 0.1 })
+        .to(el, { opacity: 0.7, duration: duration * 0.1 })
+        .to(el, { opacity: 1,   duration: duration * 0.4, ease: 'power1.out' });
+    }
+
+    currentTl = tl;
+    window.__timelines = window.__timelines || {};
+    window.__timelines['neon-caption'] = tl;
+  }
+
+  init(p.get('text') || '');
+
+  window.__hyInit          = init;
+  window.__hySetActiveWord = function() {}; // no per-word highlight for neon
+</script>
+</body>
+</html>

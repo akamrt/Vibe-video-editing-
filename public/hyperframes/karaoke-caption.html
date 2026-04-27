@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3/dist/gsap.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: transparent !important; }
+  body { overflow: hidden; width: 1920px; height: 1080px; }
+  #root {
+    position: absolute;
+    bottom: var(--bottom, 100px);
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    max-width: 1600px;
+    width: 100%;
+    padding: 0 60px;
+    font-family: var(--font-family, 'Impact, Arial Black, sans-serif');
+    font-weight: var(--weight, 900);
+    letter-spacing: var(--letter-spacing, 0px);
+    text-transform: var(--text-transform, uppercase);
+  }
+  .word {
+    display: inline-block;
+    font-size: var(--size, 80px);
+    color: var(--color, #ffffff);
+    -webkit-text-stroke: var(--stroke-width, 3px) var(--stroke-color, #000000);
+    margin: 0 8px;
+    padding: 2px 6px;
+    will-change: transform, opacity;
+    transform-origin: center bottom;
+  }
+</style>
+</head>
+<body>
+<div id="root"
+  data-composition-id="karaoke-caption"
+  data-width="1920" data-height="1080"
+  data-var-text="string"
+  data-var-color="color"
+  data-var-active-color="color"
+  data-var-past-color="color"
+  data-var-size="number"
+  data-var-shadow-color="color"
+  data-var-shadow-blur="number"
+  data-var-stroke-color="color"
+  data-var-stroke-width="number"
+  data-var-active-scale="number"
+  data-var-active-glow="color"
+  data-var-active-glow-blur="number"
+  data-var-active-bg-color="color"
+  data-var-bottom="number"
+  data-var-font-family="font"
+  data-var-weight="string"
+  data-var-letter-spacing="number"
+  data-var-text-transform="select"
+  data-var-duration="number"
+></div>
+<script>
+  const p = new URLSearchParams(location.search);
+  const baseColor      = p.get('color')            || '#ffffff';
+  const activeColor    = p.get('active-color')     || '#FFD700';
+  const pastColor      = p.get('past-color')       || '#ffffff';
+  const shadowColor    = p.get('shadow-color')     || 'rgba(0,0,0,0.8)';
+  const shadowBlur     = p.get('shadow-blur')      || '10';
+  const activeScale    = parseFloat(p.get('active-scale')     || '1.2');
+  const activeGlow     = p.get('active-glow')      || activeColor;
+  const activeGlowBlur = parseFloat(p.get('active-glow-blur') || '18');
+  const activeBg       = p.get('active-bg-color')  || 'transparent';
+  const duration       = parseFloat(p.get('duration') || '0.3');
+  const baseShadow     = `0 0 ${shadowBlur}px ${shadowColor}`;
+  const activeGlowSh   = activeGlowBlur > 0 && activeGlow !== 'transparent'
+    ? `0 0 ${activeGlowBlur}px ${activeGlow}, ${baseShadow}` : baseShadow;
+
+  const root = document.getElementById('root');
+  root.style.setProperty('--color',          baseColor);
+  root.style.setProperty('--stroke-color',   p.get('stroke-color')   || '#000000');
+  root.style.setProperty('--stroke-width',   (p.get('stroke-width')  || '3') + 'px');
+  root.style.setProperty('--bottom',         (p.get('bottom')        || '100') + 'px');
+  root.style.setProperty('--font-family',    p.get('font-family')    || 'Impact, Arial Black, sans-serif');
+  root.style.setProperty('--weight',         p.get('weight')         || '900');
+  root.style.setProperty('--letter-spacing', (p.get('letter-spacing')|| '0') + 'px');
+  root.style.setProperty('--text-transform', p.get('text-transform') || 'uppercase');
+  root.style.setProperty('--size',           (p.get('size')          || '80') + 'px');
+
+  // Module-level word elements — shared between init and __hySetActiveWord
+  let wordEls = [];
+  let currentTl = null;
+
+  function applyHighlight(activeIdx) {
+    wordEls.forEach((el, i) => {
+      if (i === activeIdx) {
+        el.style.color      = activeColor;
+        el.style.textShadow = activeGlowSh;
+        el.style.transform  = 'scale(' + activeScale + ')';
+        el.style.background = activeBg !== 'transparent' ? activeBg : '';
+        el.style.opacity    = '1';
+      } else if (i < activeIdx) {
+        el.style.color      = pastColor;
+        el.style.textShadow = baseShadow;
+        el.style.transform  = '';
+        el.style.background = '';
+        el.style.opacity    = '0.6';
+      } else {
+        el.style.color      = '';
+        el.style.textShadow = baseShadow;
+        el.style.transform  = '';
+        el.style.background = '';
+        el.style.opacity    = '';
+      }
+    });
+  }
+
+  function init(text) {
+    root.innerHTML = '';
+    const wordList = (text || '').split(/\s+/).filter(Boolean);
+    wordEls = wordList.map(w => {
+      const el = document.createElement('span');
+      el.className = 'word';
+      el.textContent = w;
+      el.style.textShadow = baseShadow;
+      root.appendChild(el);
+      root.appendChild(document.createTextNode('\u00A0'));
+      return el;
+    });
+
+    if (currentTl) currentTl.kill();
+    const tl = gsap.timeline({ paused: true });
+    if (wordEls.length) {
+      // Scale pop-in only — opacity owned entirely by applyHighlight (no conflict)
+      tl.from(wordEls, { scale: 0.6, duration: duration * 0.8, stagger: 0.03, ease: 'back.out(2)' }, 0);
+    }
+    // Hold to give the animation something to seek into
+    tl.to({}, { duration: Math.max(0.001, 2.0) }, 0);
+
+    currentTl = tl;
+    window.__timelines = window.__timelines || {};
+    window.__timelines['karaoke-caption'] = tl;
+  }
+
+  init(p.get('text') || '');
+
+  // Called by the overlay on every sourceTime update with the active word index
+  // computed from real AssemblyAI word timings (or synthetic fallback).
+  window.__hyInit         = init;
+  window.__hySetActiveWord = applyHighlight;
+</script>
+</body>
+</html>

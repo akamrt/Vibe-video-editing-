@@ -38,6 +38,17 @@ www.youtube.com_cookies.txt
 *.vtt
 bin/
 
+# User data — exports and saved projects
+exports/
+saves/
+NUL
+
+# Windows shortcuts
+*.lnk
+
+# Claude local config
+.claude/
+
 # Python
 __pycache__/
 *.pyc
