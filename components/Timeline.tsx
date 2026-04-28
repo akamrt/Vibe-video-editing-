@@ -49,6 +49,7 @@ interface TimelineProps {
   onSelectGraphicLayer?: (id: string | null) => void;
   onUpdateGraphicLayer?: (id: string, patch: Partial<GraphicLayer>) => void;
   onDeleteGraphicLayer?: (id: string) => void;
+  onClearSelection?: () => void;
 }
 
 /** Small canvas component that renders an audio waveform for a segment */
@@ -157,6 +158,7 @@ const Timeline: React.FC<TimelineProps> = ({
   onSelectGraphicLayer,
   onUpdateGraphicLayer,
   onDeleteGraphicLayer,
+  onClearSelection,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0); // Track scroll for virtualization
@@ -284,6 +286,8 @@ const Timeline: React.FC<TimelineProps> = ({
     if (e.button !== 0) return;
     setIsSeeking(true);
     onSeek(calculateTime(e));
+    // Click reached the container background (all clips/layers stopPropagation) — deselect everything
+    onClearSelection?.();
   };
 
   const startDrag = (e: React.MouseEvent, seg: Segment, type: 'move' | 'leftTrim' | 'rightTrim') => {

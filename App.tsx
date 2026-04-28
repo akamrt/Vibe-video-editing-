@@ -9323,6 +9323,12 @@ function App() {
                   setProject(p => ({ ...p, graphicLayers: (p.graphicLayers ?? []).filter(g => g.id !== id) }));
                   setSelectedGraphicLayerId(null);
                 }}
+                onClearSelection={() => {
+                  setSelectedSegmentIds([]);
+                  setSelectedGraphicLayerId(null);
+                  setIsTitleSelected(false);
+                  setSelectedDialogues([]);
+                }}
               />
             )}
             {activeBottomTab === 'graph' && (
