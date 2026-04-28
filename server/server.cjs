@@ -7,7 +7,11 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { extractVideoId, getTranscript } = require('./transcript.cjs');
-const { getYtDlpPath, getPythonTrackerPath, getTrackerInfo, getEnvWithBinPath, getFfmpegPath } = require('./binpath.cjs');
+const { getYtDlpPath, getPythonTrackerPath, getTrackerInfo, verifyPythonTrackerDeps, getEnvWithBinPath, getFfmpegPath } = require('./binpath.cjs');
+
+// Cache dep-verification result (per python path) so we don't spawn a check
+// process on every capabilities request. Cleared if server restarts.
+const pythonDepCheckCache = new Map();
 const { transcribeFile, assemblyAIToAnalysisEvents } = require('./assemblyai.cjs');
 const localStore = require('./localStore.cjs');
 const saveStore = require('./saveStore.cjs');
@@ -24,87 +28,95 @@ const getCookieArg = () => fs.existsSync(COOKIE_FILE) ? ` --cookies "${COOKIE_FI
 // Try common browsers in order of preference
 const BROWSERS_TO_TRY = ['chrome', 'edge', 'firefox', 'brave', 'opera', 'chromium'];
 
-// Helper to run yt-dlp commands with multi-stage cookie fallback strategy
+// Insert extra yt-dlp flags before the final quoted URL argument
+function withExtraArgs(cmd, args) {
+    return cmd.replace(/("[^"]*")\s*$/, `${args} $1`);
+}
+
+// Helper to run yt-dlp commands with multi-stage fallback strategy
 async function runYtDlpWithFallback(cmdBuilder, execOptions) {
     const isBotError = (text) => {
         const lower = (text || '').toLowerCase();
-        return lower.includes('sign in') || lower.includes('bot') || lower.includes('login required') || lower.includes('confirm your age');
+        return lower.includes('sign in') || lower.includes('bot') || lower.includes('login required') ||
+               lower.includes('confirm your age') || lower.includes('private video') ||
+               lower.includes('this video is unavailable');
     };
 
-    // 1. Try WITHOUT cookies first (avoids "Requested format not available" from stale cookies)
+    // Stage 1: no cookies, default client
     const cmdNoCookies = cmdBuilder(false);
     try {
         console.log('Running yt-dlp (no cookies):', cmdNoCookies);
         return await execAsync(cmdNoCookies, execOptions);
     } catch (error) {
         const stderr = (error.stderr || error.message || '');
-
-        if (!isBotError(stderr)) {
-            // Not a bot error, just throw the original error
-            throw error;
-        }
-
-        console.log('Bot protection detected. Trying authentication strategies...');
-
-        // 2. Try --cookies-from-browser for each available browser
-        for (const browser of BROWSERS_TO_TRY) {
-            try {
-                const browserCmd = cmdBuilder(false) + ` --cookies-from-browser ${browser}`;
-                console.log(`Trying --cookies-from-browser ${browser}...`);
-                const result = await execAsync(browserCmd, execOptions);
-                console.log(`Success with --cookies-from-browser ${browser}`);
-                return result;
-            } catch (browserErr) {
-                const browserStderr = (browserErr.stderr || browserErr.message || '').toLowerCase();
-                // If the browser isn't installed/accessible, try the next one
-                if (browserStderr.includes('no suitable') || browserStderr.includes('could not find') ||
-                    browserStderr.includes('not available') || browserStderr.includes('not found') ||
-                    browserStderr.includes('no cookies') || browserStderr.includes('permission') ||
-                    browserStderr.includes('not installed') || browserStderr.includes('unsupported') ||
-                    browserStderr.includes('could not copy')) {
-                    console.log(`Browser ${browser} not available, trying next...`);
-                    continue;
-                }
-                // If it's still a bot error, this browser's cookies didn't help — try next
-                if (isBotError(browserStderr)) {
-                    console.log(`Browser ${browser} cookies didn't resolve bot protection, trying next...`);
-                    continue;
-                }
-                // Some other error (e.g., format not found) — throw it
-                throw browserErr;
-            }
-        }
-
-        // 3. Fall back to cookie file if it exists
-        if (fs.existsSync(COOKIE_FILE)) {
-            const cmdWithCookies = cmdBuilder(true);
-            try {
-                console.log('Trying cookie file:', COOKIE_FILE);
-                return await execAsync(cmdWithCookies, execOptions);
-            } catch (cookieError) {
-                const cookieStderr = (cookieError.stderr || cookieError.message || '').toLowerCase();
-                if (cookieStderr.includes('requested format is not available') || isBotError(cookieStderr)) {
-                    throw new Error(
-                        'YouTube bot protection blocked the download. All authentication strategies failed:\n' +
-                        '• --cookies-from-browser: No browser cookies resolved the issue\n' +
-                        '• Cookie file: Appears expired or invalid\n' +
-                        'Please try: 1) Log into YouTube in Chrome, 2) Close Chrome completely, 3) Try again.\n' +
-                        'Or export fresh cookies to www.youtube.com_cookies.txt'
-                    );
-                }
-                throw cookieError;
-            }
-        }
-
-        // 4. All strategies exhausted
-        throw new Error(
-            'YouTube bot protection blocked the download. To fix this:\n' +
-            '1. Log into YouTube in Chrome (or Edge/Firefox)\n' +
-            '2. Close the browser completely (so yt-dlp can read its cookie database)\n' +
-            '3. Try the download again\n' +
-            'Or export YouTube cookies to www.youtube.com_cookies.txt in the project root.'
-        );
+        if (!isBotError(stderr)) throw error;
+        console.log('Bot protection detected. Trying alternative player clients...');
     }
+
+    // Stage 2: alternative YouTube player clients — these bypass bot checks without cookies
+    const PLAYER_CLIENTS = ['ios', 'tv_embedded', 'android', 'mweb'];
+    for (const client of PLAYER_CLIENTS) {
+        try {
+            const clientCmd = withExtraArgs(cmdBuilder(false), `--extractor-args "youtube:player_client=${client}"`);
+            console.log(`Trying player_client=${client}...`);
+            const result = await execAsync(clientCmd, execOptions);
+            console.log(`Success with player_client=${client}`);
+            return result;
+        } catch (clientErr) {
+            const clientStderr = (clientErr.stderr || clientErr.message || '').toLowerCase();
+            if (isBotError(clientStderr) || clientStderr.includes('requested format')) {
+                console.log(`player_client=${client} failed, trying next...`);
+                continue;
+            }
+            throw clientErr;
+        }
+    }
+
+    // Stage 3: --cookies-from-browser for each installed browser
+    console.log('Player clients exhausted. Trying browser cookies...');
+    for (const browser of BROWSERS_TO_TRY) {
+        try {
+            const browserCmd = withExtraArgs(cmdBuilder(false), `--cookies-from-browser ${browser}`);
+            console.log(`Trying --cookies-from-browser ${browser}...`);
+            const result = await execAsync(browserCmd, execOptions);
+            console.log(`Success with --cookies-from-browser ${browser}`);
+            return result;
+        } catch (browserErr) {
+            const browserStderr = (browserErr.stderr || browserErr.message || '').toLowerCase();
+            if (browserStderr.includes('no suitable') || browserStderr.includes('could not find') ||
+                browserStderr.includes('not available') || browserStderr.includes('not found') ||
+                browserStderr.includes('no cookies') || browserStderr.includes('permission') ||
+                browserStderr.includes('not installed') || browserStderr.includes('unsupported') ||
+                browserStderr.includes('could not copy')) {
+                console.log(`Browser ${browser} not available, trying next...`);
+                continue;
+            }
+            if (isBotError(browserStderr)) {
+                console.log(`Browser ${browser} cookies didn't resolve bot protection, trying next...`);
+                continue;
+            }
+            throw browserErr;
+        }
+    }
+
+    // Stage 4: cookie file
+    if (fs.existsSync(COOKIE_FILE)) {
+        try {
+            console.log('Trying cookie file:', COOKIE_FILE);
+            return await execAsync(cmdBuilder(true), execOptions);
+        } catch (cookieError) {
+            const cookieStderr = (cookieError.stderr || cookieError.message || '').toLowerCase();
+            if (!isBotError(cookieStderr) && !cookieStderr.includes('requested format')) throw cookieError;
+        }
+    }
+
+    // All strategies exhausted
+    throw new Error(
+        'YouTube bot protection blocked the download. All strategies failed.\n' +
+        'Best fix: install the "Get cookies.txt LOCALLY" Chrome extension,\n' +
+        'export cookies for youtube.com, and save as www.youtube.com_cookies.txt\n' +
+        'in the project root folder.'
+    );
 }
 
 const app = express();
@@ -1625,8 +1637,24 @@ app.get('/api/tracking/capabilities', (req, res) => {
             res.json({ success: true, available: false, reason: 'Tracker binary not accessible' });
         }
     } else {
-        // Python source mode — verify dependencies are installed
-        console.log(`[Tracking] Tracker via Python source: ${tracker.python} in ${tracker.pythonDir}`);
+        // Python source mode — actually verify mediapipe/cv2/numpy can be imported.
+        // Without this, Mac users with Python but no MediaPipe (PEP 668 blocks pip,
+        // or unsupported Python version) silently fall back to browser tracking.
+        let depCheck = pythonDepCheckCache.get(tracker.python);
+        if (!depCheck) {
+            depCheck = verifyPythonTrackerDeps(tracker.python);
+            pythonDepCheckCache.set(tracker.python, depCheck);
+        }
+        if (!depCheck.ok) {
+            console.log(`[Tracking] Python tracker deps missing (${tracker.python}): ${depCheck.error}`);
+            return res.json({
+                success: true,
+                available: false,
+                mode: 'python-source',
+                reason: `Python tracker dependencies missing: ${depCheck.error}. Run INSTALL.sh again or: python3 -m pip install mediapipe opencv-python-headless numpy`,
+            });
+        }
+        console.log(`[Tracking] Tracker via Python source (deps verified): ${tracker.python} in ${tracker.pythonDir}`);
         res.json({ success: true, available: true, mode: 'python-source', capabilities: {} });
     }
 });
