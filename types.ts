@@ -876,6 +876,9 @@ export interface GraphicLayer {
   scale?: number;
   rotation?: number;
   opacity?: number;
+  /** Keyframe animation — same ClipKeyframe system as video clips/titles/subtitles.
+   *  When present, these drive translateX/Y/scale/rotation instead of the static fields. */
+  keyframes?: ClipKeyframe[];
   /** Z-order: higher draws on top. Defaults to insertion order. */
   zIndex?: number;
   /** Visibility toggle */

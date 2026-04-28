@@ -10,6 +10,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphicLayer, GraphicNode, HyperframesDSL } from '../types';
+import { getInterpolatedTransform } from '../utils/interpolation';
 import {
   DSL_COMP_W, DSL_COMP_H,
   evaluateTracks,
@@ -142,10 +143,14 @@ function LayerGroup({
   if (fadeIn > 0 && layerTime < fadeIn) layerOpacity = baseOpacity * (layerTime / fadeIn);
   if (fadeOut > 0 && layerTime > layerLength - fadeOut) layerOpacity = baseOpacity * Math.max(0, (layerLength - layerTime) / fadeOut);
 
-  const tx    = layer.translateX ?? 0;
-  const ty    = layer.translateY ?? 0;
-  const lscale = layer.scale ?? 1;
-  const lrot   = layer.rotation ?? 0;
+  // Keyframes override static values when present (same system as video clips)
+  const kf = layer.keyframes?.length
+    ? getInterpolatedTransform(layer.keyframes, layerTime)
+    : null;
+  const tx     = kf ? kf.translateX : (layer.translateX ?? 0);
+  const ty     = kf ? kf.translateY : (layer.translateY ?? 0);
+  const lscale = kf ? kf.scale      : (layer.scale ?? 1);
+  const lrot   = kf ? kf.rotation   : (layer.rotation ?? 0);
 
   const dsl      = layer.dsl;
   const graphics = dsl.graphics ?? [];

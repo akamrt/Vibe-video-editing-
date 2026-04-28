@@ -371,6 +371,10 @@ function App() {
   const [trackingMode, setTrackingMode] = useState<TrackingMode>('idle');
   const [selectedTrackerId, setSelectedTrackerId] = useState<string | null>(null);
   const [selectedGraphicLayerId, setSelectedGraphicLayerId] = useState<string | null>(null);
+  const handleSelectGraphicLayer = useCallback((id: string | null) => {
+    setSelectedGraphicLayerId(id);
+    if (id) setTransformTarget('graphic_' + id);
+  }, []);
   const trackingTemplatesRef = useRef<Map<string, ImageData>>(new Map());
   const trackingAbortRef = useRef<AbortController | null>(null);
   const autoCenteringRef = useRef(false);
@@ -8531,7 +8535,7 @@ function App() {
                           containerWidth={sz.w}
                           containerHeight={sz.h}
                           selectedId={selectedGraphicLayerId}
-                          onSelect={setSelectedGraphicLayerId}
+                          onSelect={handleSelectGraphicLayer}
                           onUpdateLayer={(id, patch) => setProject(p => ({
                             ...p,
                             graphicLayers: (p.graphicLayers ?? []).map(g => g.id === id ? { ...g, ...patch } : g),
@@ -8889,7 +8893,7 @@ function App() {
                         graphicLayers: [...(p.graphicLayers ?? []), newLayer],
                         graphicLayersVisible: true,
                       }));
-                      setSelectedGraphicLayerId(newLayer.id);
+                      handleSelectGraphicLayer(newLayer.id);
                     }}
                     activeKeywordAnimation={isTemplateUnlinked ? (selectedDialogueEvent?.keywordAnimation || project.activeKeywordAnimation) : project.activeKeywordAnimation}
                     onApplyToKeywords={(anim: TextAnimation) => handleUpdateKeywordAnimation({ ...anim, scope: 'word' })}
@@ -9010,6 +9014,10 @@ function App() {
                           return Math.max(0, sourceTime - evt.startTime);
                         }
                       }
+                      if (transformTarget.startsWith('graphic_')) {
+                        const gl = project.graphicLayers?.find(g => g.id === transformTarget.slice(8));
+                        if (gl) return Math.max(0, project.currentTime - gl.startTime);
+                      }
                       const seg = project.segments.find(s => s.id === transformTarget);
                       if (seg) return Math.max(0, project.currentTime - seg.timelineStart);
                       return graphEditorClipTime;
@@ -9024,6 +9032,9 @@ function App() {
                         const media = project.library.find(m => m.id === mediaId);
                         return media?.analysis?.events[idx]?.keyframes || [];
                       }
+                      if (transformTarget.startsWith('graphic_')) {
+                        return project.graphicLayers?.find(g => g.id === transformTarget.slice(8))?.keyframes || [];
+                      }
                       return project.segments.find(s => s.id === transformTarget)?.keyframes || primarySelectedSegment?.keyframes;
                     })()}
                     targetLabel={(() => {
@@ -9033,6 +9044,10 @@ function App() {
                         const parts = transformTarget.split('_');
                         const idx = parseInt(parts[2]);
                         return `Subtitle #${idx + 1}`;
+                      }
+                      if (transformTarget.startsWith('graphic_')) {
+                        const gl = project.graphicLayers?.find(g => g.id === transformTarget.slice(8));
+                        return gl ? `✦ ${gl.name}` : 'Graphic';
                       }
                       const seg = project.segments.find(s => s.id === transformTarget);
                       if (seg) {
@@ -9053,6 +9068,9 @@ function App() {
                         const media = project.library.find(m => m.id === mediaId);
                         const evt = media?.analysis?.events[idx];
                         if (evt) handleUpdateDialogue(mediaId, idx, { ...evt, keyframes });
+                      } else if (transformTarget.startsWith('graphic_')) {
+                        const glId = transformTarget.slice(8);
+                        setProject(p => ({ ...p, graphicLayers: (p.graphicLayers ?? []).map(g => g.id === glId ? { ...g, keyframes } : g) }));
                       } else {
                         const segId = transformTarget !== 'global' ? transformTarget : primarySelectedSegment?.id;
                         if (segId) handleUpdateKeyframes(segId, keyframes);
@@ -9076,6 +9094,9 @@ function App() {
                             setProject(p => ({ ...p, currentTime: topSeg.timelineStart + (sourceTime - topSeg.startTime) }));
                           }
                         }
+                      } else if (transformTarget.startsWith('graphic_')) {
+                        const gl = project.graphicLayers?.find(g => g.id === transformTarget.slice(8));
+                        if (gl) setProject(p => ({ ...p, currentTime: gl.startTime + time }));
                       } else {
                         const seg = project.segments.find(s => s.id === transformTarget) || primarySelectedSegment;
                         if (seg) setProject(p => ({ ...p, currentTime: seg.timelineStart + time }));
@@ -9293,7 +9314,7 @@ function App() {
                 graphicLayersVisible={project.graphicLayersVisible !== false}
                 selectedGraphicLayerId={selectedGraphicLayerId}
                 onToggleGraphicsVisible={() => setProject(p => ({ ...p, graphicLayersVisible: !(p.graphicLayersVisible !== false) }))}
-                onSelectGraphicLayer={setSelectedGraphicLayerId}
+                onSelectGraphicLayer={handleSelectGraphicLayer}
                 onUpdateGraphicLayer={(id, patch) => setProject(p => ({
                   ...p,
                   graphicLayers: (p.graphicLayers ?? []).map(g => g.id === id ? { ...g, ...patch } : g),
@@ -9314,8 +9335,9 @@ function App() {
                     onChange={(e) => {
                       const val = e.target.value;
                       setTransformTarget(val);
-                      // Auto-select the segment so PropertiesPanel shows it (enables Add Volume Key etc.)
-                      if (val !== 'global' && val !== 'title_layer' && !val.startsWith('subtitle_')) {
+                      if (val.startsWith('graphic_')) {
+                        handleSelectGraphicLayer(val.slice(8));
+                      } else if (val !== 'global' && val !== 'title_layer' && !val.startsWith('subtitle_')) {
                         setSelectedSegmentIds([val]);
                       }
                     }}
@@ -9330,6 +9352,11 @@ function App() {
                         💬 Subtitle: {selectedDialogueEvent.details.slice(0, 25)}{selectedDialogueEvent.details.length > 25 ? '…' : ''}
                       </option>
                     )}
+                    {(project.graphicLayers ?? []).map(gl => (
+                      <option key={gl.id} value={`graphic_${gl.id}`}>
+                        ✦ {gl.name.slice(0, 25)}
+                      </option>
+                    ))}
                     {project.segments
                       .slice()
                       .sort((a, b) => a.timelineStart - b.timelineStart)
@@ -9345,12 +9372,15 @@ function App() {
                   {transformTarget.startsWith('subtitle_') && (
                     <span className="text-xs text-purple-400 ml-2">💬 Subtitle transform</span>
                   )}
+                  {transformTarget.startsWith('graphic_') && (
+                    <span className="text-xs text-violet-400 ml-2">✦ Graphic layer</span>
+                  )}
                 </div>
                 <div className="flex-1">
                   <GraphEditor
                     visible={true}
                     onClose={() => setActiveBottomTab('timeline')}
-                    segment={transformTarget === 'global' || transformTarget === 'title_layer' || transformTarget.startsWith('subtitle_') ? null : project.segments.find(s => s.id === transformTarget) || primarySelectedSegment}
+                    segment={transformTarget === 'global' || transformTarget === 'title_layer' || transformTarget.startsWith('subtitle_') || transformTarget.startsWith('graphic_') ? null : project.segments.find(s => s.id === transformTarget) || primarySelectedSegment}
                     segmentDuration={(() => {
                       if (transformTarget === 'global') return contentDuration;
                       if (transformTarget === 'title_layer' && project.titleLayer) return project.titleLayer.endTime - project.titleLayer.startTime;
@@ -9361,6 +9391,10 @@ function App() {
                         const media = project.library.find(m => m.id === mediaId);
                         const evt = media?.analysis?.events[idx];
                         if (evt) return evt.endTime - evt.startTime;
+                      }
+                      if (transformTarget.startsWith('graphic_')) {
+                        const gl = project.graphicLayers?.find(g => g.id === transformTarget.slice(8));
+                        if (gl) return gl.endTime - gl.startTime;
                       }
                       const seg = project.segments.find(s => s.id === transformTarget);
                       if (seg) return seg.endTime - seg.startTime;
@@ -9376,7 +9410,6 @@ function App() {
                         const media = project.library.find(m => m.id === mediaId);
                         const evt = media?.analysis?.events[idx];
                         if (evt) {
-                          // Find source time based on active segment
                           const topSeg = project.segments.find(s => {
                             const m = project.library.find(lib => lib.id === s.mediaId);
                             return m?.id === mediaId;
@@ -9384,6 +9417,10 @@ function App() {
                           const sourceTime = topSeg ? topSeg.startTime + (project.currentTime - topSeg.timelineStart) : project.currentTime;
                           return Math.max(0, sourceTime - evt.startTime);
                         }
+                      }
+                      if (transformTarget.startsWith('graphic_')) {
+                        const gl = project.graphicLayers?.find(g => g.id === transformTarget.slice(8));
+                        if (gl) return Math.max(0, project.currentTime - gl.startTime);
                       }
                       const seg = project.segments.find(s => s.id === transformTarget);
                       if (seg) return Math.max(0, project.currentTime - seg.timelineStart);
@@ -9399,9 +9436,12 @@ function App() {
                         const media = project.library.find(m => m.id === mediaId);
                         return media?.analysis?.events[idx]?.keyframes || [];
                       }
+                      if (transformTarget.startsWith('graphic_')) {
+                        return project.graphicLayers?.find(g => g.id === transformTarget.slice(8))?.keyframes || [];
+                      }
                       return project.segments.find(s => s.id === transformTarget)?.keyframes || primarySelectedSegment?.keyframes;
                     })()}
-                    isGlobalMode={transformTarget === 'global' || transformTarget === 'title_layer' || transformTarget.startsWith('subtitle_')}
+                    isGlobalMode={transformTarget === 'global' || transformTarget === 'title_layer' || transformTarget.startsWith('subtitle_') || transformTarget.startsWith('graphic_')}
                     onSeek={(time) => {
                       if (transformTarget === 'global') {
                         setProject(p => ({ ...p, currentTime: time }));
@@ -9421,6 +9461,9 @@ function App() {
                             setProject(p => ({ ...p, currentTime: timelineTime }));
                           }
                         }
+                      } else if (transformTarget.startsWith('graphic_')) {
+                        const gl = project.graphicLayers?.find(g => g.id === transformTarget.slice(8));
+                        if (gl) setProject(p => ({ ...p, currentTime: gl.startTime + time }));
                       } else {
                         const seg = project.segments.find(s => s.id === transformTarget) || primarySelectedSegment;
                         if (seg) {
@@ -9443,6 +9486,9 @@ function App() {
                         if (evt) {
                           handleUpdateDialogue(mediaId, idx, { ...evt, keyframes });
                         }
+                      } else if (transformTarget.startsWith('graphic_')) {
+                        const glId = transformTarget.slice(8);
+                        setProject(p => ({ ...p, graphicLayers: (p.graphicLayers ?? []).map(g => g.id === glId ? { ...g, keyframes } : g) }));
                       } else {
                         const segId = transformTarget !== 'global' ? transformTarget : primarySelectedSegment?.id;
                         if (segId) {

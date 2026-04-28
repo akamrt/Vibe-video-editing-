@@ -17,6 +17,7 @@ import {
   DEFAULT_TRACK_VALUES,
   mixHexColors,
 } from './hyperframesDSL';
+import { getInterpolatedTransform } from './interpolation';
 
 // ── Image cache ─────────────────────────────────────────────────────────────
 
@@ -94,10 +95,13 @@ function drawLayer(ctx: CanvasRenderingContext2D, layer: GraphicLayer, mediaTime
   if (fadeIn > 0 && layerTime < fadeIn) layerOpacity = baseOpacity * (layerTime / fadeIn);
   if (fadeOut > 0 && layerTime > layerLength - fadeOut) layerOpacity = baseOpacity * Math.max(0, (layerLength - layerTime) / fadeOut);
 
-  const tx     = layer.translateX ?? 0;
-  const ty     = layer.translateY ?? 0;
-  const lscale = layer.scale ?? 1;
-  const lrot   = layer.rotation ?? 0;
+  const kf = layer.keyframes?.length
+    ? getInterpolatedTransform(layer.keyframes, layerTime)
+    : null;
+  const tx     = kf ? kf.translateX : (layer.translateX ?? 0);
+  const ty     = kf ? kf.translateY : (layer.translateY ?? 0);
+  const lscale = kf ? kf.scale      : (layer.scale ?? 1);
+  const lrot   = kf ? kf.rotation   : (layer.rotation ?? 0);
 
   const dsl   = layer.dsl;
   const nodes = dsl.graphics ?? [];
