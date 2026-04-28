@@ -5086,11 +5086,7 @@ function App() {
     } else {
       setSelectedDialogues([{ mediaId, index }]);
     }
-    // Auto-select subtitle as transform target in Graph Editor
-    if (activeBottomTab === 'graph') {
-      setTransformTarget(`subtitle_${mediaId}_${index}`);
-    }
-    // (right tab stays on whatever the user has open)
+    setTransformTarget(`subtitle_${mediaId}_${index}`);
   };
 
   const handleTitleSelect = (title: TitleLayer) => {
@@ -5099,7 +5095,7 @@ function App() {
     setSelectedTransition(null);
     setSelectedDialogues([]);
     setIsTitleSelected(true);
-    // (right tab stays on whatever the user has open)
+    setTransformTarget('title_layer');
   };
 
   // Helper to update specific event properties deep in the library structure
