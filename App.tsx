@@ -4032,14 +4032,23 @@ function App() {
 
       if (!usedCache) {
         console.log('[Export Short] Downloading video:', videoRecord.url);
-        const downloadRes = await fetch(`/api/download?url=${encodeURIComponent(videoRecord.url)}&_t=${Date.now()}`);
+        let downloadRes: Response;
+        try {
+          downloadRes = await fetch(`/api/download?url=${encodeURIComponent(videoRecord.url)}&_t=${Date.now()}`);
+        } catch (fetchErr) {
+          throw new Error(`Download fetch failed (network error — server may have crashed or timed out): ${fetchErr instanceof Error ? fetchErr.message : fetchErr}`);
+        }
 
         if (!downloadRes.ok) {
           const errText = await downloadRes.text();
           throw new Error(`Download failed: ${downloadRes.status} ${errText}`);
         }
 
-        blob = await downloadRes.blob();
+        try {
+          blob = await downloadRes.blob();
+        } catch (blobErr) {
+          throw new Error(`Failed to read download response (connection may have dropped): ${blobErr instanceof Error ? blobErr.message : blobErr}`);
+        }
       }
       console.log('[Export Short] Blob received size:', blob.size);
 

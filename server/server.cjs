@@ -175,6 +175,7 @@ app.get('/api/download', async (req, res) => {
         const { stdout: infoJson } = await runYtDlpWithFallback(infoCmdBuilder, {
             encoding: 'utf8',
             maxBuffer: 10 * 1024 * 1024,
+            timeout: 60000, // 60s — info fetch should be fast
             env: childEnv
         });
         const info = JSON.parse(infoJson);
