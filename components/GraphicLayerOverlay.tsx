@@ -1,15 +1,14 @@
 /**
  * GraphicLayerOverlay
  *
- * Renders one or more GraphicLayers as SVG overlays in 1920x1080 author space,
- * scaled to fit the viewport. Each layer's DSL.graphics array is iterated and
- * each node's tracks evaluated per-frame.
+ * Renders GraphicLayers as SVG overlays in 1920x1080 author space, scaled to
+ * fit the viewport.
  *
- * Selection: click a layer to select it. Selected layer gets a dashed bounding
- * outline. Drag (TODO) to reposition translateX/Y. Backspace/Delete deletes.
+ * Selection: click a layer to select it. Drag the body to move (translateX/Y).
+ * Drag corner handles to scale. Drag the top rotation handle to rotate.
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphicLayer, GraphicNode, HyperframesDSL } from '../types';
 import {
   DSL_COMP_W, DSL_COMP_H,
@@ -20,28 +19,28 @@ import {
 
 interface Props {
   layers: GraphicLayer[];
-  /** Current media playhead time (seconds) — same time space as layer.startTime/endTime */
   mediaTime: number;
   isPlaying: boolean;
   containerWidth: number;
   containerHeight: number;
   selectedId?: string | null;
   onSelect?: (id: string | null) => void;
+  onUpdateLayer?: (id: string, patch: Partial<GraphicLayer>) => void;
 }
 
-function computeScale(w: number, h: number) {
+function computeViewScale(w: number, h: number) {
   return Math.min(w / DSL_COMP_W, h / DSL_COMP_H);
 }
 
 export default function GraphicLayerOverlay({
   layers, mediaTime, isPlaying,
   containerWidth, containerHeight,
-  selectedId, onSelect,
+  selectedId, onSelect, onUpdateLayer,
 }: Props) {
-  // 60fps tick during playback so loops/animations stay smooth
   const [tick, setTick] = useState(0);
   const rafRef = useRef<number | null>(null);
   const baselineRef = useRef({ time: mediaTime, wallclock: performance.now(), playing: isPlaying });
+  const svgRef = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
     baselineRef.current = { time: mediaTime, wallclock: performance.now(), playing: isPlaying };
@@ -62,19 +61,28 @@ export default function GraphicLayerOverlay({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, mediaTime]);
 
-  const scale = computeScale(containerWidth, containerHeight);
+  const viewScale = computeViewScale(containerWidth, containerHeight);
+  // Letterbox offsets (SVG "meet" puts content centered)
+  const offsetX = (containerWidth  - DSL_COMP_W * viewScale) / 2;
+  const offsetY = (containerHeight - DSL_COMP_H * viewScale) / 2;
 
-  // Active layers — within their time window AND visible
   const activeLayers = useMemo(() => {
     return layers
       .filter(l => l.visible !== false && effectiveTime >= l.startTime && effectiveTime <= l.endTime)
       .sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0));
   }, [layers, effectiveTime]);
 
+  // Convert a screen-space point to SVG/author-space
+  const screenToSVG = useCallback((sx: number, sy: number) => ({
+    x: (sx - offsetX) / viewScale,
+    y: (sy - offsetY) / viewScale,
+  }), [offsetX, offsetY, viewScale]);
+
   if (!activeLayers.length) return null;
 
   return (
     <svg
+      ref={svgRef}
       width={containerWidth}
       height={containerHeight}
       viewBox={`0 0 ${DSL_COMP_W} ${DSL_COMP_H}`}
@@ -96,6 +104,8 @@ export default function GraphicLayerOverlay({
           mediaTime={effectiveTime}
           selected={layer.id === selectedId}
           onSelect={onSelect}
+          onUpdateLayer={onUpdateLayer}
+          screenToSVG={screenToSVG}
         />
       ))}
     </svg>
@@ -104,46 +114,183 @@ export default function GraphicLayerOverlay({
 
 // ── Layer group ─────────────────────────────────────────────────────────────
 
+type DragState =
+  | { type: 'move'; startSVGX: number; startSVGY: number; startTx: number; startTy: number }
+  | { type: 'scale'; pivotSVGX: number; pivotSVGY: number; startScale: number; startDist: number }
+  | { type: 'rotate'; pivotSVGX: number; pivotSVGY: number; startRotation: number; startAngle: number };
+
 function LayerGroup({
-  layer, mediaTime, selected, onSelect,
+  layer, mediaTime, selected, onSelect, onUpdateLayer, screenToSVG,
 }: {
   layer: GraphicLayer;
   mediaTime: number;
   selected: boolean;
   onSelect?: (id: string | null) => void;
+  onUpdateLayer?: (id: string, patch: Partial<GraphicLayer>) => void;
+  screenToSVG: (sx: number, sy: number) => { x: number; y: number };
 }) {
   const layerTime = mediaTime - layer.startTime;
   const layerLength = layer.endTime - layer.startTime;
+  const dragRef = useRef<DragState | null>(null);
+  const groupRef = useRef<SVGGElement>(null);
 
-  // Fade in/out
   const fadeIn  = layer.fadeInDuration  ?? 0;
   const fadeOut = layer.fadeOutDuration ?? 0;
-  let layerOpacity = 1;
-  if (fadeIn > 0 && layerTime < fadeIn) layerOpacity = layerTime / fadeIn;
-  if (fadeOut > 0 && layerTime > layerLength - fadeOut) layerOpacity = Math.max(0, (layerLength - layerTime) / fadeOut);
+  const baseOpacity = layer.opacity ?? 1;
+  let layerOpacity = baseOpacity;
+  if (fadeIn > 0 && layerTime < fadeIn) layerOpacity = baseOpacity * (layerTime / fadeIn);
+  if (fadeOut > 0 && layerTime > layerLength - fadeOut) layerOpacity = baseOpacity * Math.max(0, (layerLength - layerTime) / fadeOut);
 
-  const tx = layer.translateX ?? 0;
-  const ty = layer.translateY ?? 0;
+  const tx    = layer.translateX ?? 0;
+  const ty    = layer.translateY ?? 0;
   const lscale = layer.scale ?? 1;
   const lrot   = layer.rotation ?? 0;
 
-  const transform = `translate(${tx}, ${ty}) scale(${lscale}) rotate(${lrot})`;
-
-  const dsl = layer.dsl;
+  const dsl      = layer.dsl;
   const graphics = dsl.graphics ?? [];
 
-  // Compute selection bounding box (loose — pad by 30 author px)
   const bbox = useMemo(() => computeBBox(graphics), [graphics]);
+
+  // Pivot = bbox center in author/SVG space (accounting for translate but not scale/rotate)
+  const pivotX = bbox ? tx + bbox.x + bbox.w / 2 : tx + DSL_COMP_W / 2;
+  const pivotY = bbox ? ty + bbox.y + bbox.h / 2 : ty + DSL_COMP_H / 2;
+
+  // Transform: rotate+scale around bbox center
+  const cx = bbox ? bbox.x + bbox.w / 2 : DSL_COMP_W / 2;
+  const cy = bbox ? bbox.y + bbox.h / 2 : DSL_COMP_H / 2;
+  const transform = `translate(${tx},${ty}) translate(${cx},${cy}) rotate(${lrot}) scale(${lscale}) translate(${-cx},${-cy})`;
+
+  // ── Pointer handlers ───────────────────────────────────────────────────────
+
+  const onBodyPointerDown = (e: React.PointerEvent<SVGGElement>) => {
+    e.stopPropagation();
+    onSelect?.(layer.id);
+    if (!onUpdateLayer || !selected) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const svgPos = screenToSVG(e.clientX, e.clientY);
+    dragRef.current = { type: 'move', startSVGX: svgPos.x, startSVGY: svgPos.y, startTx: tx, startTy: ty };
+  };
+
+  const startScaleDrag = (e: React.PointerEvent<SVGCircleElement>) => {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const svgPos = screenToSVG(e.clientX, e.clientY);
+    const dx = svgPos.x - pivotX;
+    const dy = svgPos.y - pivotY;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    dragRef.current = { type: 'scale', pivotSVGX: pivotX, pivotSVGY: pivotY, startScale: lscale, startDist: dist };
+  };
+
+  const startRotateDrag = (e: React.PointerEvent<SVGCircleElement>) => {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const svgPos = screenToSVG(e.clientX, e.clientY);
+    const angle = Math.atan2(svgPos.y - pivotY, svgPos.x - pivotX) * (180 / Math.PI);
+    dragRef.current = { type: 'rotate', pivotSVGX: pivotX, pivotSVGY: pivotY, startRotation: lrot, startAngle: angle };
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d || !onUpdateLayer) return;
+    const svgPos = screenToSVG(e.clientX, e.clientY);
+
+    if (d.type === 'move') {
+      onUpdateLayer(layer.id, {
+        translateX: d.startTx + (svgPos.x - d.startSVGX),
+        translateY: d.startTy + (svgPos.y - d.startSVGY),
+      });
+    } else if (d.type === 'scale') {
+      const dx = svgPos.x - d.pivotSVGX;
+      const dy = svgPos.y - d.pivotSVGY;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const newScale = Math.max(0.05, d.startScale * (dist / d.startDist));
+      onUpdateLayer(layer.id, { scale: parseFloat(newScale.toFixed(3)) });
+    } else if (d.type === 'rotate') {
+      const dx = svgPos.x - d.pivotSVGX;
+      const dy = svgPos.y - d.pivotSVGY;
+      const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+      let newRot = d.startRotation + (angle - d.startAngle);
+      // Snap to 15° increments when within 5° of a multiple
+      if (e.shiftKey) newRot = Math.round(newRot / 15) * 15;
+      onUpdateLayer(layer.id, { rotation: parseFloat(newRot.toFixed(1)) });
+    }
+  };
+
+  const onPointerUp = () => { dragRef.current = null; };
+
+  // ── Selection handles ──────────────────────────────────────────────────────
+  // Rendered in unscaled SVG space at the bbox corners and top-center.
+  // We un-apply the layer transform so handles sit at the visual edges.
+
+  const HANDLE_R = 10;  // handle radius in author px
+  const ROT_OFFSET = 40; // how far above bbox the rotation handle sits
+
+  const selectionHandles = selected && bbox && onUpdateLayer ? (() => {
+    // The bbox corners in content space, after scale+rotate around (cx,cy), then translated by (tx,ty)
+    // For rendering the selection outline, we render it INSIDE the group (already transformed),
+    // so bbox coords are in local content space. Handles appear at scaled/rotated corners.
+    const pad = 20;
+    const bx = bbox.x - pad, by = bbox.y - pad;
+    const bw = bbox.w + pad * 2, bh = bbox.h + pad * 2;
+    const bcx = bbox.x + bbox.w / 2, bcy = bbox.y + bbox.h / 2;
+    // Handle radius adjusted for current scale so they appear constant-size on screen
+    const hr = HANDLE_R / lscale;
+    const strokeW = 2 / lscale;
+
+    return (
+      <g style={{ pointerEvents: 'all' }}>
+        {/* Selection box */}
+        <rect
+          x={bx} y={by} width={bw} height={bh}
+          fill="rgba(108,99,255,0.05)" stroke="#6c63ff" strokeWidth={strokeW * 1.5}
+          strokeDasharray={`${8/lscale} ${5/lscale}`}
+          style={{ pointerEvents: 'none' }}
+        />
+        {/* Corner scale handles */}
+        {([
+          [bx,    by],
+          [bx+bw, by],
+          [bx,    by+bh],
+          [bx+bw, by+bh],
+        ] as [number,number][]).map(([hx, hy], i) => (
+          <circle
+            key={i}
+            cx={hx} cy={hy} r={hr}
+            fill="#6c63ff" stroke="white" strokeWidth={strokeW}
+            style={{ cursor: 'nwse-resize' }}
+            onPointerDown={startScaleDrag}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+          />
+        ))}
+        {/* Rotation handle — above top-center */}
+        <line
+          x1={bcx} y1={by}
+          x2={bcx} y2={by - ROT_OFFSET / lscale}
+          stroke="#a78bfa" strokeWidth={strokeW}
+          style={{ pointerEvents: 'none' }}
+        />
+        <circle
+          cx={bcx} cy={by - ROT_OFFSET / lscale} r={hr}
+          fill="#a78bfa" stroke="white" strokeWidth={strokeW}
+          style={{ cursor: 'crosshair' }}
+          onPointerDown={startRotateDrag}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+        />
+      </g>
+    );
+  })() : null;
 
   return (
     <g
+      ref={groupRef}
       transform={transform}
       opacity={layerOpacity}
-      onMouseDown={(e) => {
-        e.stopPropagation();
-        onSelect?.(layer.id);
-      }}
-      style={{ cursor: 'pointer' }}
+      onPointerDown={onBodyPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      style={{ cursor: selected ? 'move' : 'pointer' }}
     >
       {graphics.map((node, i) => (
         <GraphicNodeView
@@ -155,16 +302,7 @@ function LayerGroup({
           unitIndex={i}
         />
       ))}
-      {/* Selection outline */}
-      {selected && bbox && (
-        <rect
-          x={bbox.x - 30} y={bbox.y - 30}
-          width={bbox.w + 60} height={bbox.h + 60}
-          fill="none" stroke="#6c63ff" strokeWidth={3}
-          strokeDasharray="12 8"
-          style={{ pointerEvents: 'none' }}
-        />
-      )}
+      {selectionHandles}
     </g>
   );
 }
@@ -180,37 +318,29 @@ function GraphicNodeView({
   mediaTime: number;
   unitIndex: number;
 }) {
-  const appearAt = node.appearAt ?? 0;
+  const appearAt    = node.appearAt    ?? 0;
   const disappearAt = node.disappearAt ?? Infinity;
   if (layerTime < appearAt || layerTime > disappearAt) return null;
 
   const animDuration = node.animDuration ?? dsl.duration ?? 0.5;
-  const nodeTime = layerTime - appearAt;
-  const tracks = node.tracks ?? [];
+  const nodeTime     = layerTime - appearAt;
+  const tracks       = node.tracks ?? [];
   const v = tracks.length
     ? evaluateTracks(tracks, animDuration, nodeTime, mediaTime, unitIndex)
     : DEFAULT_TRACK_VALUES;
 
-  // Determine origin point (in author space)
   const origin = computeNodeOrigin(node);
-  const ox = origin.x;
-  const oy = origin.y;
+  const ox = origin.x, oy = origin.y;
 
-  // Compose transform — translate(origin) rotate scale skew translate(-origin)
-  // All transform tracks are in author-space px / degrees.
-  const tx = (node as any).translateX ?? 0;
-  // Tracks add to baseline; node x/y is the base position
   const trans = `translate(${v.translateX}, ${v.translateY})`;
   const rot   = `rotate(${v.rotate}, ${ox}, ${oy})`;
   const scl   = `translate(${ox}, ${oy}) scale(${v.scaleX}, ${v.scaleY}) translate(${-ox}, ${-oy})`;
   const skew  = (v.skewX || v.skewY) ? `skewX(${v.skewX}) skewY(${v.skewY})` : '';
 
   const groupTransform = `${trans} ${rot} ${scl} ${skew}`.trim();
-
   const opacity = (node.opacity ?? 1) * v.opacity;
-  const filter = v.blur > 0 ? `blur(${v.blur}px)` : undefined;
+  const filter  = v.blur > 0 ? `blur(${v.blur}px)` : undefined;
 
-  // Color mix (applies to fills via track)
   const colorMixedFill = v.colorMix !== undefined && v.colorPair
     ? mixHexColors(v.colorPair[0], v.colorPair[1], v.colorMix) || undefined
     : undefined;
@@ -246,13 +376,12 @@ function renderNodeShape(node: GraphicNode, fillOverride?: string): React.ReactN
       />
     );
     case 'line': {
-      // drawProgress 0..1 reveals from start
-      const p = node.drawProgress ?? 1;
-      const tx = node.x + (node.x2 - node.x) * p;
-      const ty = node.y + (node.y2 - node.y) * p;
+      const p  = node.drawProgress ?? 1;
+      const lx = node.x + (node.x2 - node.x) * p;
+      const ly = node.y + (node.y2 - node.y) * p;
       return (
         <line
-          x1={node.x} y1={node.y} x2={tx} y2={ty}
+          x1={node.x} y1={node.y} x2={lx} y2={ly}
           stroke={node.stroke}
           strokeWidth={node.strokeWidth}
           strokeLinecap={node.lineCap ?? 'round'}
@@ -261,10 +390,11 @@ function renderNodeShape(node: GraphicNode, fillOverride?: string): React.ReactN
     }
     case 'path': return (
       <path
-        d={translatePathD(node.d, node.x, node.y)}
+        d={node.d}
         fill={fill ?? 'none'}
         stroke={node.stroke ?? 'none'}
         strokeWidth={node.strokeWidth ?? 0}
+        transform={node.x || node.y ? `translate(${node.x},${node.y})` : undefined}
       />
     );
     case 'image': return (
@@ -278,8 +408,8 @@ function renderNodeShape(node: GraphicNode, fillOverride?: string): React.ReactN
     case 'text': {
       const transformText = (t: string) => {
         switch (node.textTransform) {
-          case 'uppercase': return t.toUpperCase();
-          case 'lowercase': return t.toLowerCase();
+          case 'uppercase':  return t.toUpperCase();
+          case 'lowercase':  return t.toLowerCase();
           case 'capitalize': return t.replace(/\b\w/g, c => c.toUpperCase());
           default: return t;
         }
@@ -292,7 +422,7 @@ function renderNodeShape(node: GraphicNode, fillOverride?: string): React.ReactN
       return (
         <text
           x={node.x} y={node.y}
-          fill={fill ?? '#ffffff'}
+          fill={fill ?? node.color ?? '#ffffff'}
           stroke={node.stroke?.color ?? 'none'}
           strokeWidth={node.stroke?.width ?? 0}
           paintOrder="stroke"
@@ -309,37 +439,21 @@ function renderNodeShape(node: GraphicNode, fillOverride?: string): React.ReactN
   }
 }
 
-// ── Node origin (for transform) ────────────────────────────────────────────
+// ── Node origin ─────────────────────────────────────────────────────────────
 
 function computeNodeOrigin(node: GraphicNode): { x: number; y: number } {
   const o = node.origin ?? { x: 0.5, y: 0.5 };
   switch (node.kind) {
-    case 'rect':   return { x: node.x + node.width * o.x, y: node.y + node.height * o.y };
+    case 'rect':   return { x: node.x + node.width * o.x,  y: node.y + node.height * o.y };
     case 'circle': return { x: node.x, y: node.y };
-    case 'line':   return { x: (node.x + node.x2) / 2, y: (node.y + node.y2) / 2 };
-    case 'image':  return { x: node.x + node.width * o.x, y: node.y + node.height * o.y };
+    case 'line':   return { x: (node.x + node.x2) / 2,     y: (node.y + node.y2) / 2 };
+    case 'image':  return { x: node.x + node.width * o.x,  y: node.y + node.height * o.y };
     case 'text':   return { x: node.x, y: node.y };
     case 'path':   return { x: node.x, y: node.y };
   }
 }
 
-// ── Path translate helper ──────────────────────────────────────────────────
-// SVG paths are absolute or relative coordinate sequences. To honor the
-// node's x/y offset we wrap the path in a local translate via a parent <g>.
-// But to keep node opacity/transform composable we take a quick shortcut:
-// simply prepend a "translate" by inserting a "transform" into the parent g
-// at render time. Simpler: just leave coords absolute and add x,y to first
-// "M" if path is relative-only. For v1, we ignore (require absolute paths).
-
-function translatePathD(d: string, dx: number, dy: number): string {
-  // Quick optimization: if x and y are zero, return as-is.
-  if (dx === 0 && dy === 0) return d;
-  // Wrap with a leading move offset — but this changes path semantics.
-  // Safer: callers should pass absolute path d and use node x/y as transform.
-  return d; // path nodes ignore x/y in author space for v1; AI will use transform tracks
-}
-
-// ── Bounding box ───────────────────────────────────────────────────────────
+// ── Bounding box ────────────────────────────────────────────────────────────
 
 function computeBBox(nodes: GraphicNode[]): { x: number; y: number; w: number; h: number } | null {
   if (!nodes.length) return null;
@@ -357,14 +471,11 @@ function computeBBox(nodes: GraphicNode[]): { x: number; y: number; w: number; h
 
 function nodeBounds(n: GraphicNode): { x: number; y: number; w: number; h: number } {
   switch (n.kind) {
-    case 'rect':   return { x: n.x, y: n.y, w: n.width, h: n.height };
-    case 'circle': return { x: n.x - n.radius, y: n.y - n.radius, w: n.radius * 2, h: n.radius * 2 };
-    case 'line':   return {
-      x: Math.min(n.x, n.x2), y: Math.min(n.y, n.y2),
-      w: Math.abs(n.x2 - n.x), h: Math.abs(n.y2 - n.y),
-    };
-    case 'image':  return { x: n.x, y: n.y, w: n.width, h: n.height };
-    case 'text':   return { x: n.x - 200, y: n.y - 80, w: 400, h: 100 }; // rough
-    case 'path':   return { x: n.x, y: n.y, w: 100, h: 100 }; // rough
+    case 'rect':   return { x: n.x,            y: n.y,            w: n.width,         h: n.height };
+    case 'circle': return { x: n.x - n.radius, y: n.y - n.radius, w: n.radius * 2,    h: n.radius * 2 };
+    case 'line':   return { x: Math.min(n.x, n.x2), y: Math.min(n.y, n.y2), w: Math.abs(n.x2 - n.x), h: Math.abs(n.y2 - n.y) };
+    case 'image':  return { x: n.x,            y: n.y,            w: n.width,         h: n.height };
+    case 'text':   return { x: n.x - 300,      y: n.y - 80,       w: 600,             h: 100 };
+    case 'path':   return { x: n.x,            y: n.y,            w: 200,             h: 200 };
   }
 }

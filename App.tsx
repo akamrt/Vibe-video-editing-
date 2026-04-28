@@ -23,6 +23,7 @@ import AnimatedText from './components/remotion/AnimatedText';
 import HyperframesCaptionOverlay from './components/hyperframes/HyperframesCaptionOverlay';
 import HyperframesDSLOverlay from './components/hyperframes/HyperframesDSLOverlay';
 import GraphicLayerOverlay from './components/GraphicLayerOverlay';
+import GraphicLayerPanel from './components/GraphicLayerPanel';
 import { analyzeVideoContent, generateVibeEdit, chatWithVideoContext, transcribeAudio, performDeepAnalysis, detectPersonPosition, detectFillerWords, detectFillersFromTranscript, redetectFillerWords, redetectFillersFromTranscript, FillerDetection } from './services/geminiService';
 import FillerConfirmModal from './components/FillerConfirmModal';
 import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
@@ -7230,6 +7231,23 @@ function App() {
               onAddToLibrary={handleAddStockToLibrary}
             />
           )}
+          {activeLeftTab === 'properties' && selectedGraphicLayerId && (() => {
+            const gl = project.graphicLayers?.find(g => g.id === selectedGraphicLayerId);
+            if (!gl) return null;
+            return (
+              <GraphicLayerPanel
+                layer={gl}
+                onUpdate={(patch) => setProject(p => ({
+                  ...p,
+                  graphicLayers: (p.graphicLayers ?? []).map(g => g.id === selectedGraphicLayerId ? { ...g, ...patch } : g),
+                }))}
+                onDelete={() => {
+                  setProject(p => ({ ...p, graphicLayers: (p.graphicLayers ?? []).filter(g => g.id !== selectedGraphicLayerId) }));
+                  setSelectedGraphicLayerId(null);
+                }}
+              />
+            );
+          })()}
           {activeLeftTab === 'properties' && (
             <PropertiesPanel
               selectedSegment={primarySelectedSegment}
@@ -8514,6 +8532,10 @@ function App() {
                           containerHeight={sz.h}
                           selectedId={selectedGraphicLayerId}
                           onSelect={setSelectedGraphicLayerId}
+                          onUpdateLayer={(id, patch) => setProject(p => ({
+                            ...p,
+                            graphicLayers: (p.graphicLayers ?? []).map(g => g.id === id ? { ...g, ...patch } : g),
+                          }))}
                         />
                       )}
 

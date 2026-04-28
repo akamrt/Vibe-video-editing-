@@ -87,25 +87,43 @@ function drawLayer(ctx: CanvasRenderingContext2D, layer: GraphicLayer, mediaTime
   const layerTime = mediaTime - layer.startTime;
   const layerLength = layer.endTime - layer.startTime;
 
-  let layerOpacity = 1;
+  const baseOpacity = layer.opacity ?? 1;
+  let layerOpacity = baseOpacity;
   const fadeIn  = layer.fadeInDuration ?? 0;
   const fadeOut = layer.fadeOutDuration ?? 0;
-  if (fadeIn > 0 && layerTime < fadeIn) layerOpacity = layerTime / fadeIn;
-  if (fadeOut > 0 && layerTime > layerLength - fadeOut) layerOpacity = Math.max(0, (layerLength - layerTime) / fadeOut);
+  if (fadeIn > 0 && layerTime < fadeIn) layerOpacity = baseOpacity * (layerTime / fadeIn);
+  if (fadeOut > 0 && layerTime > layerLength - fadeOut) layerOpacity = baseOpacity * Math.max(0, (layerLength - layerTime) / fadeOut);
 
-  const tx = layer.translateX ?? 0;
-  const ty = layer.translateY ?? 0;
+  const tx     = layer.translateX ?? 0;
+  const ty     = layer.translateY ?? 0;
   const lscale = layer.scale ?? 1;
   const lrot   = layer.rotation ?? 0;
 
+  const dsl   = layer.dsl;
+  const nodes = dsl.graphics ?? [];
+
+  // Compute bbox center for pivot (mirrors SVG overlay transform)
+  let cx = DSL_COMP_W / 2, cy = DSL_COMP_H / 2;
+  if (nodes.length > 0) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      const b = canvasNodeBounds(n);
+      if (b.x < minX) minX = b.x;
+      if (b.y < minY) minY = b.y;
+      if (b.x + b.w > maxX) maxX = b.x + b.w;
+      if (b.y + b.h > maxY) maxY = b.y + b.h;
+    }
+    if (isFinite(minX)) { cx = (minX + maxX) / 2; cy = (minY + maxY) / 2; }
+  }
+
   ctx.save();
   ctx.globalAlpha = Math.max(0, Math.min(1, layerOpacity));
-  ctx.translate(tx, ty);
+  // translate(tx,ty) translate(cx,cy) rotate(lrot) scale(lscale) translate(-cx,-cy)
+  ctx.translate(tx + cx, ty + cy);
   if (lrot) ctx.rotate((lrot * Math.PI) / 180);
   if (lscale !== 1) ctx.scale(lscale, lscale);
+  ctx.translate(-cx, -cy);
 
-  const dsl = layer.dsl;
-  const nodes = dsl.graphics ?? [];
   nodes.forEach((node, i) => drawNode(ctx, node, dsl, layerTime, mediaTime, i));
 
   ctx.restore();
@@ -275,6 +293,19 @@ function drawPath(ctx: CanvasRenderingContext2D, n: Extract<GraphicNode, { kind:
     ctx.stroke(p);
   }
   ctx.restore();
+}
+
+// ── Node bounds (for layer pivot calculation) ────────────────────────────────
+
+function canvasNodeBounds(n: GraphicNode): { x: number; y: number; w: number; h: number } {
+  switch (n.kind) {
+    case 'rect':   return { x: n.x,            y: n.y,            w: n.width,      h: n.height };
+    case 'circle': return { x: n.x - n.radius, y: n.y - n.radius, w: n.radius * 2, h: n.radius * 2 };
+    case 'line':   return { x: Math.min(n.x, n.x2), y: Math.min(n.y, n.y2), w: Math.abs(n.x2 - n.x), h: Math.abs(n.y2 - n.y) };
+    case 'image':  return { x: n.x,            y: n.y,            w: n.width,      h: n.height };
+    case 'text':   return { x: n.x - 300,      y: n.y - 80,       w: 600,          h: 100 };
+    case 'path':   return { x: n.x,            y: n.y,            w: 200,          h: 200 };
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

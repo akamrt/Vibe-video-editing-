@@ -875,6 +875,7 @@ export interface GraphicLayer {
   translateY?: number;
   scale?: number;
   rotation?: number;
+  opacity?: number;
   /** Z-order: higher draws on top. Defaults to insertion order. */
   zIndex?: number;
   /** Visibility toggle */
