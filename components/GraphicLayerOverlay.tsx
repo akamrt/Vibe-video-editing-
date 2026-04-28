@@ -92,6 +92,7 @@ export default function GraphicLayerOverlay({
         width: containerWidth, height: containerHeight,
         pointerEvents: 'auto',
         overflow: 'visible',
+        zIndex: 9000,
       }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onSelect?.(null);
