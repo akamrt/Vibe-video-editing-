@@ -591,6 +591,10 @@ export interface ProjectState {
   audioMixer?: AudioMixerState;
   dialogueLayerVisible: boolean;
   titlesLayerVisible: boolean;
+  /** Independent DSL-driven graphic overlays (shapes, images, decorative text) */
+  graphicLayers?: GraphicLayer[];
+  /** Hide all graphic layers (visibility toggle for the whole track) */
+  graphicLayersVisible?: boolean;
 }
 
 // ============ REMOTION TEMPLATE SYSTEM ============
@@ -653,9 +657,228 @@ export interface HyperframesVariable {
 }
 
 export interface HyperframesConfig {
-  compositionSrc: string;                           // e.g. '/hyperframes/bounce-caption.html'
+  compositionSrc: string;                           // e.g. '/hyperframes/bounce-caption.html', or 'dsl://custom' / 'html://custom'
   variables: Record<string, string | number | boolean>;  // current user values
   variableSchema: HyperframesVariable[];            // parsed from composition data-var-* attrs
+  /** When set, the DSL renderer is used (preview + canvas export). Overrides compositionSrc. */
+  dsl?: HyperframesDSL;
+  /** When set, raw HTML is loaded into a sandboxed iframe (preview only — does not export). */
+  rawHtml?: string;
+}
+
+// ============ HYPERFRAMES DSL — declarative animated caption spec ============
+// Lets the AI generator (and humans) describe novel caption animations in JSON
+// without writing code. Both the preview component and canvas exporter
+// interpret the same DSL, so what you see in preview is what gets exported.
+
+export type HyperframesEasing =
+  | 'linear' | 'easeIn' | 'easeOut' | 'easeInOut'
+  | 'power2In' | 'power2Out' | 'power2InOut'
+  | 'power3In' | 'power3Out' | 'power3InOut'
+  | 'outBack' | 'outElastic' | 'outBounce' | 'inBack';
+
+export type HyperframesTrackProp =
+  | 'opacity' | 'translateX' | 'translateY' | 'scale' | 'scaleX' | 'scaleY'
+  | 'rotate' | 'skewX' | 'skewY' | 'blur' | 'colorMix';
+
+export interface HyperframesTrack {
+  /** Which transform/property this track drives */
+  prop: HyperframesTrackProp;
+  // ── Mode 1: tween (use `from`, `to`, `at`) ──
+  from?: number;
+  to?: number;
+  /** [startProgress, endProgress] within unit's animation duration, normalized 0..1 */
+  at?: [number, number];
+  easing?: HyperframesEasing;
+  // ── Mode 2: continuous loop (use `loop`, `amplitude`, `period`) ──
+  loop?: 'sine' | 'cosine' | 'sawtooth' | 'triangle' | 'random';
+  amplitude?: number;
+  /** Loop period in seconds */
+  period?: number;
+  /** Phase offset 0..1 (multiplied by unit index for staggered loops) */
+  phasePerUnit?: number;
+  /** Random loop seed (for reproducibility) */
+  seed?: number;
+  // ── colorMix only ──
+  colors?: [string, string];
+}
+
+export interface HyperframesDSL {
+  /** Display name for UI */
+  name?: string;
+  /** Schema version */
+  version?: 1;
+  /** How to break the text into independently animated units */
+  split: 'element' | 'line' | 'word' | 'letter';
+  /** Layout / positioning (in 1920x1080 author space) */
+  layout: {
+    /** Distance from bottom of frame in px */
+    bottom: number;
+    /** Max width before wrapping (px) */
+    maxWidth?: number;
+    /** Line height multiplier (default 1.15) */
+    lineHeight?: number;
+    /** Horizontal alignment */
+    align?: 'center' | 'left' | 'right';
+  };
+  /** Base text styling */
+  style: {
+    fontFamily?: string;
+    fontWeight?: string | number;
+    /** Font size in px in 1920x1080 author space */
+    fontSize?: number;
+    color?: string;
+    letterSpacing?: number;
+    textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
+  };
+  /** How long each unit's animation runs (seconds) */
+  duration: number;
+  /** Stagger between units (seconds) */
+  stagger?: number;
+  /** Stagger pattern (default 'linear' = unitIndex * stagger) */
+  staggerFn?: 'linear' | 'wave' | 'random' | 'fromCenter' | 'reverse';
+  /** Per-unit animation tracks */
+  tracks: HyperframesTrack[];
+  /** Static (non-animated) effects */
+  effects?: {
+    shadow?: { color: string; blur: number; offsetX?: number; offsetY?: number };
+    stroke?: { color: string; width: number };
+    glow?: { color: string; blur: number };
+    rgbSplit?: {
+      redOffset: [number, number];
+      blueOffset: [number, number];
+      jitter?: number;
+      jitterFreq?: number;
+    };
+  };
+  /** Karaoke / active-word highlighting */
+  karaoke?: {
+    enabled: boolean;
+    color?: string;
+    scale?: number;
+    glow?: { color: string; blur: number };
+    background?: { color: string; padX: number; padY: number };
+    /** Opacity for already-spoken words (default 1 = no dimming) */
+    pastOpacity?: number;
+    /** Stroke override for active word */
+    stroke?: { color: string; width: number };
+  };
+  /** Optional graphic primitives — when present, drawn alongside (or instead of) text.
+   *  Used by independent GraphicLayer overlays; can also decorate captions. */
+  graphics?: GraphicNode[];
+}
+
+// ============ GRAPHIC NODES (DSL primitives for shapes/images/text) =========
+// Each node has its own tracks and lifecycle within the parent's duration.
+
+export interface GraphicNodeBase {
+  id?: string;
+  /** Author-space x (1920x1080). Interpretation depends on node kind. */
+  x: number;
+  y: number;
+  /** Per-node animation tracks (same evaluator as text-unit tracks) */
+  tracks?: HyperframesTrack[];
+  /** Per-node animation duration in seconds (defaults to parent dsl.duration) */
+  animDuration?: number;
+  /** When this node enters within the parent's lifecycle (seconds, default 0) */
+  appearAt?: number;
+  /** When this node exits within the parent's lifecycle (seconds, default Infinity) */
+  disappearAt?: number;
+  /** Transform origin for scale/rotate, normalized 0..1 within bounding box (default 0.5,0.5) */
+  origin?: { x: number; y: number };
+  /** Static opacity multiplier (combined with track-driven opacity) */
+  opacity?: number;
+}
+
+export interface GraphicRect extends GraphicNodeBase {
+  kind: 'rect';
+  /** Top-left at (x, y); width/height in author space */
+  width: number;
+  height: number;
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: number;
+  cornerRadius?: number;
+}
+
+export interface GraphicCircle extends GraphicNodeBase {
+  kind: 'circle';
+  /** (x, y) is center */
+  radius: number;
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: number;
+}
+
+export interface GraphicLine extends GraphicNodeBase {
+  kind: 'line';
+  /** From (x, y) to (x2, y2) */
+  x2: number;
+  y2: number;
+  stroke: string;
+  strokeWidth: number;
+  lineCap?: 'butt' | 'round' | 'square';
+  /** 0..1 — clip-reveal progress (animatable via tracks targeting "scaleX") */
+  drawProgress?: number;
+}
+
+export interface GraphicPath extends GraphicNodeBase {
+  kind: 'path';
+  /** SVG path "d" attribute. Coordinates relative to (x, y). */
+  d: string;
+  fill?: string;
+  stroke?: string;
+  strokeWidth?: number;
+}
+
+export interface GraphicImage extends GraphicNodeBase {
+  kind: 'image';
+  /** URL or data URI. SVG data URIs recommended for export safety. */
+  src: string;
+  width: number;
+  height: number;
+}
+
+export interface GraphicText extends GraphicNodeBase {
+  kind: 'text';
+  text: string;
+  fontFamily?: string;
+  fontWeight?: string | number;
+  fontSize?: number;
+  color?: string;
+  align?: 'left' | 'center' | 'right';
+  letterSpacing?: number;
+  textTransform?: 'none' | 'uppercase' | 'lowercase' | 'capitalize';
+  stroke?: { color: string; width: number };
+  shadow?: { color: string; blur: number; offsetX?: number; offsetY?: number };
+  glow?: { color: string; blur: number };
+}
+
+export type GraphicNode = GraphicRect | GraphicCircle | GraphicLine | GraphicPath | GraphicImage | GraphicText;
+
+// ============ INDEPENDENT GRAPHIC LAYERS (top-level overlays) ===============
+
+export interface GraphicLayer {
+  id: string;
+  name: string;
+  /** Media-time start/end (seconds) */
+  startTime: number;
+  endTime: number;
+  /** Fade-in/out durations in seconds, applied as multiplier on opacity */
+  fadeInDuration?: number;
+  fadeOutDuration?: number;
+  /** The DSL describing the graphic. `graphics` array drives shape rendering;
+   *  text-related DSL fields are ignored unless the DSL explicitly includes a text mode. */
+  dsl: HyperframesDSL;
+  /** Optional translate/scale/rotate transform applied to whole layer */
+  translateX?: number;
+  translateY?: number;
+  scale?: number;
+  rotation?: number;
+  /** Z-order: higher draws on top. Defaults to insertion order. */
+  zIndex?: number;
+  /** Visibility toggle */
+  visible: boolean;
 }
 
 export interface SubtitleTemplate {

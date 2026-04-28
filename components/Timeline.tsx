@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { Segment, VideoAnalysis, Transition, TitleLayer } from '../types';
+import { Segment, VideoAnalysis, Transition, TitleLayer, GraphicLayer } from '../types';
 import { getAudioBuffer, getWaveformPeaks } from '../utils/audioAnalysis';
 import { getTransitionDef, TRANSITION_CATEGORY_COLORS } from '../utils/transitionCatalog';
 
@@ -41,6 +41,14 @@ interface TimelineProps {
   onSwapTracks?: (trackA: number, trackB: number) => void;
   selectedInsertTrack?: number | null;
   onSelectInsertTrack?: (trackId: number) => void;
+  // ── Graphic layers ──
+  graphicLayers?: GraphicLayer[];
+  graphicLayersVisible?: boolean;
+  selectedGraphicLayerId?: string | null;
+  onToggleGraphicsVisible?: () => void;
+  onSelectGraphicLayer?: (id: string | null) => void;
+  onUpdateGraphicLayer?: (id: string, patch: Partial<GraphicLayer>) => void;
+  onDeleteGraphicLayer?: (id: string) => void;
 }
 
 /** Small canvas component that renders an audio waveform for a segment */
@@ -142,6 +150,13 @@ const Timeline: React.FC<TimelineProps> = ({
   titlesLayerVisible = true,
   onToggleDialogueVisible,
   onToggleTitlesVisible,
+  graphicLayers = [],
+  graphicLayersVisible = true,
+  selectedGraphicLayerId,
+  onToggleGraphicsVisible,
+  onSelectGraphicLayer,
+  onUpdateGraphicLayer,
+  onDeleteGraphicLayer,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0); // Track scroll for virtualization
@@ -697,7 +712,7 @@ const Timeline: React.FC<TimelineProps> = ({
 
     const events: any[] = [];
     let totalRendered = 0;
-    const MAX_VIEWPORT_RENDERED = 400; // Only render this many *within the view*
+    const MAX_VIEWPORT_RENDERED = 2000; // Only render this many *within the view*
 
     layoutSegments.forEach(seg => {
       // Audio-only segments share mediaId with their video counterpart — skip them
@@ -833,6 +848,51 @@ const Timeline: React.FC<TimelineProps> = ({
                   {i % 5 === 0 && <span className="text-[8px] text-gray-400 pl-1 absolute top-0">{(duration * i / (40 * zoom)).toFixed(1)}s</span>}
                 </div>
               ))}
+            </div>
+          </div>
+
+          {/* GRAPHIC LAYERS TRACK (GFX) */}
+          <div className="h-8 relative w-full border-b border-[#333] bg-[#1a1a1a] flex">
+            <div className="sticky left-0 w-12 min-w-[3rem] h-full bg-[#202020] border-r border-[#333] flex items-center justify-between px-1 z-50 shadow-[2px_0_5px_rgba(0,0,0,0.2)]">
+              <span className="text-[9px] font-bold text-violet-400">GFX</span>
+              {onToggleGraphicsVisible && (
+                <button
+                  onClick={onToggleGraphicsVisible}
+                  title={graphicLayersVisible ? 'Hide graphics' : 'Show graphics'}
+                  className="opacity-60 hover:opacity-100 transition-opacity"
+                >
+                  {graphicLayersVisible
+                    ? <svg className="w-3 h-3 text-violet-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                    : <svg className="w-3 h-3 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/></svg>
+                  }
+                </button>
+              )}
+            </div>
+            <div className={`relative flex-1 h-full ${graphicLayersVisible ? '' : 'opacity-30'}`}>
+              {graphicLayers.map(g => {
+                const isSelected = g.id === selectedGraphicLayerId;
+                const left = (g.startTime / (duration || 1)) * 100;
+                const width = ((g.endTime - g.startTime) / (duration || 1)) * 100;
+                return (
+                  <div
+                    key={g.id}
+                    className={`absolute top-1 bottom-1 rounded-sm cursor-pointer flex items-center px-2 overflow-hidden transition-colors ${isSelected
+                      ? 'bg-violet-500 border-2 border-yellow-400 z-30'
+                      : 'bg-violet-700/60 border border-violet-400/50 hover:bg-violet-600/80'
+                    }`}
+                    style={{ left: `${left}%`, width: `${width}%` }}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      onSelectGraphicLayer?.(g.id);
+                    }}
+                    title={g.name + (g.dsl.graphics ? ` — ${g.dsl.graphics.length} nodes` : '')}
+                  >
+                    <span className="text-[9px] text-white font-bold truncate select-none pointer-events-none">
+                      ✦ {g.name}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </div>
 

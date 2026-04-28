@@ -11,6 +11,7 @@
  */
 
 import type { HyperframesConfig } from '../types';
+import { drawDSLCaption } from './hyperframesDSLCanvas';
 
 // ── Easing functions ────────────────────────────────────────────────────────
 
@@ -192,8 +193,6 @@ export interface HFCanvasParams {
 }
 
 export function drawHyperframesCaption(params: HFCanvasParams): void {
-  const id = params.config.compositionSrc.split('/').pop()?.replace('.html', '') ?? '';
-
   // Defensive: ensure canvas is in a clean state before drawing
   // (previous operations may leave compositing/alpha in unexpected states)
   params.ctx.globalAlpha = 1;
@@ -203,6 +202,13 @@ export function drawHyperframesCaption(params: HFCanvasParams): void {
   params.ctx.filter = 'none';
   params.ctx.resetTransform();
 
+  // DSL takes precedence over compositionSrc when present
+  if (params.config.dsl) return drawDSLCaption(params);
+
+  // rawHtml is preview-only — fall back to default subtitle rendering on export
+  if (params.config.rawHtml) return drawFallback(params);
+
+  const id = params.config.compositionSrc.split('/').pop()?.replace('.html', '') ?? '';
   switch (id) {
     case 'bounce-caption':     return drawBounce(params);
     case 'slide-up-caption':   return drawSlideUp(params);

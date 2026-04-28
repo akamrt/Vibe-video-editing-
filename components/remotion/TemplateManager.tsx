@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import type { SubtitleTemplate, TextAnimation, SubtitleStyle, HyperframesVariable } from '../../types';
+import type { SubtitleTemplate, TextAnimation, SubtitleStyle, HyperframesVariable, HyperframesDSL } from '../../types';
 import AnimationControls from '../AnimationControls';
 import HyperframesVariableForm from '../hyperframes/HyperframesVariableForm';
+import HyperframesAIGenerator from '../hyperframes/HyperframesAIGenerator';
 import {
   HYPERFRAMES_COMPOSITIONS,
   loadCompositionSchema,
@@ -20,6 +21,12 @@ interface TemplateManagerProps {
   onClearKeywordAnimation?: () => void;
   onApply: (template: SubtitleTemplate) => void;
   onClear: () => void;
+  /** Dialogue text from the selected clip, used as auto-context for the AI generator */
+  dialogueText?: string;
+  /** Apply scoped to selected dialogue event (used by AI generator). Falls back to global if no event selected. */
+  onApplyScoped?: (template: SubtitleTemplate) => void;
+  /** Create a new GraphicLayer from a DSL (Graphic mode of the AI generator) */
+  onApplyGraphicLayer?: (dsl: HyperframesDSL, name: string) => void;
 }
 
 function loadTemplates(): SubtitleTemplate[] {
@@ -311,7 +318,12 @@ const TemplateManager: React.FC<TemplateManagerProps> = ({
   onClearKeywordAnimation,
   onApply,
   onClear,
+  dialogueText,
+  onApplyScoped,
+  onApplyGraphicLayer,
 }) => {
+  // AI variants apply scoped (per-event) when a dialogue is selected; otherwise global.
+  const aiOnApply = onApplyScoped ?? onApply;
   const [templates, setTemplates] = useState<SubtitleTemplate[]>([]);
   const [newName, setNewName] = useState('');
   const [selectedPresetIdx, setSelectedPresetIdx] = useState(0);
@@ -338,7 +350,8 @@ const TemplateManager: React.FC<TemplateManagerProps> = ({
   const applyHyperframesTemplate = useCallback((
     meta: HyperframesCompositionMeta,
     schema: HyperframesVariable[],
-    overrideVars: Record<string, string | number | boolean> = {}
+    overrideVars: Record<string, string | number | boolean> = {},
+    applier?: (template: SubtitleTemplate) => void,
   ) => {
     const config = buildDefaultConfig(meta, schema);
     config.variables = { ...config.variables, ...overrideVars };
@@ -362,7 +375,7 @@ const TemplateManager: React.FC<TemplateManagerProps> = ({
       hyperframes: config,
     };
     console.log('[HF] Applying template:', template.name, '| hyperframes:', !!template.hyperframes, '| src:', config.compositionSrc);
-    onApply(template);
+    (applier ?? onApply)(template);
   }, [currentSubtitleStyle, onApply]);
 
   /** Select a composition card — loads schema and auto-applies immediately */
@@ -402,6 +415,76 @@ const TemplateManager: React.FC<TemplateManagerProps> = ({
       applyHyperframesTemplate(hfSelected, schema, newVars);
     }
   }, [hfVariables, hfSelected, hfSchemas, applyHyperframesTemplate]);
+
+  /** Apply a DSL variant from the AI generator */
+  const handleApplyAIDSL = useCallback((dsl: HyperframesDSL) => {
+    const template: SubtitleTemplate = {
+      id: 'hf_dsl_custom',  // stable id so undo stack doesn't spam
+      name: `HF: ${dsl.name ?? 'Custom DSL'}`,
+      style: {
+        fontFamily: currentSubtitleStyle.fontFamily,
+        fontSize: currentSubtitleStyle.fontSize,
+        color: currentSubtitleStyle.color,
+      },
+      animation: { id: 'hf_noop', name: 'Hyperframes', duration: 1, scope: 'element', stagger: 0, effects: [] },
+      hyperframes: {
+        compositionSrc: 'dsl://custom',
+        variables: {},
+        variableSchema: [],
+        dsl,
+      },
+    };
+    aiOnApply(template);
+  }, [currentSubtitleStyle, aiOnApply]);
+
+  /** Apply a raw-HTML variant (preview-only) — uses Blob URL for the iframe src */
+  const handleApplyAIHTML = useCallback((html: string, name: string) => {
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const template: SubtitleTemplate = {
+      id: 'hf_html_custom',
+      name: `HF: ${name} (preview only)`,
+      style: {
+        fontFamily: currentSubtitleStyle.fontFamily,
+        fontSize: currentSubtitleStyle.fontSize,
+        color: currentSubtitleStyle.color,
+      },
+      animation: { id: 'hf_noop', name: 'Hyperframes', duration: 1, scope: 'element', stagger: 0, effects: [] },
+      hyperframes: {
+        compositionSrc: url,
+        variables: {},
+        variableSchema: [],
+        rawHtml: html,
+      },
+    };
+    aiOnApply(template);
+  }, [currentSubtitleStyle, aiOnApply]);
+
+  /** Apply an AI-generated variant: select composition, seed vars, ensure schema loaded */
+  const handleApplyAIVariant = useCallback(async (
+    meta: HyperframesCompositionMeta,
+    aiVars: Record<string, string | number | boolean>,
+  ) => {
+    setHfSelected(meta);
+    const seededVars = { ...meta.defaults, ...aiVars };
+    setHfVariables(seededVars);
+
+    const cachedSchema = hfSchemas[meta.src] ?? [];
+    applyHyperframesTemplate(meta, cachedSchema, seededVars, aiOnApply);
+
+    if (!hfSchemas[meta.src]) {
+      setHfLoading(true);
+      try {
+        const schema = await loadCompositionSchema(meta.src);
+        setHfSchemas(prev => ({ ...prev, [meta.src]: schema }));
+        applyHyperframesTemplate(meta, schema, seededVars, aiOnApply);
+      } catch (e) {
+        console.warn('[HF AI] Schema load failed:', e);
+      } finally {
+        setHfLoading(false);
+      }
+    }
+  }, [hfSchemas, applyHyperframesTemplate, aiOnApply]);
 
   /** Manual re-apply button (kept for users who want to explicitly confirm) */
   const handleApplyHyperframes = useCallback(() => {
@@ -534,6 +617,15 @@ const TemplateManager: React.FC<TemplateManagerProps> = ({
   // ── Hyperframes panel ─────────────────────────────────────────────────────
   const HyperframesPanel = (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '8px 0' }}>
+
+      {/* AI overlay generator (copy-paste flow) */}
+      <HyperframesAIGenerator
+        onApplyPreset={handleApplyAIVariant}
+        onApplyDSL={handleApplyAIDSL}
+        onApplyHTML={handleApplyAIHTML}
+        onApplyGraphic={onApplyGraphicLayer}
+        dialogueText={dialogueText}
+      />
 
       {/* Active HF indicator */}
       {activeTemplate?.hyperframes && (

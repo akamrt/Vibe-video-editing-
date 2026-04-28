@@ -21,6 +21,8 @@ import TransitionPanel from './components/TransitionPanel';
 import { renderTransition as renderTransitionCanvas } from './utils/transitionRenderer';
 import AnimatedText from './components/remotion/AnimatedText';
 import HyperframesCaptionOverlay from './components/hyperframes/HyperframesCaptionOverlay';
+import HyperframesDSLOverlay from './components/hyperframes/HyperframesDSLOverlay';
+import GraphicLayerOverlay from './components/GraphicLayerOverlay';
 import { analyzeVideoContent, generateVibeEdit, chatWithVideoContext, transcribeAudio, performDeepAnalysis, detectPersonPosition, detectFillerWords, detectFillersFromTranscript, redetectFillerWords, redetectFillersFromTranscript, FillerDetection } from './services/geminiService';
 import FillerConfirmModal from './components/FillerConfirmModal';
 import type { FillerDetectionWithMedia } from './components/FillerConfirmModal';
@@ -28,11 +30,12 @@ import { YoutubeImportModal } from './components/YoutubeImportModal';
 import ContentLibraryPage from './pages/ContentLibraryPage';
 import { GeneratedShort, contentDB } from './services/contentDatabase';
 import PublishPanel from './components/PublishPanel';
-import { generateSocialPackages } from './services/contentAIService';
+import { generateSocialPackages, buildSocialPackagesPrompt, importSocialPackagesFromJson } from './services/contentAIService';
 import { getInterpolatedTransform, ASPECT_RATIO_PRESETS, calculateCropRegion, getInterpolatedPivot, compensatePivotChange } from './utils/interpolation';
 import { resolveGradientStops, buildGradientCSS } from './utils/gradientUtils';
 import { drawSubtitleOnCanvas } from './utils/canvasSubtitleRenderer';
 import { drawHyperframesCaption } from './utils/hyperframesCanvasRenderer';
+import { drawGraphicLayers, preloadGraphicImages } from './utils/graphicLayerCanvas';
 import { analyzeAndGenerateKeyframes, TrackingSegment, captureTemplateFromVideo, trackManualTrackers, generateStabilizationKeyframes, generateFollowKeyframes, scanAndGenerateThresholdKeyframes, detectPersonInFrame } from './services/templateTrackingService';
 import { fullScanAndCenter, trackHeadForPivot, headTrackForPivot } from './services/trackingBridge';
 import TrackingPanel from './components/TrackingPanel';
@@ -105,6 +108,8 @@ const INITIAL_STATE: ProjectState = {
   removedWords: [],
   dialogueLayerVisible: true,
   titlesLayerVisible: true,
+  graphicLayers: [],
+  graphicLayersVisible: true,
 };
 
 // --- Auto-center utilities (used by handleCenterPerson + autoCenterSegment) ---
@@ -364,6 +369,7 @@ function App() {
   const [trackingProgress, setTrackingProgress] = useState<{ progress: number; label: string } | null>(null);
   const [trackingMode, setTrackingMode] = useState<TrackingMode>('idle');
   const [selectedTrackerId, setSelectedTrackerId] = useState<string | null>(null);
+  const [selectedGraphicLayerId, setSelectedGraphicLayerId] = useState<string | null>(null);
   const trackingTemplatesRef = useRef<Map<string, ImageData>>(new Map());
   const trackingAbortRef = useRef<AbortController | null>(null);
   const autoCenteringRef = useRef(false);
@@ -390,6 +396,8 @@ function App() {
     sourceVideoUrl?: string;
   } | null>(null);
   const [isRegeneratingPublishSocial, setIsRegeneratingPublishSocial] = useState(false);
+  const [publishExternalSocialJson, setPublishExternalSocialJson] = useState('');
+  const [isPublishCopying, setIsPublishCopying] = useState(false);
 
   // Resizable Panel Sizes (persisted to localStorage)
   const [leftPanelWidth, setLeftPanelWidth] = useState(() =>
@@ -1265,9 +1273,12 @@ function App() {
         if (inGraphEditor) return;
       }
 
-      // Delete selected clip / subtitle (leaves a gap)
+      // Delete selected clip / subtitle / graphic layer (leaves a gap)
       if (matchesBinding(e, bindings['delete-selected'])) {
-        if (selectedSegmentIds.length > 0) {
+        if (selectedGraphicLayerId) {
+          setProject(p => ({ ...p, graphicLayers: (p.graphicLayers ?? []).filter(g => g.id !== selectedGraphicLayerId) }));
+          setSelectedGraphicLayerId(null);
+        } else if (selectedSegmentIds.length > 0) {
           performDelete(selectedSegmentIds, false);
         } else if (selectedDialogue) {
           handleDeleteDialogue(selectedDialogue.mediaId, selectedDialogue.index);
@@ -1276,7 +1287,10 @@ function App() {
 
       // Ripple delete — closes gap after deletion (Mac "Delete" key = Backspace)
       if (matchesBinding(e, bindings['ripple-delete'])) {
-        if (selectedSegmentIds.length > 0) {
+        if (selectedGraphicLayerId) {
+          setProject(p => ({ ...p, graphicLayers: (p.graphicLayers ?? []).filter(g => g.id !== selectedGraphicLayerId) }));
+          setSelectedGraphicLayerId(null);
+        } else if (selectedSegmentIds.length > 0) {
           performDelete(selectedSegmentIds, true);
         } else if (selectedDialogue) {
           handleDeleteDialogue(selectedDialogue.mediaId, selectedDialogue.index);
@@ -2493,6 +2507,18 @@ function App() {
         });
       }
 
+      // --- GRAPHIC LAYERS DRAWING (DSL-driven independent overlays) ---
+      const graphicLayers = projectRef.current.graphicLayers ?? [];
+      if (graphicLayers.length > 0 && projectRef.current.graphicLayersVisible !== false) {
+        drawGraphicLayers({
+          ctx,
+          layers: graphicLayers,
+          mediaTime: currentTime,
+          outputWidth,
+          outputHeight,
+        });
+      }
+
       // Save this frame as the last good frame (for fallback at cut boundaries)
       if (anyVideoReady) {
         lastGoodCtx.clearRect(0, 0, outputWidth, outputHeight);
@@ -2501,6 +2527,11 @@ function App() {
 
       requestAnimationFrame(renderLoop);
     };
+
+    // Preload any image-source graphic nodes so per-frame draws are synchronous
+    if (projectRef.current.graphicLayers?.length) {
+      await preloadGraphicImages(projectRef.current.graphicLayers);
+    }
 
     renderLoop();
   };
@@ -3889,11 +3920,79 @@ function App() {
     return allKeywords;
   };
 
+  const handlePublishCopySocialPrompt = async () => {
+    if (!exportedShortPublishInfo) return;
+    setIsPublishCopying(true);
+    try {
+      const short = await contentDB.getShort(exportedShortPublishInfo.shortId);
+      if (!short) { alert('Short not found in library.'); return; }
+      const result = await buildSocialPackagesPrompt([short]);
+      if (result.success && result.prompt) {
+        let copied = false;
+        try {
+          await navigator.clipboard.writeText(result.prompt);
+          copied = true;
+        } catch {
+          const ta = document.createElement('textarea');
+          ta.value = result.prompt;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          copied = document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        if (copied) {
+          alert('Social package prompt copied to clipboard! Paste this into ChatGPT or Claude.');
+        } else {
+          console.log('Generated social prompt:\n', result.prompt);
+          alert('Could not copy to clipboard. The prompt has been logged to the browser console (F12).');
+        }
+      } else {
+        alert('Failed to generate social prompt: ' + (result.error || 'Unknown error'));
+      }
+    } catch (err: any) {
+      alert('Generation failed: ' + err.message);
+    } finally {
+      setIsPublishCopying(false);
+    }
+  };
+
+  const handlePublishImportSocialJson = async () => {
+    if (!publishExternalSocialJson.trim() || !exportedShortPublishInfo) return;
+    try {
+      const short = await contentDB.getShort(exportedShortPublishInfo.shortId);
+      if (!short) { alert('Short not found in library.'); return; }
+      const result = await importSocialPackagesFromJson(publishExternalSocialJson, [short]);
+      if (result.success && result.shorts?.[0]?.socialPackage) {
+        setExportedShortPublishInfo(info => info ? ({ ...info, socialPackage: result.shorts![0].socialPackage }) : info);
+        setPublishExternalSocialJson('');
+        alert('Social package imported successfully.');
+      } else {
+        alert('Failed to import social packages: ' + (result.error || 'Unknown error'));
+      }
+    } catch (err: any) {
+      alert('Import failed: ' + err.message);
+    }
+  };
+
   const handleExportShort = async (short: GeneratedShort) => {
     console.log('[Export Short] Starting export...', short);
     setStatus(ProcessingStatus.TRANSCRIBING);
 
     try {
+      // 0. Verify backend is reachable before attempting any downloads
+      try {
+        const ping = await fetch('/api/health');
+        if (!ping.ok) throw new Error('unhealthy');
+      } catch {
+        throw new Error(
+          'Backend server is not running.\n' +
+          'Start it with: npm run server\n' +
+          '(or use START.sh / the Electron launcher)'
+        );
+      }
+
       // 1. Get the source video info from Content Library DB
       const videoRecord = await contentDB.getVideo(short.videoId);
       if (!videoRecord) {
@@ -5205,6 +5304,30 @@ function App() {
           templateOverride: { ...project.activeSubtitleTemplate! }
         }));
       }
+    }
+  };
+
+  /**
+   * Apply a template scoped to the currently selected dialogue event.
+   * Used by the AI generator — picking a variant for a specific clip should
+   * affect ONLY that clip's caption, not all dialogue globally.
+   * Falls back to global if no event is selected.
+   */
+  const handleApplyTemplateScoped = (template: SubtitleTemplate) => {
+    if (selectedDialogue && selectedDialogueEvent) {
+      const media = project.library.find(m => m.id === selectedDialogue.mediaId);
+      const current = media?.analysis?.events[selectedDialogue.index];
+      if (current) {
+        pushUndo({ type: 'dialogueEvent', mediaId: selectedDialogue.mediaId, index: selectedDialogue.index, event: { ...current } });
+      }
+      updateSelectedEvent(evt => ({ ...evt, templateOverride: template }));
+    } else {
+      pushUndo({ type: 'subtitleTemplate', template: project.activeSubtitleTemplate });
+      setProject(p => ({ ...p, activeSubtitleTemplate: template }));
+    }
+    const seekTarget = getAnimationSeekTarget();
+    if (seekTarget !== null) {
+      setProject(p => ({ ...p, currentTime: seekTarget, isPlaying: false }));
     }
   };
 
@@ -8101,6 +8224,24 @@ function App() {
                           const hfSourceTime = activeDialogueSeg
                             ? activeDialogueSeg.startTime + (project.currentTime - activeDialogueSeg.timelineStart)
                             : 0;
+                          // DSL takes precedence over URL-based compositions
+                          if (subTemplate.hyperframes.dsl) {
+                            return (
+                              <HyperframesDSLOverlay
+                                dsl={subTemplate.hyperframes.dsl}
+                                text={activeSubtitleEvent.details}
+                                sourceTime={hfSourceTime}
+                                eventStartTime={activeSubtitleEvent.startTime}
+                                eventEndTime={activeSubtitleEvent.endTime}
+                                wordTimings={activeSubtitleEvent.wordTimings}
+                                isPlaying={project.isPlaying}
+                                containerWidth={sz.w}
+                                containerHeight={sz.h}
+                                onMouseDown={handleSubtitleMouseDown}
+                                divRef={subtitleGizmoRef}
+                              />
+                            );
+                          }
                           return (
                             <HyperframesCaptionOverlay
                               config={subTemplate.hyperframes}
@@ -8339,6 +8480,19 @@ function App() {
                         );
                       })()}
 
+
+                      {/* Graphic Layers (DSL-driven independent overlays) */}
+                      {(project.graphicLayers?.length ?? 0) > 0 && project.graphicLayersVisible !== false && (
+                        <GraphicLayerOverlay
+                          layers={project.graphicLayers!}
+                          mediaTime={project.currentTime}
+                          isPlaying={project.isPlaying}
+                          containerWidth={sz.w}
+                          containerHeight={sz.h}
+                          selectedId={selectedGraphicLayerId}
+                          onSelect={setSelectedGraphicLayerId}
+                        />
+                      )}
 
                       {/* Active template indicator */}
                       {project.activeSubtitleTemplate && (
@@ -8660,6 +8814,38 @@ function App() {
                   <TemplateManager
                     currentSubtitleStyle={project.subtitleStyle}
                     activeTemplate={effectiveSubtitleTemplate}
+                    dialogueText={selectedDialogueEvent?.details}
+                    onApplyScoped={handleApplyTemplateScoped}
+                    onApplyGraphicLayer={(dsl, name) => {
+                      // Convert source video time → timeline time for the selected dialogue event
+                      const start = project.currentTime;
+                      const fallbackEnd = Math.min(start + 4, timelineViewDuration || start + 4);
+                      let layerStart = start;
+                      let layerEnd = fallbackEnd;
+                      if (selectedDialogueEvent) {
+                        const topSeg = activeSegments[activeSegments.length - 1];
+                        if (topSeg) {
+                          layerStart = topSeg.timelineStart + (selectedDialogueEvent.startTime - topSeg.startTime);
+                          layerEnd = topSeg.timelineStart + (selectedDialogueEvent.endTime - topSeg.startTime);
+                        }
+                      }
+                      const newLayer = {
+                        id: `gfx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+                        name,
+                        startTime: layerStart,
+                        endTime: layerEnd,
+                        fadeInDuration: 0.15,
+                        fadeOutDuration: 0.15,
+                        dsl,
+                        visible: true,
+                      };
+                      setProject(p => ({
+                        ...p,
+                        graphicLayers: [...(p.graphicLayers ?? []), newLayer],
+                        graphicLayersVisible: true,
+                      }));
+                      setSelectedGraphicLayerId(newLayer.id);
+                    }}
                     activeKeywordAnimation={isTemplateUnlinked ? (selectedDialogueEvent?.keywordAnimation || project.activeKeywordAnimation) : project.activeKeywordAnimation}
                     onApplyToKeywords={(anim: TextAnimation) => handleUpdateKeywordAnimation({ ...anim, scope: 'word' })}
                     onClearKeywordAnimation={() => handleUpdateKeywordAnimation(null)}
@@ -8865,7 +9051,7 @@ function App() {
                   />
                 )}
                 {activeRightTab === 'publish' && (
-                  <div className="h-full overflow-y-auto p-3">
+                  <div className="h-full overflow-y-auto p-3 space-y-3">
                     <PublishPanel
                       socialPackage={exportedShortPublishInfo?.socialPackage}
                       title="Publish Info"
@@ -8900,6 +9086,36 @@ function App() {
                         }
                       } : undefined}
                     />
+                    {exportedShortPublishInfo && (
+                      <div className="bg-[#1a1a1a] border border-[#333] rounded-lg p-4">
+                        <h4 className="text-sm font-bold text-gray-300 mb-1">External AI (ChatGPT / Claude)</h4>
+                        <p className="text-xs text-gray-500 mb-3">
+                          Copy the prompt for this clip, paste it into ChatGPT/Claude, then paste the response back here.
+                        </p>
+                        <div className="space-y-2">
+                          <button
+                            onClick={handlePublishCopySocialPrompt}
+                            disabled={isPublishCopying}
+                            className="w-full py-2 bg-[#222] border border-[#444] hover:bg-[#333] hover:border-purple-500 transition-colors disabled:opacity-50 rounded-lg text-sm font-medium"
+                          >
+                            {isPublishCopying ? 'Building prompt...' : 'Copy Social Package Prompt to Clipboard'}
+                          </button>
+                          <textarea
+                            value={publishExternalSocialJson}
+                            onChange={e => setPublishExternalSocialJson(e.target.value)}
+                            placeholder="Paste the social packages JSON response here..."
+                            className="w-full bg-[#0f0f0f] border border-[#444] rounded-lg px-3 py-2 text-xs font-mono text-purple-400 focus:border-purple-500 outline-none h-24 resize-none"
+                          />
+                          <button
+                            onClick={handlePublishImportSocialJson}
+                            disabled={!publishExternalSocialJson.trim()}
+                            className="w-full py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-bold"
+                          >
+                            Import Social Package
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -9028,6 +9244,19 @@ function App() {
                 onSwapTracks={handleSwapTracks}
                 selectedInsertTrack={selectedInsertTrack}
                 onSelectInsertTrack={(id) => setSelectedInsertTrack(prev => prev === id ? null : id)}
+                graphicLayers={project.graphicLayers ?? []}
+                graphicLayersVisible={project.graphicLayersVisible !== false}
+                selectedGraphicLayerId={selectedGraphicLayerId}
+                onToggleGraphicsVisible={() => setProject(p => ({ ...p, graphicLayersVisible: !(p.graphicLayersVisible !== false) }))}
+                onSelectGraphicLayer={setSelectedGraphicLayerId}
+                onUpdateGraphicLayer={(id, patch) => setProject(p => ({
+                  ...p,
+                  graphicLayers: (p.graphicLayers ?? []).map(g => g.id === id ? { ...g, ...patch } : g),
+                }))}
+                onDeleteGraphicLayer={(id) => {
+                  setProject(p => ({ ...p, graphicLayers: (p.graphicLayers ?? []).filter(g => g.id !== id) }));
+                  setSelectedGraphicLayerId(null);
+                }}
               />
             )}
             {activeBottomTab === 'graph' && (

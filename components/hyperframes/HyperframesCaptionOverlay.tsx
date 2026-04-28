@@ -78,6 +78,10 @@ function syntheticActiveWord(text: string, subtitleStart: number, subtitleEnd: n
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildStableSrc(config: HyperframesConfig): string {
+  // Blob/data URLs (raw-HTML mode) can't take query params — return as-is
+  if (config.compositionSrc.startsWith('blob:') || config.compositionSrc.startsWith('data:')) {
+    return config.compositionSrc;
+  }
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(config.variables)) params.set(k, String(v));
   return `${config.compositionSrc}?${params.toString()}`;
@@ -243,10 +247,21 @@ export default function HyperframesCaptionOverlay({
           doc.body.style.background = 'transparent';
           doc.documentElement.style.background = 'transparent';
         }
+        // Give up after 2s — user HTML (raw-HTML mode) may not expose __timelines
+        const probeStart = performance.now();
         probeRef.current = setInterval(() => {
           try {
             const tl = getTimeline(win);
-            if (!tl) return;
+            if (!tl) {
+              if (performance.now() - probeStart > 2000) {
+                clearInterval(probeRef.current!); probeRef.current = null;
+                isReadyRef.current = true;  // mark ready so text-injection effect doesn't loop
+                // Best-effort: still try to call __hyInit if present
+                const hyInit = (win as any).__hyInit;
+                if (typeof hyInit === 'function') { try { hyInit(pendingTextRef.current); } catch {} }
+              }
+              return;
+            }
             clearInterval(probeRef.current!); probeRef.current = null;
             isReadyRef.current = true;
 
