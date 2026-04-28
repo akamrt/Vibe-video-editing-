@@ -4044,10 +4044,24 @@ function App() {
           throw new Error(`Download failed: ${downloadRes.status} ${errText}`);
         }
 
-        try {
-          blob = await downloadRes.blob();
-        } catch (blobErr) {
-          throw new Error(`Failed to read download response (connection may have dropped): ${blobErr instanceof Error ? blobErr.message : blobErr}`);
+        // The server caches the file before streaming — once we have headers,
+        // the local cache is ready. Cancel the body (avoids loading hundreds of
+        // MB into browser memory) and load from the local cache URL instead.
+        const cachedVideoId = downloadRes.headers.get('X-Video-Id');
+        await downloadRes.body?.cancel().catch(() => {});
+
+        if (cachedVideoId) {
+          console.log('[Export Short] Loading from local cache (avoiding large blob):', cachedVideoId);
+          const localRes = await fetch(`/api/local-video?videoId=${cachedVideoId}`);
+          if (!localRes.ok) throw new Error(`Failed to load cached video: ${localRes.status}`);
+          blob = await localRes.blob();
+        } else {
+          // Fallback: read the original response body (old behaviour)
+          try {
+            blob = await downloadRes.blob();
+          } catch (blobErr) {
+            throw new Error(`Failed to read download response (connection may have dropped): ${blobErr instanceof Error ? blobErr.message : blobErr}`);
+          }
         }
       }
       console.log('[Export Short] Blob received size:', blob.size);
