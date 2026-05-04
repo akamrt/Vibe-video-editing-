@@ -804,7 +804,10 @@ function App() {
         if (vid && !vid.paused && !vid.seeking && vid.readyState > 2) {
           const calculatedTime = activeSeg.timelineStart + (vid.currentTime - activeSeg.startTime);
           // Sanity check: Ensure we don't jump wildly (e.g. loops/seeks might cause issues if not handled)
-          if (Math.abs(calculatedTime - nextTime) < 1.0) {
+          // Also never allow time to go backward — a freshly-started video after a tight cut will
+          // briefly report its preload position (seg.startTime) before advancing, which would send
+          // calculatedTime behind p.currentTime and cause the edit to loop back on itself.
+          if (Math.abs(calculatedTime - nextTime) < 1.0 && calculatedTime >= p.currentTime) {
             nextTime = calculatedTime;
           }
         }
